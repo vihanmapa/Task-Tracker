@@ -18,8 +18,8 @@ const STATUSES = ['Not Started', 'In Progress', 'Waiting', 'Blocked', 'Completed
 const KANBAN_COLS = ['Not Started', 'In Progress', 'Waiting', 'Blocked', 'Completed'];
 const PRIORITIES = ['Critical', 'High', 'Medium', 'Low'];
 
-// "today" anchor for the prototype
-const TODAY = new Date('2026-06-03T09:00:00');
+// "today" anchor — real current date (seed/demo dates are relative offsets from this)
+const TODAY = new Date();
 const d = (offsetDays, h = 17) => {
   const x = new Date(TODAY);
   x.setDate(x.getDate() + offsetDays);

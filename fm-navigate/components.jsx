@@ -43,8 +43,10 @@ function fmtDateFull(iso) {
   return new Date(iso).toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' });
 }
 function fmtRelTime(iso) {
-  const diff = daysBetween(iso, TD);
-  if (diff === 0) return 'today';
+  if (!iso) return '—';
+  // use live "now" (not the load-time anchor) so fresh events read correctly
+  const diff = daysBetween(iso, new Date());
+  if (diff <= 0) return 'just now';
   if (diff === 1) return 'yesterday';
   if (diff < 7) return `${diff}d ago`;
   if (diff < 14) return 'last week';
