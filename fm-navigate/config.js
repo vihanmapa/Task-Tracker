@@ -9,9 +9,9 @@
 window.APP_CONFIG = {
   // 'local'    → tasks live in this browser only (localStorage)
   // 'supabase' → tasks shared across everyone via Supabase
-  DATA_BACKEND: 'local',
+  DATA_BACKEND: 'supabase',
 
   // From Supabase dashboard → Project Settings → API
-  SUPABASE_URL: '',       // e.g. https://abcdefgh.supabase.co
-  SUPABASE_ANON_KEY: '',  // the "anon / public" key (safe to commit)
+  SUPABASE_URL: 'https://qxrozpuupaddohzwulun.supabase.co',
+  SUPABASE_ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF4cm96cHV1cGFkZG9oend1bHVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEwODM1ODYsImV4cCI6MjA5NjY1OTU4Nn0.yLBc02LgNw5X3pBDkLyNcsMpTx65pwzjssPCsnHu_cg',
 };
