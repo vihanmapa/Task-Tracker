@@ -1,7 +1,7 @@
 /* ============================================================
    FM Navigate — App shell, routing, state, tweaks
    ============================================================ */
-const { useState: useStateA, useEffect: useEffectA, useMemo: useMemoA, useCallback: useCallbackA } = React;
+const { useState: useStateA, useEffect: useEffectA, useMemo: useMemoA, useCallback: useCallbackA, useRef: useRefA } = React;
 
 const ACCENTS = {
   Blue:   { a: 'oklch(0.50 0.20 264)', h: 'oklch(0.45 0.21 264)', soft: 'oklch(0.95 0.04 264)', ring: 'oklch(0.50 0.20 264 / 0.35)',
@@ -35,11 +35,24 @@ function App() {
   // ---- data ----
   // Starts EMPTY (blank slate). Saved tasks load if present.
   // The demo seed is restorable on demand from Settings → "Load demo data".
+  const ds = window.dataService;
+  const shared = ds && ds.backend === 'supabase';
+
   const [tasks, setTasks] = useStateA(() => {
     try { const s = localStorage.getItem('fm_tasks'); if (s) return JSON.parse(s); } catch (_) {}
     return [];
   });
-  useEffectA(() => { try { localStorage.setItem('fm_tasks', JSON.stringify(tasks)); } catch (_) {} }, [tasks]);
+  // When applying a remote (load/realtime) change we must NOT echo it back.
+  const skipSaveRef = useRefA(true); // skip the very first effect run (hydration)
+
+  // Persist: always mirror locally; push to Supabase only when editing is unlocked.
+  useEffectA(() => {
+    try { localStorage.setItem('fm_tasks', JSON.stringify(tasks)); } catch (_) {}
+    if (skipSaveRef.current) { skipSaveRef.current = false; return; }
+    if (shared && editUnlocked) {
+      ds.saveTasks(tasks).then(r => { if (!r.ok) console.warn('[app] remote save failed', r); });
+    }
+  }, [tasks]);
 
   // ---- active persona (who is signed in) ----
   const [currentUser, setCurrentUser] = useStateA(() => {
@@ -47,7 +60,29 @@ function App() {
     return 'richard';
   });
   useEffectA(() => { try { localStorage.setItem('fm_user', currentUser); } catch (_) {} }, [currentUser]);
-  const canEdit = currentUser === 'vihan'; // PM can mutate; Founder is read-only
+
+  // Editing is unlocked by the shared password (local backend = always allowed).
+  const [editUnlocked, setEditUnlocked] = useStateA(() => !shared);
+  const canEdit = editUnlocked && currentUser === 'vihan'; // PM can mutate; Founder is read-only
+
+  // Initial remote load + realtime subscription (Supabase backend only).
+  useEffectA(() => {
+    if (!shared) return;
+    let unsub = () => {};
+    ds.loadTasks().then(remote => { skipSaveRef.current = true; setTasks(remote); });
+    unsub = ds.subscribe(incoming => { skipSaveRef.current = true; setTasks(incoming); });
+    return () => unsub();
+  }, []);
+
+  // Prompt for the shared password, verify server-side, then unlock PM mode.
+  const unlockEdit = useCallbackA(async () => {
+    if (!shared) { setEditUnlocked(true); setCurrentUser('vihan'); return; }
+    const pw = window.prompt('Enter the edit password to unlock PM (edit) mode:');
+    if (pw == null) return;
+    const ok = await ds.verifyPassword(pw);
+    if (ok) { ds.setPassword(pw); setEditUnlocked(true); setCurrentUser('vihan'); }
+    else window.alert('Wrong password.');
+  }, [shared]);
 
   // ---- routing ----
   const [route, setRoute] = useStateA('dashboard');
@@ -211,7 +246,11 @@ function App() {
           const u = window.USERS[uid];
           const me = currentUser === uid;
           return (
-            <button key={uid} className="team-row" onClick={() => { setCurrentUser(uid); setComposer(false); }}
+            <button key={uid} className="team-row" onClick={() => {
+                setComposer(false);
+                if (uid === 'vihan' && !canEdit) { unlockEdit(); }
+                else { setCurrentUser(uid); }
+              }}
               style={{ width: '100%', textAlign: 'left', border: me ? '1px solid var(--accent)' : '1px solid transparent', background: me ? 'var(--accent-soft)' : 'transparent' }}
               title={`View as ${u.name}`}>
               <window.Avatar user={uid} size={30} />

@@ -33,6 +33,32 @@ python3 serve.py        # serves on http://localhost:4173
 
 Or use any static server (e.g. `python3 -m http.server` in `fm-navigate/`).
 
+## Shared data (Supabase) — optional
+
+By default `DATA_BACKEND` is `local`: tasks live in each browser. To share one
+task list across everyone (live-synced), switch to the Supabase backend:
+
+1. **Create the table** — Supabase → SQL Editor → run [`supabase/schema.sql`](supabase/schema.sql).
+   Makes a `workspace` table (anon can *read*, not write) and turns on realtime.
+2. **Deploy the write function**
+   ```bash
+   supabase functions deploy tasks-mutate --no-verify-jwt
+   supabase secrets set EDIT_PASSWORD='your-shared-passphrase'
+   ```
+   (`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically.)
+3. **Point the client at the project** — in [`fm-navigate/config.js`](fm-navigate/config.js):
+   - `DATA_BACKEND: 'supabase'`
+   - `SUPABASE_URL` + `SUPABASE_ANON_KEY` from Project Settings → API
+   (The anon key is public by design — safe to commit. Never put the
+   service_role key or the password here.)
+4. **Push** — Pages redeploys; everyone now sees the same tasks.
+
+**How editing is gated:** reads use the public anon key. Every write goes
+through the `tasks-mutate` Edge Function, which checks `EDIT_PASSWORD`
+server-side before touching the DB. In the app, switching to the PM (Vihan)
+persona prompts for that password to unlock editing. Founder/read-only never
+needs it. Anyone with the link can *view* tasks; only the password unlocks edits.
+
 ## AI
 
 All three AI features run **locally** — no cloud, no keys:
