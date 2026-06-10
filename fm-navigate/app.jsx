@@ -199,6 +199,51 @@ function App() {
     }));
   }, [canEdit, currentUser]);
 
+  // edit task fields — diff each field, log the change, keep it revertable
+  const EDIT_LABELS = { title: 'Title', description: 'Description', successCriteria: 'Success criteria', dependencies: 'Dependencies', risk: 'Risk', priority: 'Priority', effort: 'Effort', category: 'Category' };
+  const sameVal = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+  const editTask = useCallbackA((id, changes) => {
+    if (!canEdit) return;
+    const now = new Date().toISOString();
+    setTasks(ts => ts.map(t => {
+      if (t.id !== id) return t;
+      const next = { ...t };
+      const edits = [...(t.edits || [])];
+      const act = [...(t.activity || [])];
+      let changed = false;
+      Object.keys(changes).forEach(field => {
+        if (!(field in EDIT_LABELS)) return;
+        const from = t[field];
+        const to = changes[field];
+        if (sameVal(from, to)) return;
+        changed = true;
+        const eid = 'ed' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+        edits.push({ id: eid, field, label: EDIT_LABELS[field], from: from ?? null, to: to ?? null, userId: currentUser, at: now, reverted: false });
+        act.push({ type: 'edit', userId: currentUser, at: now, detail: EDIT_LABELS[field] });
+        next[field] = to;
+      });
+      if (!changed) return t;
+      return { ...next, edits, activity: act, updatedAt: now };
+    }));
+  }, [canEdit, currentUser]);
+
+  // revert one logged change back to its previous value (the revert is itself logged)
+  const revertEdit = useCallbackA((id, editId) => {
+    if (!canEdit) return;
+    const now = new Date().toISOString();
+    setTasks(ts => ts.map(t => {
+      if (t.id !== id) return t;
+      const target = (t.edits || []).find(e => e.id === editId);
+      if (!target || target.reverted) return t;
+      const edits = (t.edits || []).map(e => e.id === editId ? { ...e, reverted: true } : e);
+      const revId = 'ed' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      edits.push({ id: revId, field: target.field, label: target.label, from: t[target.field] ?? null, to: target.from ?? null, userId: currentUser, at: now, reverted: false, isRevert: true });
+      const act = [...(t.activity || []), { type: 'revert', userId: currentUser, at: now, detail: target.label }];
+      return { ...t, [target.field]: target.from, edits, activity: act, updatedAt: now };
+    }));
+  }, [canEdit, currentUser]);
+
   const goAsk = useCallbackA((q) => { if (typeof q === 'string') setAskQ(q); setRoute('ask'); }, []);
 
   const loadDemo = () => { if (confirm('Load the demo FM Navigate task set? This replaces your current tasks.')) { setTasks(window.SEED_TASKS); setSelected(null); setRoute('dashboard'); } };
@@ -288,7 +333,7 @@ function App() {
         )}
         {route === 'detail' && (
           <window.TaskDetail task={selectedTask} onClose={() => { setRoute('tasks'); setSelected(null); }}
-            onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onUpdate={() => {}} canEdit={canEdit} currentUser={currentUser} />
+            onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditTask={editTask} onRevertEdit={revertEdit} onUpdate={() => {}} canEdit={canEdit} currentUser={currentUser} />
         )}
         {route === 'summary' && <window.WeeklySummary tasks={tasks} onOpen={openTask} />}
         {route === 'ask' && <window.AskAI tasks={tasks} initialQuestion={askQ} clearInitial={() => setAskQ(null)} />}

@@ -397,12 +397,93 @@ function ProgressLog({ task, onLog, canEdit, currentUser }) {
   );
 }
 
+/* ---------------- Editable details panel ---------------- */
+function TaskEditPanel({ task, onSave, onCancel }) {
+  const I = window.I;
+  const [f, setF] = useStateT({
+    title: task.title || '',
+    description: task.description || '',
+    successCriteria: task.successCriteria || '',
+    dependencies: (task.dependencies || []).join('\n'),
+    risk: task.risk || '',
+    priority: task.priority || 'Medium',
+    effort: task.effort || 'M',
+    category: task.category || 'Technical',
+  });
+  const set = (k, v) => setF(s => ({ ...s, [k]: v }));
+  const Lbl = ({ children }) => <label className="field-label" style={{ marginBottom: 5, marginTop: 14, display: 'block' }}>{children}</label>;
+
+  const save = () => {
+    onSave({
+      title: f.title.trim(),
+      description: f.description.trim(),
+      successCriteria: f.successCriteria.trim(),
+      dependencies: f.dependencies.split('\n').map(s => s.trim()).filter(Boolean),
+      risk: f.risk.trim(),
+      priority: f.priority,
+      effort: f.effort,
+      category: f.category,
+    });
+  };
+
+  return (
+    <div className="card card-pad mb16">
+      <div className="row between center mb4">
+        <div className="section-eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.edit size={13} /> Edit details</div>
+      </div>
+      <Lbl>Title</Lbl>
+      <input className="input" value={f.title} onChange={e => set('title', e.target.value)} />
+      <Lbl>Description</Lbl>
+      <textarea className="ai-textarea" style={{ minHeight: 90, fontSize: 13.5 }} value={f.description} onChange={e => set('description', e.target.value)} />
+      <Lbl>Success criteria</Lbl>
+      <textarea className="ai-textarea" style={{ minHeight: 60, fontSize: 13.5 }} value={f.successCriteria} onChange={e => set('successCriteria', e.target.value)} />
+      <Lbl>Dependencies <span className="faint" style={{ fontWeight: 400, textTransform: 'none' }}>· one per line</span></Lbl>
+      <textarea className="ai-textarea" style={{ minHeight: 70, fontSize: 13.5 }} value={f.dependencies} onChange={e => set('dependencies', e.target.value)} />
+      <Lbl>Risk</Lbl>
+      <textarea className="ai-textarea" style={{ minHeight: 60, fontSize: 13.5 }} value={f.risk} onChange={e => set('risk', e.target.value)} />
+      <div className="row gap12" style={{ flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 140 }}>
+          <Lbl>Priority</Lbl>
+          <select className="input" value={f.priority} onChange={e => set('priority', e.target.value)}>
+            {window.PRIORITIES.map(p => <option key={p}>{p}</option>)}
+          </select>
+        </div>
+        <div style={{ flex: 1, minWidth: 140 }}>
+          <Lbl>Effort</Lbl>
+          <select className="input" value={f.effort} onChange={e => set('effort', e.target.value)}>
+            {Object.keys(window.EFFORT_LABEL).map(k => <option key={k} value={k}>{window.EFFORT_LABEL[k]}</option>)}
+          </select>
+        </div>
+        <div style={{ flex: 1, minWidth: 140 }}>
+          <Lbl>Category</Lbl>
+          <select className="input" value={f.category} onChange={e => set('category', e.target.value)}>
+            {window.CATEGORIES.map(c => <option key={c}>{c}</option>)}
+          </select>
+        </div>
+      </div>
+      <div className="row gap8 mt16">
+        <button className="btn btn-primary btn-sm" onClick={save}><I.check size={13} /> Save changes</button>
+        <button className="btn btn-subtle btn-sm" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Task detail ---------------- */
-function TaskDetail({ task, onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, canEdit = true, currentUser = 'richard' }) {
+function TaskDetail({ task, onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditTask, onRevertEdit, canEdit = true, currentUser = 'richard' }) {
   const I = window.I;
   const [comment, setComment] = useStateT('');
+  const [editing, setEditing] = useStateT(false);
   if (!task) return null;
   const owner = window.USERS[task.ownerId];
+
+  const fmtVal = (field, v) => {
+    if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) return '—';
+    if (Array.isArray(v)) return v.join('; ');
+    if (field === 'effort') return window.EFFORT_LABEL[v] || v;
+    return String(v);
+  };
+  const edits = [...(task.edits || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
 
   const submitComment = () => {
     if (!comment.trim()) return;
@@ -417,6 +498,8 @@ function TaskDetail({ task, onClose, onUpdate, onAddComment, onToggleDone, onLog
     if (a.type === 'comment') return 'commented';
     if (a.type === 'progress') return `logged progress · ${a.detail}`;
     if (a.type === 'status') return `changed status · ${a.detail}`;
+    if (a.type === 'edit') return `edited ${a.detail}`;
+    if (a.type === 'revert') return `reverted ${a.detail}`;
     return a.type;
   };
 
@@ -437,42 +520,87 @@ function TaskDetail({ task, onClose, onUpdate, onAddComment, onToggleDone, onLog
               <window.StatusPill status={task.status} />
               <window.PriorityTag priority={task.priority} />
               <window.CatChip category={task.category} />
+              <span className="grow" />
+              {canEdit && !editing && (
+                <button className="btn btn-subtle btn-sm" onClick={() => setEditing(true)}><I.edit size={13} /> Edit</button>
+              )}
             </div>
-            <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: '-0.02em', lineHeight: 1.2, marginBottom: 18 }}>{task.title}</h1>
 
-            <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.edit size={13} /> Original description</div>
-            <div className="desc-block mb16">{task.description}</div>
-
-            {task.successCriteria && (
+            {editing ? (
+              <TaskEditPanel task={task}
+                onSave={(changes) => { onEditTask && onEditTask(task.id, changes); setEditing(false); }}
+                onCancel={() => setEditing(false)} />
+            ) : (
               <>
-                <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.target size={13} /> Success criteria</div>
-                <div className="crit-item" style={{ background: 'var(--st-completed-bg)', borderRadius: 'var(--r-md)', padding: '11px 14px', marginBottom: 16 }}>
-                  <span style={{ color: 'var(--st-completed)', marginTop: 1 }}><I.check size={16} /></span>
-                  <span>{task.successCriteria}</span>
-                </div>
-              </>
-            )}
+                <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: '-0.02em', lineHeight: 1.2, marginBottom: 18 }}>{task.title}</h1>
 
-            {task.dependencies?.length > 0 && (
-              <>
-                <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.link size={13} /> Dependencies</div>
-                <div className="mb16">
-                  {task.dependencies.map((dep, i) => (
-                    <div key={i} className="crit-item">
-                      <span className="faint" style={{ marginTop: 2 }}><I.arrowR size={14} /></span>
-                      <span>{dep}</span>
+                <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.edit size={13} /> Description</div>
+                <div className="desc-block mb16">{task.description}</div>
+
+                {task.successCriteria && (
+                  <>
+                    <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.target size={13} /> Success criteria</div>
+                    <div className="crit-item" style={{ background: 'var(--st-completed-bg)', borderRadius: 'var(--r-md)', padding: '11px 14px', marginBottom: 16 }}>
+                      <span style={{ color: 'var(--st-completed)', marginTop: 1 }}><I.check size={16} /></span>
+                      <span>{task.successCriteria}</span>
                     </div>
-                  ))}
-                </div>
+                  </>
+                )}
+
+                {task.dependencies?.length > 0 && (
+                  <>
+                    <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.link size={13} /> Dependencies</div>
+                    <div className="mb16">
+                      {task.dependencies.map((dep, i) => (
+                        <div key={i} className="crit-item">
+                          <span className="faint" style={{ marginTop: 2 }}><I.arrowR size={14} /></span>
+                          <span>{dep}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+
+                {task.risk && (
+                  <>
+                    <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.alert size={13} /> Risk</div>
+                    <div className="crit-item" style={{ background: 'var(--st-blocked-bg)', borderRadius: 'var(--r-md)', padding: '11px 14px', marginBottom: 16 }}>
+                      <span style={{ color: 'var(--st-blocked)', marginTop: 1 }}><I.alert size={16} /></span>
+                      <span>{task.risk}</span>
+                    </div>
+                  </>
+                )}
               </>
             )}
 
-            {task.risk && (
+            {/* change history */}
+            {edits.length > 0 && (
               <>
-                <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.alert size={13} /> Risk</div>
-                <div className="crit-item" style={{ background: 'var(--st-blocked-bg)', borderRadius: 'var(--r-md)', padding: '11px 14px', marginBottom: 16 }}>
-                  <span style={{ color: 'var(--st-blocked)', marginTop: 1 }}><I.alert size={16} /></span>
-                  <span>{task.risk}</span>
+                <div className="section-eyebrow mt24 mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.clock size={13} /> Change history · {edits.length}</div>
+                <div className="mb8">
+                  {edits.map(e => {
+                    const u = window.USERS[e.userId];
+                    return (
+                      <div key={e.id} className="comment" style={{ alignItems: 'flex-start' }}>
+                        <div className="grow" style={{ minWidth: 0 }}>
+                          <div className="comment-meta row gap8 center" style={{ flexWrap: 'wrap' }}>
+                            <b style={{ color: 'var(--text)' }}>{e.label}</b>
+                            {e.isRevert && <span className="chip">revert</span>}
+                            {e.reverted && <span className="chip">reverted</span>}
+                            <span>· {u?.name || 'Someone'} · {window.fmtRelTime(e.at)}</span>
+                          </div>
+                          <div className="comment-body" style={{ fontSize: 13, wordBreak: 'break-word' }}>
+                            <span style={{ textDecoration: 'line-through', color: 'var(--muted)' }}>{fmtVal(e.field, e.from)}</span>
+                            <span className="faint" style={{ margin: '0 6px' }}>→</span>
+                            <span>{fmtVal(e.field, e.to)}</span>
+                          </div>
+                        </div>
+                        {canEdit && !e.reverted && (
+                          <button className="btn btn-subtle btn-sm" onClick={() => onRevertEdit && onRevertEdit(task.id, e.id)} title="Revert this change" style={{ flexShrink: 0 }}><I.refresh size={12} /> Revert</button>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </>
             )}
