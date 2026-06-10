@@ -1,0 +1,342 @@
+/* ============================================================
+   FM Navigate — App shell, routing, state, tweaks
+   ============================================================ */
+const { useState: useStateA, useEffect: useEffectA, useMemo: useMemoA, useCallback: useCallbackA } = React;
+
+const ACCENTS = {
+  Blue:   { a: 'oklch(0.50 0.20 264)', h: 'oklch(0.45 0.21 264)', soft: 'oklch(0.95 0.04 264)', ring: 'oklch(0.50 0.20 264 / 0.35)',
+            da: 'oklch(0.64 0.17 264)', dh: 'oklch(0.70 0.16 264)', dsoft: 'oklch(0.32 0.08 264)', dring: 'oklch(0.64 0.17 264 / 0.40)' },
+  Teal:   { a: 'oklch(0.55 0.12 195)', h: 'oklch(0.50 0.13 195)', soft: 'oklch(0.95 0.03 195)', ring: 'oklch(0.55 0.12 195 / 0.35)',
+            da: 'oklch(0.68 0.12 195)', dh: 'oklch(0.74 0.12 195)', dsoft: 'oklch(0.32 0.06 195)', dring: 'oklch(0.68 0.12 195 / 0.40)' },
+  Violet: { a: 'oklch(0.52 0.20 300)', h: 'oklch(0.47 0.21 300)', soft: 'oklch(0.95 0.04 300)', ring: 'oklch(0.52 0.20 300 / 0.35)',
+            da: 'oklch(0.66 0.17 300)', dh: 'oklch(0.72 0.16 300)', dsoft: 'oklch(0.33 0.09 300)', dring: 'oklch(0.66 0.17 300 / 0.40)' },
+};
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "accent": "Blue",
+  "density": "regular",
+  "uiScale": 100,
+  "sparklines": true,
+  "dark": false
+}/*EDITMODE-END*/;
+
+const NAV = [
+  { key: 'dashboard', label: 'Dashboard', icon: 'grid' },
+  { key: 'tasks',     label: 'Tasks',     icon: 'list' },
+  { key: 'summary',   label: 'Weekly Summary', icon: 'summary' },
+  { key: 'ask',       label: 'Ask AI',    icon: 'spark' },
+  { key: 'settings',  label: 'Settings',  icon: 'settings' },
+];
+
+function App() {
+  const I = window.I;
+  const [tweaks, setTweak] = window.useTweaks(TWEAK_DEFAULTS);
+
+  // ---- data ----
+  // Starts EMPTY (blank slate). Saved tasks load if present.
+  // The demo seed is restorable on demand from Settings → "Load demo data".
+  const [tasks, setTasks] = useStateA(() => {
+    try { const s = localStorage.getItem('fm_tasks'); if (s) return JSON.parse(s); } catch (_) {}
+    return [];
+  });
+  useEffectA(() => { try { localStorage.setItem('fm_tasks', JSON.stringify(tasks)); } catch (_) {} }, [tasks]);
+
+  // ---- active persona (who is signed in) ----
+  const [currentUser, setCurrentUser] = useStateA(() => {
+    try { const s = localStorage.getItem('fm_user'); if (s === 'vihan' || s === 'richard') return s; } catch (_) {}
+    return 'richard';
+  });
+  useEffectA(() => { try { localStorage.setItem('fm_user', currentUser); } catch (_) {} }, [currentUser]);
+  const canEdit = currentUser === 'vihan'; // PM can mutate; Founder is read-only
+
+  // ---- routing ----
+  const [route, setRoute] = useStateA('dashboard');
+  const [taskView, setTaskView] = useStateA('list');
+  const [selected, setSelected] = useStateA(null);
+  const [composer, setComposer] = useStateA(false);
+  const [askQ, setAskQ] = useStateA(null);
+
+  // ---- theme ----
+  useEffectA(() => {
+    document.documentElement.setAttribute('data-theme', tweaks.dark ? 'dark' : 'light');
+  }, [tweaks.dark]);
+
+  // ---- accent + density + scale ----
+  useEffectA(() => {
+    const root = document.documentElement;
+    const c = ACCENTS[tweaks.accent] || ACCENTS.Blue;
+    const dark = tweaks.dark;
+    root.style.setProperty('--accent', dark ? c.da : c.a);
+    root.style.setProperty('--accent-hover', dark ? c.dh : c.h);
+    root.style.setProperty('--accent-soft', dark ? c.dsoft : c.soft);
+    root.style.setProperty('--accent-ring', dark ? c.dring : c.ring);
+    root.setAttribute('data-density', tweaks.density);
+    root.style.fontSize = (14 * tweaks.uiScale / 100) + 'px';
+  }, [tweaks.accent, tweaks.density, tweaks.uiScale, tweaks.dark]);
+
+  // ---- actions ----
+  const openTask = useCallbackA((id) => { setSelected(id); setRoute('detail'); }, []);
+
+  const moveTask = useCallbackA((id, status) => {
+    if (!canEdit) return;
+    setTasks(ts => ts.map(t => {
+      if (t.id !== id || t.status === status) return t;
+      const act = [...(t.activity || []), { type: status === 'Completed' ? 'completed' : 'status', userId: currentUser, at: new Date().toISOString(), detail: `${t.status} → ${status}` }];
+      return { ...t, status, updatedAt: new Date().toISOString(),
+        completedAt: status === 'Completed' ? new Date().toISOString() : t.completedAt,
+        progress: status === 'Completed' ? 100 : t.progress, activity: act };
+    }));
+  }, [canEdit, currentUser]);
+
+  const toggleDone = useCallbackA((id) => {
+    if (!canEdit) return;
+    setTasks(ts => ts.map(t => {
+      if (t.id !== id) return t;
+      const done = t.status === 'Completed';
+      const status = done ? 'In Progress' : 'Completed';
+      const act = [...(t.activity || []), { type: done ? 'status' : 'completed', userId: currentUser, at: new Date().toISOString(), detail: done ? 'Completed → In Progress' : undefined }];
+      return { ...t, status, updatedAt: new Date().toISOString(), completedAt: done ? null : new Date().toISOString(), progress: done ? 75 : 100, activity: act };
+    }));
+  }, [canEdit, currentUser]);
+
+  const addComment = useCallbackA((id, text) => {
+    setTasks(ts => ts.map(t => t.id === id ? {
+      ...t,
+      comments: [...(t.comments || []), { id: 'c' + Date.now(), userId: currentUser, comment: text, createdAt: new Date().toISOString() }],
+      activity: [...(t.activity || []), { type: 'comment', userId: currentUser, at: new Date().toISOString() }],
+      updatedAt: new Date().toISOString(),
+    } : t));
+  }, [currentUser]);
+
+  // shared: build a full task record from extracted/edited fields
+  const buildTask = useCallbackA((data) => {
+    const now = new Date().toISOString();
+    return {
+      id: window.nid(),
+      title: data.title, description: data.description,
+      priority: data.priority, category: data.category, status: data.status || 'Not Started',
+      dueDate: data.dueDate || null, dependencies: data.dependencies || [],
+      successCriteria: data.successCriteria || '', risk: data.risk || '', effort: data.effort || 'M',
+      ownerId: currentUser, progress: data.status === 'Completed' ? 100 : data.status === 'In Progress' ? 10 : 0,
+      createdAt: now, updatedAt: now, completedAt: null,
+      comments: [], progressLog: [], activity: [{ type: 'created', userId: currentUser, at: now }],
+    };
+  }, [currentUser]);
+
+  const createTask = useCallbackA((data) => {
+    if (!canEdit) return;
+    const task = buildTask(data);
+    setTasks(ts => [task, ...ts]);
+    setComposer(false);
+    setSelected(task.id); setRoute('detail');
+  }, [canEdit, buildTask]);
+
+  // batch create — add many tasks at once, then land on the Tasks list
+  const createTasks = useCallbackA((rows) => {
+    if (!canEdit || !rows || !rows.length) return;
+    const built = rows.map(buildTask);
+    setTasks(ts => [...built, ...ts]);
+    setComposer(false);
+    setSelected(null); setRoute('tasks');
+  }, [canEdit, buildTask]);
+
+  // log a progress update: status + % complete + note + evidence (link or attached file)
+  const logProgress = useCallbackA((id, entry) => {
+    if (!canEdit) return;
+    const now = new Date().toISOString();
+    setTasks(ts => ts.map(t => {
+      if (t.id !== id) return t;
+      // status: from the form if given, else keep current
+      let status = entry.status || t.status;
+      // Completed always means 100% and can't go lower while completed
+      let pct = Math.max(0, Math.min(100, Math.round(entry.percent)));
+      if (status === 'Completed') pct = 100;
+      else if (pct >= 100) pct = 99; // not-completed can't sit at 100
+      const files = entry.files || (entry.fileName ? [{ name: entry.fileName, data: entry.fileData, type: '' }] : []);
+      const rec = { id: 'pl' + Date.now(), percent: pct, status, note: entry.note || '', links: entry.links || (entry.link ? [entry.link] : []), files, userId: currentUser, at: now };
+      const log = [...(t.progressLog || []), rec];
+      const act = [...(t.activity || [])];
+      if (status !== t.status) act.push({ type: status === 'Completed' ? 'completed' : 'status', userId: currentUser, at: now, detail: `${t.status} → ${status}` });
+      act.push({ type: 'progress', userId: currentUser, at: now, detail: `${pct}%` });
+      return { ...t, progress: pct, progressLog: log, status, updatedAt: now,
+        completedAt: status === 'Completed' ? now : (status !== 'Completed' ? null : t.completedAt),
+        activity: act };
+    }));
+  }, [canEdit, currentUser]);
+
+  const goAsk = useCallbackA((q) => { if (typeof q === 'string') setAskQ(q); setRoute('ask'); }, []);
+
+  const loadDemo = () => { if (confirm('Load the demo FM Navigate task set? This replaces your current tasks.')) { setTasks(window.SEED_TASKS); setSelected(null); setRoute('dashboard'); } };
+  const clearAll = () => { if (confirm('Clear ALL tasks and start from a blank slate? This cannot be undone.')) { setTasks([]); setSelected(null); setRoute('dashboard'); } };
+
+  // ---- counts for nav ----
+  const counts = useMemoA(() => ({
+    tasks: tasks.filter(t => !['Completed','Cancelled'].includes(t.status)).length,
+    blocked: tasks.filter(t => t.status === 'Blocked').length,
+  }), [tasks]);
+
+  const selectedTask = useMemoA(() => tasks.find(t => t.id === selected), [tasks, selected]);
+
+  const titleMap = { dashboard: 'Dashboard', tasks: 'Tasks', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
+
+  return (
+    <div className="app">
+      {/* ---- sidebar ---- */}
+      <aside className="sidebar">
+        <div className="brand">
+          <div className="brand-mark"><I.target size={18} /></div>
+          <div>
+            <div className="brand-name">FM Navigate</div>
+            <div className="brand-sub">EXECUTION HUB</div>
+          </div>
+        </div>
+
+        {NAV.map(n => {
+          const Icon = I[n.icon];
+          const active = route === n.key || (route === 'detail' && n.key === 'tasks');
+          const count = n.key === 'tasks' ? counts.tasks : null;
+          return (
+            <button key={n.key} className={`nav-item ${active ? 'active' : ''}`} onClick={() => { setRoute(n.key); setSelected(null); }}>
+              <span className="nav-ico"><Icon size={17} /></span>
+              {n.label}
+              {count != null && <span className={`nav-count ${counts.blocked && n.key === 'tasks' ? 'alert' : ''}`}>{count}</span>}
+            </button>
+          );
+        })}
+
+        <div className="sidebar-spacer" />
+
+        <div className="nav-label">Signed in as</div>
+        {['richard', 'vihan'].map(uid => {
+          const u = window.USERS[uid];
+          const me = currentUser === uid;
+          return (
+            <button key={uid} className="team-row" onClick={() => { setCurrentUser(uid); setComposer(false); }}
+              style={{ width: '100%', textAlign: 'left', border: me ? '1px solid var(--accent)' : '1px solid transparent', background: me ? 'var(--accent-soft)' : 'transparent' }}
+              title={`View as ${u.name}`}>
+              <window.Avatar user={uid} size={30} />
+              <div className="grow"><div className="team-name">{u.name}</div><div className="team-role">{u.role}{me ? ' · You' : ''}</div></div>
+              {me && <span className="nav-ico" style={{ color: 'var(--accent)' }}><I.check size={15} /></span>}
+            </button>
+          );
+        })}
+      </aside>
+
+      {/* ---- main ---- */}
+      <div className="main">
+        <header className="topbar">
+          <span className="topbar-title">{titleMap[route]}</span>
+          {route === 'detail' && <span className="topbar-crumb">· {selectedTask?.id}</span>}
+          <span className="grow" />
+          {canEdit
+            ? <button className="btn btn-primary btn-sm" onClick={() => setComposer(true)}><I.spark size={14} /> New task</button>
+            : <span className="chip" title="Founder has read-only access">Read-only view</span>}
+          <button className="icon-btn" onClick={() => setTweak('dark', !tweaks.dark)} title="Toggle theme">
+            {tweaks.dark ? <I.sun size={18} /> : <I.moon size={18} />}
+          </button>
+          <button className="icon-btn" title="Notifications"><I.bell size={18} /></button>
+          <window.Avatar user={currentUser} size={32} />
+        </header>
+
+        {route === 'dashboard' && (
+          <div className="scroll-area">
+            <window.Dashboard tasks={tasks} onOpen={openTask} onCompose={() => setComposer(true)} onAsk={goAsk} onNav={setRoute} density={tweaks.density} canEdit={canEdit} currentUser={currentUser} />
+          </div>
+        )}
+        {route === 'tasks' && (
+          <window.TasksScreen tasks={tasks} view={taskView} setView={setTaskView} onOpen={openTask}
+            onCompose={() => setComposer(true)} onMove={moveTask} onToggleDone={toggleDone} canEdit={canEdit} />
+        )}
+        {route === 'detail' && (
+          <window.TaskDetail task={selectedTask} onClose={() => { setRoute('tasks'); setSelected(null); }}
+            onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onUpdate={() => {}} canEdit={canEdit} currentUser={currentUser} />
+        )}
+        {route === 'summary' && <window.WeeklySummary tasks={tasks} onOpen={openTask} />}
+        {route === 'ask' && <window.AskAI tasks={tasks} initialQuestion={askQ} clearInitial={() => setAskQ(null)} />}
+        {route === 'settings' && <Settings tweaks={tweaks} setTweak={setTweak} onLoadDemo={loadDemo} onClearAll={clearAll} taskCount={tasks.length} />}
+      </div>
+
+      {composer && <window.AIComposer onClose={() => setComposer(false)} onCreate={createTask} onCreateMany={createTasks} />}
+
+      {/* ---- Tweaks panel ---- */}
+      <window.TweaksPanel>
+        <window.TweakSection label="Brand" />
+        <window.TweakColor label="Accent" value={ACCENTS[tweaks.accent].a}
+          options={[ACCENTS.Blue.a, ACCENTS.Teal.a, ACCENTS.Violet.a]}
+          onChange={(v) => setTweak('accent', v === ACCENTS.Teal.a ? 'Teal' : v === ACCENTS.Violet.a ? 'Violet' : 'Blue')} />
+        <window.TweakToggle label="Dark mode" value={tweaks.dark} onChange={(v) => setTweak('dark', v)} />
+        <window.TweakSection label="Layout" />
+        <window.TweakRadio label="Density" value={tweaks.density} options={['compact', 'regular', 'comfy']} onChange={(v) => setTweak('density', v)} />
+        <window.TweakSlider label="UI scale" value={tweaks.uiScale} min={90} max={115} step={5} unit="%" onChange={(v) => setTweak('uiScale', v)} />
+        <window.TweakToggle label="KPI sparklines" value={tweaks.sparklines} onChange={(v) => setTweak('sparklines', v)} />
+      </window.TweaksPanel>
+    </div>
+  );
+}
+
+/* ---------------- Settings ---------------- */
+function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, taskCount = 0 }) {
+  const I = window.I;
+  const Row = ({ k, children }) => (
+    <div className="meta-row" style={{ padding: '14px 0' }}><span className="meta-k" style={{ fontSize: 13 }}>{k}</span>{children}</div>
+  );
+  return (
+    <div className="scroll-area fade-in">
+      <div className="page-pad" style={{ maxWidth: 720 }}>
+        <div className="dash-greet" style={{ fontSize: 23, marginBottom: 4 }}>Settings</div>
+        <div className="dash-date mb16">Workspace · FM Navigate Execution Hub</div>
+
+        <div className="card card-pad mb16">
+          <div className="section-eyebrow mb12">Appearance</div>
+          <Row k="Theme">
+            <div className="seg">
+              <button className={!tweaks.dark ? 'active' : ''} onClick={() => setTweak('dark', false)}><I.sun size={14} /> Light</button>
+              <button className={tweaks.dark ? 'active' : ''} onClick={() => setTweak('dark', true)}><I.moon size={14} /> Dark</button>
+            </div>
+          </Row>
+          <Row k="Accent color">
+            <div className="row gap8">
+              {Object.entries(ACCENTS).map(([name, c]) => (
+                <button key={name} onClick={() => setTweak('accent', name)}
+                  style={{ width: 26, height: 26, borderRadius: 99, background: c.a, border: tweaks.accent === name ? '2px solid var(--text)' : '2px solid transparent', outline: '1px solid var(--border)' }} title={name} />
+              ))}
+            </div>
+          </Row>
+          <Row k="Density">
+            <div className="seg">
+              {['compact', 'regular', 'comfy'].map(dn => (
+                <button key={dn} className={tweaks.density === dn ? 'active' : ''} onClick={() => setTweak('density', dn)} style={{ textTransform: 'capitalize' }}>{dn}</button>
+              ))}
+            </div>
+          </Row>
+        </div>
+
+        <div className="card card-pad mb16">
+          <div className="section-eyebrow mb12">Team & roles</div>
+          {[['richard','Founder — full visibility, dashboards, Ask AI'],['vihan','Product Manager — create, update & complete tasks'],['isuru','Eng Lead — referenced in dependencies']].map(([id, desc]) => (
+            <div key={id} className="row gap10 center" style={{ padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
+              <window.Avatar user={id} size={32} />
+              <div className="grow"><div style={{ fontWeight: 600, fontSize: 13.5 }}>{window.USERS[id].name}</div><div className="muted" style={{ fontSize: 12 }}>{desc}</div></div>
+              <span className="chip">{window.USERS[id].role}</span>
+            </div>
+          ))}
+        </div>
+
+        <div className="card card-pad">
+          <div className="section-eyebrow mb12">Data · {taskCount} task{taskCount === 1 ? '' : 's'}</div>
+          <div className="row between center" style={{ paddingBottom: 12, borderBottom: '1px solid var(--border)' }}>
+            <div><div style={{ fontWeight: 600, fontSize: 13.5 }}>Load demo data</div><div className="muted" style={{ fontSize: 12 }}>Replace current tasks with the sample FM Navigate set.</div></div>
+            <button className="btn btn-ghost" onClick={onLoadDemo}><I.refresh size={14} /> Load demo</button>
+          </div>
+          <div className="row between center" style={{ paddingTop: 12 }}>
+            <div><div style={{ fontWeight: 600, fontSize: 13.5 }}>Clear all tasks</div><div className="muted" style={{ fontSize: 12 }}>Wipe everything and start from a blank slate.</div></div>
+            <button className="btn btn-ghost" onClick={onClearAll} style={{ color: 'var(--st-blocked)', borderColor: 'var(--st-blocked)' }}><I.x size={14} /> Clear all</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+window.App = App;
+window.ACCENTS = ACCENTS;

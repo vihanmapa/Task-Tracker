@@ -1,0 +1,16 @@
+# Local agent/memory + settings
+.claude/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+
+# Node (none used at runtime, but keep clean)
+node_modules/
+npm-debug.log*
