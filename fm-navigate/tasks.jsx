@@ -470,12 +470,13 @@ function TaskEditPanel({ task, onSave, onCancel }) {
 }
 
 /* ---------------- Task detail ---------------- */
-function TaskDetail({ task, onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditTask, onRevertEdit, canEdit = true, currentUser = 'richard' }) {
+function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, canEdit = true, currentUser = 'richard' }) {
   const I = window.I;
   const [comment, setComment] = useStateT('');
   const [editing, setEditing] = useStateT(false);
   if (!task) return null;
   const owner = window.USERS[task.ownerId];
+  const dlv = deliverables.find(d => d.id === task.deliverableId);
 
   const fmtVal = (field, v) => {
     if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) return '—';
@@ -500,6 +501,7 @@ function TaskDetail({ task, onClose, onUpdate, onAddComment, onToggleDone, onLog
     if (a.type === 'status') return `changed status · ${a.detail}`;
     if (a.type === 'edit') return `edited ${a.detail}`;
     if (a.type === 'revert') return `reverted ${a.detail}`;
+    if (a.type === 'deliverable') return a.detail || 'changed deliverable';
     return a.type;
   };
 
@@ -648,6 +650,16 @@ function TaskDetail({ task, onClose, onUpdate, onAddComment, onToggleDone, onLog
                   </div>
                 </div>
               )}
+              <div className="meta-row"><span className="meta-k">Deliverable</span>
+                {canEdit
+                  ? <span style={{ flex: '0 1 210px', minWidth: 0 }}>
+                      <window.DeliverablePicker value={task.deliverableId} deliverables={deliverables}
+                        onChange={(v) => onAssignDeliverable && onAssignDeliverable(task.id, v)} />
+                    </span>
+                  : (dlv
+                      ? <window.DeliverableChip deliverable={dlv} onClick={() => onOpenDeliverable && onOpenDeliverable(dlv.id)} />
+                      : <span className="meta-v">—</span>)}
+              </div>
               <div className="meta-row"><span className="meta-k">Status</span><window.StatusPill status={task.status} /></div>
               <div className="meta-row"><span className="meta-k">Priority</span><window.PriorityTag priority={task.priority} /></div>
               <div className="meta-row"><span className="meta-k">Owner</span><span className="row gap6 center"><window.Avatar user={owner} size={22} /><span className="meta-v">{owner.name}</span></span></div>

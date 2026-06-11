@@ -21,11 +21,12 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 }/*EDITMODE-END*/;
 
 const NAV = [
-  { key: 'dashboard', label: 'Dashboard', icon: 'grid' },
-  { key: 'tasks',     label: 'Tasks',     icon: 'list' },
-  { key: 'summary',   label: 'Weekly Summary', icon: 'summary' },
-  { key: 'ask',       label: 'Ask AI',    icon: 'spark' },
-  { key: 'settings',  label: 'Settings',  icon: 'settings' },
+  { key: 'dashboard',    label: 'Dashboard', icon: 'grid' },
+  { key: 'deliverables', label: 'Deliverables', icon: 'target' },
+  { key: 'tasks',        label: 'Tasks',     icon: 'list' },
+  { key: 'summary',      label: 'Weekly Summary', icon: 'summary' },
+  { key: 'ask',          label: 'Ask AI',    icon: 'spark' },
+  { key: 'settings',     label: 'Settings',  icon: 'settings' },
 ];
 
 function App() {
@@ -42,17 +43,30 @@ function App() {
     try { const s = localStorage.getItem('fm_tasks'); if (s) return JSON.parse(s); } catch (_) {}
     return [];
   });
+  // Deliverables = parent milestones tasks roll up to. Stored in the same
+  // shared blob, tagged kind:'deliverable', so no backend schema change.
+  const [deliverables, setDeliverables] = useStateA(() => {
+    try { const s = localStorage.getItem('fm_deliverables'); if (s) return JSON.parse(s); } catch (_) {}
+    return [];
+  });
+  // Split a mixed remote blob back into tasks vs deliverables.
+  const splitBlob = (arr) => ({
+    tasks: (arr || []).filter(r => r.kind !== 'deliverable'),
+    deliverables: (arr || []).filter(r => r.kind === 'deliverable'),
+  });
   // When applying a remote (load/realtime) change we must NOT echo it back.
   const skipSaveRef = useRefA(true); // skip the very first effect run (hydration)
 
   // Persist: always mirror locally; push to Supabase only when editing is unlocked.
   useEffectA(() => {
     try { localStorage.setItem('fm_tasks', JSON.stringify(tasks)); } catch (_) {}
+    try { localStorage.setItem('fm_deliverables', JSON.stringify(deliverables)); } catch (_) {}
     if (skipSaveRef.current) { skipSaveRef.current = false; return; }
     if (shared && editUnlocked) {
-      ds.saveTasks(tasks).then(r => { if (!r.ok) console.warn('[app] remote save failed', r); });
+      const blob = [...tasks, ...deliverables.map(d => ({ ...d, kind: 'deliverable' }))];
+      ds.saveTasks(blob).then(r => { if (!r.ok) console.warn('[app] remote save failed', r); });
     }
-  }, [tasks]);
+  }, [tasks, deliverables]);
 
   // ---- active persona (who is signed in) ----
   const [currentUser, setCurrentUser] = useStateA(() => {
@@ -69,8 +83,8 @@ function App() {
   useEffectA(() => {
     if (!shared) return;
     let unsub = () => {};
-    ds.loadTasks().then(remote => { skipSaveRef.current = true; setTasks(remote); });
-    unsub = ds.subscribe(incoming => { skipSaveRef.current = true; setTasks(incoming); });
+    ds.loadTasks().then(remote => { const s = splitBlob(remote); skipSaveRef.current = true; setTasks(s.tasks); setDeliverables(s.deliverables); });
+    unsub = ds.subscribe(incoming => { const s = splitBlob(incoming); skipSaveRef.current = true; setTasks(s.tasks); setDeliverables(s.deliverables); });
     return () => unsub();
   }, []);
 
@@ -88,6 +102,7 @@ function App() {
   const [route, setRoute] = useStateA('dashboard');
   const [taskView, setTaskView] = useStateA('list');
   const [selected, setSelected] = useStateA(null);
+  const [dlvSelected, setDlvSelected] = useStateA(null);
   const [composer, setComposer] = useStateA(false);
   const [askQ, setAskQ] = useStateA(null);
 
@@ -111,6 +126,7 @@ function App() {
 
   // ---- actions ----
   const openTask = useCallbackA((id) => { setSelected(id); setRoute('detail'); }, []);
+  const openDeliverable = useCallbackA((id) => { setDlvSelected(id); setRoute('dlvDetail'); }, []);
 
   const moveTask = useCallbackA((id, status) => {
     if (!canEdit) return;
@@ -152,6 +168,7 @@ function App() {
       priority: data.priority, category: data.category, status: data.status || 'Not Started',
       dueDate: data.dueDate || null, dependencies: data.dependencies || [],
       successCriteria: data.successCriteria || '', risk: data.risk || '', effort: data.effort || 'M',
+      deliverableId: data.deliverableId || null,
       ownerId: currentUser, progress: data.status === 'Completed' ? 100 : data.status === 'In Progress' ? 10 : 0,
       createdAt: now, updatedAt: now, completedAt: null,
       comments: [], progressLog: [], activity: [{ type: 'created', userId: currentUser, at: now }],
@@ -244,10 +261,46 @@ function App() {
     }));
   }, [canEdit, currentUser]);
 
+  // ---- deliverables (parent milestones) ----
+  const createDeliverable = useCallbackA((data) => {
+    if (!canEdit) return null;
+    const now = new Date().toISOString();
+    const dv = {
+      id: window.did(), kind: 'deliverable',
+      title: data.title, description: data.description || '',
+      ownerId: currentUser, status: data.status || 'Active',
+      targetDate: data.targetDate || null, createdAt: now, updatedAt: now,
+    };
+    setDeliverables(ds => [dv, ...ds]);
+    return dv.id;
+  }, [canEdit, currentUser]);
+
+  const editDeliverable = useCallbackA((id, changes) => {
+    if (!canEdit) return;
+    setDeliverables(ds => ds.map(d => d.id === id ? { ...d, ...changes, updatedAt: new Date().toISOString() } : d));
+  }, [canEdit]);
+
+  const deleteDeliverable = useCallbackA((id) => {
+    if (!canEdit) return;
+    setDeliverables(ds => ds.filter(d => d.id !== id));
+    setTasks(ts => ts.map(t => t.deliverableId === id ? { ...t, deliverableId: null } : t));
+    setRoute('deliverables'); setDlvSelected(null);
+  }, [canEdit]);
+
+  const assignDeliverable = useCallbackA((taskId, deliverableId) => {
+    if (!canEdit) return;
+    const now = new Date().toISOString();
+    setTasks(ts => ts.map(t => {
+      if (t.id !== taskId || (t.deliverableId || null) === (deliverableId || null)) return t;
+      const act = [...(t.activity || []), { type: 'deliverable', userId: currentUser, at: now, detail: deliverableId ? 'assigned to a deliverable' : 'removed from deliverable' }];
+      return { ...t, deliverableId: deliverableId || null, updatedAt: now, activity: act };
+    }));
+  }, [canEdit, currentUser]);
+
   const goAsk = useCallbackA((q) => { if (typeof q === 'string') setAskQ(q); setRoute('ask'); }, []);
 
-  const loadDemo = () => { if (confirm('Load the demo FM Navigate task set? This replaces your current tasks.')) { setTasks(window.SEED_TASKS); setSelected(null); setRoute('dashboard'); } };
-  const clearAll = () => { if (confirm('Clear ALL tasks and start from a blank slate? This cannot be undone.')) { setTasks([]); setSelected(null); setRoute('dashboard'); } };
+  const loadDemo = () => { if (confirm('Load the demo FM Navigate task set? This replaces your current tasks.')) { setTasks(window.SEED_TASKS); setDeliverables(window.SEED_DELIVERABLES); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
+  const clearAll = () => { if (confirm('Clear ALL tasks and start from a blank slate? This cannot be undone.')) { setTasks([]); setDeliverables([]); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
 
   // ---- counts for nav ----
   const counts = useMemoA(() => ({
@@ -256,8 +309,9 @@ function App() {
   }), [tasks]);
 
   const selectedTask = useMemoA(() => tasks.find(t => t.id === selected), [tasks, selected]);
+  const selectedDeliverable = useMemoA(() => deliverables.find(d => d.id === dlvSelected), [deliverables, dlvSelected]);
 
-  const titleMap = { dashboard: 'Dashboard', tasks: 'Tasks', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
+  const titleMap = { dashboard: 'Dashboard', tasks: 'Tasks', deliverables: 'Deliverables', dlvDetail: 'Deliverable', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
 
   return (
     <div className="app">
@@ -273,7 +327,7 @@ function App() {
 
         {NAV.map(n => {
           const Icon = I[n.icon];
-          const active = route === n.key || (route === 'detail' && n.key === 'tasks');
+          const active = route === n.key || (route === 'detail' && n.key === 'tasks') || (route === 'dlvDetail' && n.key === 'deliverables');
           const count = n.key === 'tasks' ? counts.tasks : null;
           return (
             <button key={n.key} className={`nav-item ${active ? 'active' : ''}`} onClick={() => { setRoute(n.key); setSelected(null); }}>
@@ -328,12 +382,22 @@ function App() {
           </div>
         )}
         {route === 'tasks' && (
-          <window.TasksScreen tasks={tasks} view={taskView} setView={setTaskView} onOpen={openTask}
+          <window.TasksScreen tasks={tasks} deliverables={deliverables} view={taskView} setView={setTaskView} onOpen={openTask}
             onCompose={() => setComposer(true)} onMove={moveTask} onToggleDone={toggleDone} canEdit={canEdit} />
         )}
+        {route === 'deliverables' && (
+          <window.DeliverablesScreen deliverables={deliverables} tasks={tasks} canEdit={canEdit}
+            onOpen={openDeliverable} onCreate={createDeliverable} />
+        )}
+        {route === 'dlvDetail' && (
+          <window.DeliverableDetail deliverable={selectedDeliverable} deliverables={deliverables} tasks={tasks} canEdit={canEdit}
+            onBack={() => { setRoute('deliverables'); setDlvSelected(null); }} onOpenTask={openTask}
+            onEdit={editDeliverable} onDelete={deleteDeliverable} onAssign={assignDeliverable} />
+        )}
         {route === 'detail' && (
-          <window.TaskDetail task={selectedTask} onClose={() => { setRoute('tasks'); setSelected(null); }}
-            onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditTask={editTask} onRevertEdit={revertEdit} onUpdate={() => {}} canEdit={canEdit} currentUser={currentUser} />
+          <window.TaskDetail task={selectedTask} deliverables={deliverables} onClose={() => { setRoute('tasks'); setSelected(null); }}
+            onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditTask={editTask} onRevertEdit={revertEdit}
+            onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onUpdate={() => {}} canEdit={canEdit} currentUser={currentUser} />
         )}
         {route === 'summary' && <window.WeeklySummary tasks={tasks} onOpen={openTask} />}
         {route === 'ask' && <window.AskAI tasks={tasks} initialQuestion={askQ} clearInitial={() => setAskQ(null)} />}

@@ -4,8 +4,8 @@
    ============================================================ */
 
 const USERS = {
-  vihan:   { id: 'vihan',   name: 'Vihan Mendis',   role: 'Product Manager', color: 'oklch(0.55 0.18 250)', initials: 'VM' },
-  richard: { id: 'richard', name: 'Richard Cole',   role: 'Founder',         color: 'oklch(0.55 0.15 300)', initials: 'RC' },
+  vihan:   { id: 'vihan',   name: 'Vihan Mapalagama', role: 'Product Manager', color: 'oklch(0.55 0.18 250)', initials: 'VM' },
+  richard: { id: 'richard', name: 'Richard Davies',   role: 'Founder',         color: 'oklch(0.55 0.15 300)', initials: 'RC' },
   isuru:   { id: 'isuru',   name: 'Isuru Perera',   role: 'Eng Lead',        color: 'oklch(0.58 0.13 155)', initials: 'IP' },
 };
 
@@ -29,6 +29,9 @@ const d = (offsetDays, h = 17) => {
 
 let _id = 100;
 const nid = () => `T-${++_id}`;
+
+let _did = 0;
+const did = () => `D-${++_did}`;
 
 const SEED_TASKS = [
   {
@@ -366,7 +369,35 @@ const SEED_TASKS = [
   },
 ];
 
+// ---- Deliverables: parent milestones that group related tasks ----
+const DELIVERABLE_STATUSES = ['Active', 'On Hold', 'Delivered', 'Cancelled'];
+
+const SEED_DELIVERABLES = [
+  {
+    id: 'D-1', kind: 'deliverable',
+    title: 'ACME Logistics Pilot Launch',
+    description: 'First paying-adjacent pilot. Everything required to stand up, harden, and rehearse the ACME tenant: sprint plan, environment, onboarding, API hardening, and user management.',
+    ownerId: 'vihan', status: 'Active', targetDate: d(7),
+    createdAt: d(-8), updatedAt: d(0, 8),
+  },
+  {
+    id: 'D-2', kind: 'deliverable',
+    title: 'SOC 2 Type I Readiness',
+    description: 'Documentation and evidence package needed before the compliance auditor begins fieldwork.',
+    ownerId: 'vihan', status: 'Active', targetDate: d(9),
+    createdAt: d(-9), updatedAt: d(-1, 15),
+  },
+];
+
+// Link seed tasks to their parent deliverable (id -> deliverableId)
+const SEED_TASK_DELIVERABLE = {
+  'T-101': 'D-1', 'T-102': 'D-1', 'T-106': 'D-1', 'T-107': 'D-1',
+  'T-110': 'D-1', 'T-111': 'D-1',
+  'T-104': 'D-2', 'T-105': 'D-2',
+};
+SEED_TASKS.forEach(t => { t.deliverableId = SEED_TASK_DELIVERABLE[t.id] || null; });
+
 Object.assign(window, {
   USERS, CATEGORIES, STATUSES, KANBAN_COLS, PRIORITIES,
-  SEED_TASKS, TODAY, nid,
+  DELIVERABLE_STATUSES, SEED_TASKS, SEED_DELIVERABLES, TODAY, nid, did,
 });
