@@ -268,6 +268,7 @@ function App() {
     const dv = {
       id: window.did(), kind: 'deliverable',
       title: data.title, description: data.description || '',
+      parentId: data.parentId || null,
       ownerId: currentUser, status: data.status || 'Active',
       targetDate: data.targetDate || null, createdAt: now, updatedAt: now,
     };
@@ -282,7 +283,12 @@ function App() {
 
   const deleteDeliverable = useCallbackA((id) => {
     if (!canEdit) return;
-    setDeliverables(ds => ds.filter(d => d.id !== id));
+    setDeliverables(ds => {
+      const gone = ds.find(d => d.id === id);
+      const newParent = gone ? (gone.parentId || null) : null;
+      // reparent children up one level, then drop the node
+      return ds.filter(d => d.id !== id).map(d => d.parentId === id ? { ...d, parentId: newParent } : d);
+    });
     setTasks(ts => ts.map(t => t.deliverableId === id ? { ...t, deliverableId: null } : t));
     setRoute('deliverables'); setDlvSelected(null);
   }, [canEdit]);
@@ -378,7 +384,7 @@ function App() {
 
         {route === 'dashboard' && (
           <div className="scroll-area">
-            <window.Dashboard tasks={tasks} onOpen={openTask} onCompose={() => setComposer(true)} onAsk={goAsk} onNav={setRoute} density={tweaks.density} canEdit={canEdit} currentUser={currentUser} />
+            <window.Dashboard tasks={tasks} deliverables={deliverables} onOpen={openTask} onOpenDeliverable={openDeliverable} onCompose={() => setComposer(true)} onAsk={goAsk} onNav={setRoute} density={tweaks.density} canEdit={canEdit} currentUser={currentUser} />
           </div>
         )}
         {route === 'tasks' && (
@@ -391,8 +397,8 @@ function App() {
         )}
         {route === 'dlvDetail' && (
           <window.DeliverableDetail deliverable={selectedDeliverable} deliverables={deliverables} tasks={tasks} canEdit={canEdit}
-            onBack={() => { setRoute('deliverables'); setDlvSelected(null); }} onOpenTask={openTask}
-            onEdit={editDeliverable} onDelete={deleteDeliverable} onAssign={assignDeliverable} />
+            onBack={() => { setRoute('deliverables'); setDlvSelected(null); }} onOpen={openDeliverable} onOpenTask={openTask}
+            onCreate={createDeliverable} onEdit={editDeliverable} onDelete={deleteDeliverable} onAssign={assignDeliverable} />
         )}
         {route === 'detail' && (
           <window.TaskDetail task={selectedTask} deliverables={deliverables} onClose={() => { setRoute('tasks'); setSelected(null); }}

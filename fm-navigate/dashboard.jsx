@@ -17,8 +17,9 @@ function KpiTile({ label, value, foot, footTone, accent, icon, spark, onClick })
   );
 }
 
-function Dashboard({ tasks, onOpen, onCompose, onAsk, onNav, density, canEdit = true, currentUser = 'richard' }) {
+function Dashboard({ tasks, deliverables = [], onOpen, onOpenDeliverable, onCompose, onAsk, onNav, density, canEdit = true, currentUser = 'richard' }) {
   const I = window.I;
+  const H = window.dlvHelpers;
   const wkStart = window.startOfWeek(window.TODAY), wkEnd = window.endOfWeek(window.TODAY);
   const inWeek = (iso) => iso && new Date(iso) >= wkStart && new Date(iso) <= wkEnd;
 
@@ -61,6 +62,24 @@ function Dashboard({ tasks, onOpen, onCompose, onAsk, onNav, density, canEdit = 
 
     return { active, blocked, dueWeek, completedWeek, critical, overdue, inProgress, attention, dueSoon, recent, avgProgress, updatesWeek };
   }, [tasks]);
+
+  // deliverable insights (top-level milestones, subtree rollups)
+  const dlv = useMemoD(() => {
+    if (!H || !deliverables.length) return { roots: [], avg: 0, atRisk: 0, delivered: 0 };
+    const roots = H.childrenOf(null, deliverables).map(d => {
+      const r = H.rollup(d.id, tasks, deliverables);
+      const overdue = d.targetDate && window.daysBetween(window.TODAY, d.targetDate) < 0 && r.progress < 100;
+      const atRisk = d.status !== 'Delivered' && (r.blocked > 0 || overdue);
+      return { d, r, atRisk, overdue };
+    });
+    const scored = roots.filter(x => x.d.status !== 'Cancelled');
+    const avg = scored.length ? Math.round(scored.reduce((s, x) => s + x.r.progress, 0) / scored.length) : 0;
+    return {
+      roots: roots.sort((a, b) => (b.atRisk - a.atRisk) || (a.r.progress - b.r.progress)),
+      avg, atRisk: roots.filter(x => x.atRisk).length,
+      delivered: deliverables.filter(d => d.status === 'Delivered').length,
+    };
+  }, [deliverables, tasks]);
 
   // AI status line
   const statusLine = useMemoD(() => {
@@ -122,6 +141,40 @@ function Dashboard({ tasks, onOpen, onCompose, onAsk, onNav, density, canEdit = 
       {/* main grid */}
       <div className="dash-grid">
         <div className="dash-col">
+          {/* deliverables */}
+          {dlv.roots.length > 0 && (
+            <div className="card">
+              <div className="card-head">
+                <span style={{ color: 'var(--accent)', display: 'grid', placeItems: 'center' }}><I.flag size={16} /></span>
+                <span className="card-title">Deliverables</span>
+                <span className="card-title-sub">{dlv.avg}% avg · {dlv.atRisk} at risk</span>
+                <span className="grow" />
+                <button className="btn btn-subtle btn-sm" onClick={() => onNav('deliverables')}>View all</button>
+              </div>
+              <div style={{ padding: '4px 0' }}>
+                {dlv.roots.slice(0, 5).map(({ d, r, atRisk, overdue }) => (
+                  <div key={d.id} className="att-item" onClick={() => onOpenDeliverable && onOpenDeliverable(d.id)} style={{ alignItems: 'center' }}>
+                    <div className="att-main">
+                      <div className="row between center gap12">
+                        <div className="att-title grow" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</div>
+                        <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{r.progress}%</span>
+                      </div>
+                      <div style={{ marginTop: 8 }}><window.Progress value={r.progress} /></div>
+                      <div className="att-meta" style={{ marginTop: 8 }}>
+                        <span className="muted" style={{ fontSize: 11.5 }}>{r.done}/{r.total} tasks</span>
+                        {r.subCount > 0 && <><span className="faint">·</span><span className="muted" style={{ fontSize: 11.5 }}>{r.subCount} sub</span></>}
+                        {r.blocked > 0 && <><span className="faint">·</span><span style={{ color: 'var(--st-blocked)', fontSize: 11.5, fontWeight: 600 }}>{r.blocked} blocked</span></>}
+                        {overdue && <><span className="faint">·</span><span style={{ color: 'var(--neg)', fontSize: 11.5, fontWeight: 600 }}>overdue</span></>}
+                        {!atRisk && d.status === 'Delivered' && <><span className="faint">·</span><span style={{ color: 'var(--st-completed)', fontSize: 11.5, fontWeight: 600 }}>delivered</span></>}
+                      </div>
+                    </div>
+                    <I.chevR size={16} className="faint" />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* needs attention */}
           <div className="card">
             <div className="card-head">
