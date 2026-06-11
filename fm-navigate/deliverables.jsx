@@ -1,32 +1,55 @@
 /* ============================================================
-   FM Navigate — Deliverables
-   A Deliverable is a parent milestone (the "main deliverable").
-   Tasks hang under it via task.deliverableId. Deliverables are
-   stored in the same shared blob, tagged kind:'deliverable'.
+   FM Navigate — Deliverables (nested tree)
+   A Deliverable is a parent milestone. Deliverables nest to any
+   depth via parentId. Tasks attach to ANY node via deliverableId.
+   Rollups aggregate the whole subtree (descendants + their tasks).
+   Stored in the shared blob tagged kind:'deliverable'.
    ============================================================ */
 const { useState: useStateD, useMemo: useMemoD } = React;
 
-/* ---- helpers ---- */
+/* ---- tree helpers (also exported for the dashboard) ---- */
+function childrenOf(id, deliverables) {
+  return deliverables.filter(d => (d.parentId || null) === (id || null));
+}
+function subtreeIds(id, deliverables) {
+  const out = [id];
+  const stack = [id];
+  while (stack.length) {
+    const cur = stack.pop();
+    deliverables.forEach(d => { if ((d.parentId || null) === cur) { out.push(d.id); stack.push(d.id); } });
+  }
+  return out;
+}
+function pathOf(id, deliverables) {
+  const map = {};
+  deliverables.forEach(d => { map[d.id] = d; });
+  const path = [];
+  let cur = map[id];
+  let guard = 0;
+  while (cur && guard++ < 50) { path.unshift(cur); cur = cur.parentId ? map[cur.parentId] : null; }
+  return path;
+}
+// rolled-up stats over the node's whole subtree
+function rollup(id, tasks, deliverables) {
+  const ids = new Set(subtreeIds(id, deliverables));
+  const kids = tasks.filter(t => ids.has(t.deliverableId));
+  const direct = tasks.filter(t => t.deliverableId === id);
+  const live = kids.filter(t => t.status !== 'Cancelled');
+  const done = kids.filter(t => t.status === 'Completed').length;
+  const blocked = kids.filter(t => t.status === 'Blocked').length;
+  const progress = live.length ? Math.round(live.reduce((s, t) => s + (t.progress || 0), 0) / live.length) : 0;
+  return { kids, direct, total: kids.length, done, blocked, progress, subCount: childrenOf(id, deliverables).length };
+}
+
 const DLV_STATUS_META = {
   'Active':    { c: 'var(--accent)',       bg: 'var(--accent-soft)' },
   'On Hold':   { c: 'var(--st-waiting)',   bg: 'var(--st-waiting-bg)' },
   'Delivered': { c: 'var(--st-completed)', bg: 'var(--st-completed-bg)' },
   'Cancelled': { c: 'var(--muted)',        bg: 'var(--surface-2)' },
 };
-
 function DlvStatusPill({ status }) {
   const m = DLV_STATUS_META[status] || DLV_STATUS_META['Active'];
   return <span className="chip" style={{ color: m.c, background: m.bg, borderColor: 'transparent', fontWeight: 600 }}>{status}</span>;
-}
-
-// child tasks of a deliverable + rolled-up stats
-function rollup(deliverableId, tasks) {
-  const kids = tasks.filter(t => t.deliverableId === deliverableId);
-  const live = kids.filter(t => t.status !== 'Cancelled');
-  const done = kids.filter(t => t.status === 'Completed').length;
-  const blocked = kids.filter(t => t.status === 'Blocked').length;
-  const progress = live.length ? Math.round(live.reduce((s, t) => s + (t.progress || 0), 0) / live.length) : 0;
-  return { kids, total: kids.length, done, blocked, progress };
 }
 
 /* ---- compact chip used on task rows / detail ---- */
@@ -41,18 +64,27 @@ function DeliverableChip({ deliverable, onClick }) {
   );
 }
 
-/* ---- dropdown picker (task edit / detail) ---- */
+/* ---- dropdown picker (task edit / detail) — indents to show nesting ---- */
 function DeliverablePicker({ value, deliverables, onChange }) {
+  // ordered, depth-indented options
+  const opts = [];
+  const walk = (parentId, depth) => {
+    childrenOf(parentId, deliverables).forEach(d => {
+      opts.push({ id: d.id, label: `${'  '.repeat(depth)}${depth ? '└ ' : ''}${d.title}` });
+      walk(d.id, depth + 1);
+    });
+  };
+  walk(null, 0);
   return (
     <select className="input" value={value || ''} onChange={e => onChange(e.target.value || null)}>
       <option value="">— No deliverable —</option>
-      {deliverables.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}
+      {opts.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
     </select>
   );
 }
 
-/* ---- create form ---- */
-function DeliverableForm({ onCreate, onCancel }) {
+/* ---- create form (top-level or sub) ---- */
+function DeliverableForm({ onCreate, onCancel, parentTitle }) {
   const I = window.I;
   const [f, setF] = useStateD({ title: '', description: '', targetDate: '', status: 'Active' });
   const set = (k, v) => setF(s => ({ ...s, [k]: v }));
@@ -67,7 +99,9 @@ function DeliverableForm({ onCreate, onCancel }) {
   };
   return (
     <div className="card card-pad mb16">
-      <div className="section-eyebrow mb12" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.target size={13} /> New deliverable</div>
+      <div className="section-eyebrow mb12" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        <I.target size={13} /> {parentTitle ? `New sub-deliverable under “${parentTitle}”` : 'New deliverable'}
+      </div>
       <label className="field-label" style={{ marginBottom: 5, display: 'block' }}>Title</label>
       <input className="input" autoFocus value={f.title} placeholder="e.g. Architecture Assessment Scope & Engagement Package"
         onChange={e => set('title', e.target.value)} />
@@ -87,17 +121,47 @@ function DeliverableForm({ onCreate, onCancel }) {
         </div>
       </div>
       <div className="row gap8 mt16">
-        <button className="btn btn-primary btn-sm" onClick={submit}><I.check size={13} /> Create deliverable</button>
+        <button className="btn btn-primary btn-sm" onClick={submit}><I.check size={13} /> Create</button>
         <button className="btn btn-subtle btn-sm" onClick={onCancel}>Cancel</button>
       </div>
     </div>
   );
 }
 
-/* ---- list / index screen ---- */
+/* ---- one row in the list / sub-deliverable list ---- */
+function DlvCard({ d, tasks, deliverables, onOpen }) {
+  const I = window.I;
+  const r = rollup(d.id, tasks, deliverables);
+  return (
+    <button className="card card-pad" onClick={() => onOpen(d.id)}
+      style={{ textAlign: 'left', cursor: 'pointer', width: '100%', display: 'block' }}>
+      <div className="row between center" style={{ marginBottom: 8 }}>
+        <div className="row gap8 center" style={{ minWidth: 0 }}>
+          <span style={{ color: 'var(--accent)' }}><I.flag size={15} /></span>
+          <span style={{ fontWeight: 700, fontSize: 15.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</span>
+        </div>
+        <DlvStatusPill status={d.status} />
+      </div>
+      {d.description && <div className="muted" style={{ fontSize: 12.5, marginBottom: 12, lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{d.description}</div>}
+      <div className="row gap12 center" style={{ marginBottom: 6 }}>
+        <div className="grow"><window.Progress value={r.progress} height={6} /></div>
+        <span style={{ fontSize: 12.5, fontWeight: 700 }}>{r.progress}%</span>
+      </div>
+      <div className="row gap12 center" style={{ fontSize: 12, color: 'var(--muted)' }}>
+        <span>{r.done}/{r.total} done</span>
+        {r.subCount > 0 && <span>· {r.subCount} sub</span>}
+        {r.blocked > 0 && <span style={{ color: 'var(--st-blocked)' }}>· {r.blocked} blocked</span>}
+        {d.targetDate && <span>· <window.DueTag iso={d.targetDate} /></span>}
+      </div>
+    </button>
+  );
+}
+
+/* ---- list / index screen (top-level deliverables) ---- */
 function DeliverablesScreen({ deliverables, tasks, canEdit, onOpen, onCreate }) {
   const I = window.I;
   const [creating, setCreating] = useStateD(false);
+  const roots = childrenOf(null, deliverables);
   const unassigned = tasks.filter(t => !t.deliverableId && !['Completed', 'Cancelled'].includes(t.status)).length;
 
   return (
@@ -116,64 +180,38 @@ function DeliverablesScreen({ deliverables, tasks, canEdit, onOpen, onCreate }) 
         <div style={{ height: 14 }} />
         {creating && <DeliverableForm onCreate={(d) => { onCreate(d); setCreating(false); }} onCancel={() => setCreating(false)} />}
 
-        {deliverables.length === 0 && !creating && (
+        {roots.length === 0 && !creating && (
           <div className="card card-pad" style={{ textAlign: 'center', padding: '40px 20px' }}>
             <div style={{ color: 'var(--muted)', marginBottom: 12 }}><I.target size={28} /></div>
             <div style={{ fontWeight: 600, marginBottom: 4 }}>No deliverables yet</div>
-            <div className="muted" style={{ fontSize: 13 }}>Create a milestone, then assign the tasks that roll up to it.</div>
+            <div className="muted" style={{ fontSize: 13 }}>Create a milestone, then nest sub-deliverables and assign tasks under it.</div>
           </div>
         )}
 
         <div className="col gap12">
-          {deliverables.map(d => {
-            const r = rollup(d.id, tasks);
-            return (
-              <button key={d.id} className="card card-pad" onClick={() => onOpen(d.id)}
-                style={{ textAlign: 'left', cursor: 'pointer', width: '100%', display: 'block' }}>
-                <div className="row between center" style={{ marginBottom: 8 }}>
-                  <div className="row gap8 center" style={{ minWidth: 0 }}>
-                    <span style={{ color: 'var(--accent)' }}><I.flag size={15} /></span>
-                    <span style={{ fontWeight: 700, fontSize: 15.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</span>
-                  </div>
-                  <DlvStatusPill status={d.status} />
-                </div>
-                {d.description && <div className="muted" style={{ fontSize: 12.5, marginBottom: 12, lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{d.description}</div>}
-                <div className="row gap12 center" style={{ marginBottom: 6 }}>
-                  <div className="grow"><window.Progress value={r.progress} height={6} /></div>
-                  <span style={{ fontSize: 12.5, fontWeight: 700 }}>{r.progress}%</span>
-                </div>
-                <div className="row gap12 center" style={{ fontSize: 12, color: 'var(--muted)' }}>
-                  <span>{r.done}/{r.total} done</span>
-                  {r.blocked > 0 && <span style={{ color: 'var(--st-blocked)' }}>· {r.blocked} blocked</span>}
-                  {d.targetDate && <span>· <window.DueTag iso={d.targetDate} /></span>}
-                </div>
-              </button>
-            );
-          })}
+          {roots.map(d => <DlvCard key={d.id} d={d} tasks={tasks} deliverables={deliverables} onOpen={onOpen} />)}
         </div>
       </div>
     </div>
   );
 }
 
-/* ---- detail: parent + its tasks + assignment ---- */
-function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, onBack, onOpenTask, onEdit, onDelete, onAssign }) {
+/* ---- detail: breadcrumb + rollup + sub-deliverables + tasks ---- */
+function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, onBack, onOpen, onOpenTask, onCreate, onEdit, onDelete, onAssign }) {
   const I = window.I;
   const [picking, setPicking] = useStateD(false);
+  const [addingSub, setAddingSub] = useStateD(false);
   if (!deliverable) return null;
-  const r = rollup(deliverable.id, tasks);
+  const r = rollup(deliverable.id, tasks, deliverables);
   const owner = window.USERS[deliverable.ownerId];
-
-  // tasks not yet under any deliverable — candidates to add here
+  const path = pathOf(deliverable.id, deliverables);
+  const subs = childrenOf(deliverable.id, deliverables);
+  const directTasks = tasks.filter(t => t.deliverableId === deliverable.id)
+    .sort((a, b) => (a.status === 'Completed' ? 1 : 0) - (b.status === 'Completed' ? 1 : 0));
   const candidates = useMemoD(
-    () => tasks.filter(t => !t.deliverableId && !['Cancelled'].includes(t.status)),
+    () => tasks.filter(t => !t.deliverableId && t.status !== 'Cancelled'),
     [tasks]
   );
-
-  const kids = [...r.kids].sort((a, b) => {
-    const done = (t) => t.status === 'Completed' ? 1 : 0;
-    return done(a) - done(b);
-  });
 
   const cycleStatus = () => {
     const order = window.DELIVERABLE_STATUSES;
@@ -183,9 +221,17 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, onBack, 
 
   return (
     <div className="scroll-area fade-in">
-      <div style={{ padding: '16px 28px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div style={{ padding: '16px 28px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <button className="btn btn-subtle btn-sm" onClick={onBack}><I.chevL size={15} /> Deliverables</button>
-        <span className="muted mono" style={{ fontSize: 12 }}>{deliverable.id}</span>
+        {/* breadcrumb */}
+        {path.map((p, i) => (
+          <span key={p.id} className="row gap6 center" style={{ minWidth: 0 }}>
+            <I.chevR size={13} className="faint" />
+            {i < path.length - 1
+              ? <button className="btn-link" onClick={() => onOpen(p.id)} style={{ background: 'none', border: 0, color: 'var(--muted)', cursor: 'pointer', fontSize: 12.5, padding: 0, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.title}</button>
+              : <span style={{ fontSize: 12.5, fontWeight: 600, maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.title}</span>}
+          </span>
+        ))}
         <span className="grow" />
         {canEdit
           ? <button className="btn btn-subtle btn-sm" onClick={cycleStatus} title="Click to change status"><DlvStatusPill status={deliverable.status} /></button>
@@ -207,6 +253,7 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, onBack, 
             </div>
             <span style={{ width: 1, height: 38, background: 'var(--border)' }} />
             <div><div style={{ fontSize: 18, fontWeight: 700 }}>{r.done}/{r.total}</div><div className="muted" style={{ fontSize: 11.5 }}>tasks done</div></div>
+            {r.subCount > 0 && <div><div style={{ fontSize: 18, fontWeight: 700 }}>{r.subCount}</div><div className="muted" style={{ fontSize: 11.5 }}>sub-deliverables</div></div>}
             {r.blocked > 0 && <div><div style={{ fontSize: 18, fontWeight: 700, color: 'var(--st-blocked)' }}>{r.blocked}</div><div className="muted" style={{ fontSize: 11.5 }}>blocked</div></div>}
             <span className="grow" />
             <div className="col" style={{ textAlign: 'right' }}>
@@ -216,14 +263,32 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, onBack, 
           </div>
         </div>
 
+        {/* sub-deliverables */}
         <div className="row between center mb12">
-          <div className="section-eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.list size={13} /> Tasks under this deliverable</div>
+          <div className="section-eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.target size={13} /> Sub-deliverables</div>
+          {canEdit && <button className="btn btn-subtle btn-sm" onClick={() => setAddingSub(s => !s)}><I.plus size={13} /> Add sub-deliverable</button>}
+        </div>
+        {addingSub && (
+          <DeliverableForm parentTitle={deliverable.title}
+            onCreate={(d) => { onCreate({ ...d, parentId: deliverable.id }); setAddingSub(false); }}
+            onCancel={() => setAddingSub(false)} />
+        )}
+        {subs.length === 0 && !addingSub && (
+          <div className="muted" style={{ fontSize: 13, marginBottom: 16 }}>No sub-deliverables. Break this milestone into smaller ones if useful.</div>
+        )}
+        <div className="col gap12 mb16">
+          {subs.map(d => <DlvCard key={d.id} d={d} tasks={tasks} deliverables={deliverables} onOpen={onOpen} />)}
+        </div>
+
+        {/* tasks directly on this node */}
+        <div className="row between center mb12">
+          <div className="section-eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.list size={13} /> Tasks at this level</div>
           {canEdit && <button className="btn btn-subtle btn-sm" onClick={() => setPicking(p => !p)}><I.plus size={13} /> Assign tasks</button>}
         </div>
 
         {picking && (
           <div className="card card-pad mb16">
-            <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>Pick existing tasks to roll up here:</div>
+            <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>Pick existing tasks to attach here:</div>
             {candidates.length === 0 && <div className="muted" style={{ fontSize: 13 }}>No unassigned tasks available.</div>}
             <div className="col gap8">
               {candidates.map(t => (
@@ -237,14 +302,11 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, onBack, 
           </div>
         )}
 
-        {kids.length === 0 && !picking && (
-          <div className="card card-pad" style={{ textAlign: 'center', padding: '28px 20px' }}>
-            <div className="muted" style={{ fontSize: 13 }}>No tasks assigned yet. Use “Assign tasks” to add them.</div>
-          </div>
+        {directTasks.length === 0 && !picking && (
+          <div className="muted" style={{ fontSize: 13, marginBottom: 16 }}>No tasks at this level yet.</div>
         )}
-
         <div className="col gap8">
-          {kids.map(t => (
+          {directTasks.map(t => (
             <div key={t.id} className="card card-pad row gap12 center" style={{ padding: '12px 16px' }}>
               <button onClick={() => onOpenTask(t.id)} className="row gap10 center grow" style={{ background: 'none', border: 0, textAlign: 'left', cursor: 'pointer', minWidth: 0 }}>
                 <window.StatusPill status={t.status} />
@@ -268,4 +330,7 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, onBack, 
   );
 }
 
-Object.assign(window, { DeliverablesScreen, DeliverableDetail, DeliverablePicker, DeliverableChip });
+Object.assign(window, {
+  DeliverablesScreen, DeliverableDetail, DeliverablePicker, DeliverableChip,
+  dlvHelpers: { rollup, childrenOf, subtreeIds, pathOf },
+});
