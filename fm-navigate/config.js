@@ -14,4 +14,10 @@ window.APP_CONFIG = {
   // From Supabase dashboard → Project Settings → API
   SUPABASE_URL: 'https://qxrozpuupaddohzwulun.supabase.co',
   SUPABASE_ANON_KEY: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF4cm96cHV1cGFkZG9oend1bHVuIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODEwODM1ODYsImV4cCI6MjA5NjY1OTU4Nn0.yLBc02LgNw5X3pBDkLyNcsMpTx65pwzjssPCsnHu_cg',
+
+  // The single account allowed to EDIT the shared workspace (create/move/
+  // complete tasks & deliverables). Everyone else is read-only. This is the
+  // UI gate; the database also locks writes to this user's id via RLS
+  // (see docs/PRIVATE-VAULT-SETUP.md). Match the email of your Supabase user.
+  EDITOR_EMAIL: 'vihancmapa@gmail.com',
 };

@@ -49,7 +49,7 @@ function TasksScreen({ tasks, view, setView, onOpen, onCompose, onMove, onToggle
               <div style={{ marginBottom: 18 }}>Start from a blank slate — describe the work and the assistant structures it for you.</div>
               {canEdit
                 ? <button className="btn btn-primary" onClick={onCompose} style={{ display: 'inline-flex' }}><I.spark size={15} /> Create your first task</button>
-                : <div className="muted" style={{ fontSize: 12.5 }}>Switch to Vihan (PM) to add tasks. Or load the demo set from Settings → Data.</div>}
+                : <div className="muted" style={{ fontSize: 12.5 }}>Sign in as the editor (Vihan) to add tasks. Or load the demo set from Settings → Data.</div>}
             </div>
           </div>
         )
@@ -470,7 +470,7 @@ function TaskEditPanel({ task, onSave, onCancel }) {
 }
 
 /* ---------------- Task detail ---------------- */
-function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, canEdit = true, currentUser = 'richard' }) {
+function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onAddResource, onDeleteResource, canEdit = true, currentUser = 'richard' }) {
   const I = window.I;
   const [comment, setComment] = useStateT('');
   const [editing, setEditing] = useStateT(false);
@@ -609,6 +609,14 @@ function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, 
 
             {/* progress log */}
             <ProgressLog task={task} onLog={onLogProgress} canEdit={canEdit} currentUser={currentUser} />
+
+            {/* resources — shared + private (per-item lock toggle) */}
+            <div className="mt24">
+              <window.ResourceList parentType="task" parentId={task.id} publicItems={task.resources || []}
+                canEdit={canEdit}
+                onAddPublic={(res) => onAddResource && onAddResource('task', task.id, res)}
+                onDeletePublic={(id) => onDeleteResource && onDeleteResource('task', task.id, id)} />
+            </div>
 
             {/* comments */}
             <div className="section-eyebrow mt24 mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.msg size={13} /> Comments · {task.comments?.length || 0}</div>
