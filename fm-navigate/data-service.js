@@ -106,6 +106,71 @@
         .subscribe();
       return function () { try { c.removeChannel(ch); } catch (_) {} };
     },
+
+    /* ---- Auth + per-user PRIVATE resources (Supabase Auth + RLS) ----
+       These power the private vault: rows in `private_resources` are
+       readable/writable only by their owner (RLS: auth.uid() = user_id).
+       Requires the Supabase setup in docs/PRIVATE-VAULT-SETUP.md. ---- */
+    authReady: function () { return BACKEND === 'supabase' && !!client(); },
+
+    signIn: function (email, pw) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'Shared backend not configured.' });
+      return c.auth.signInWithPassword({ email: email, password: pw })
+        .then(function (r) { return { ok: !r.error, error: r.error && r.error.message, user: r.data && r.data.user }; })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    signOut: function () {
+      var c = client();
+      if (!c) return Promise.resolve();
+      return c.auth.signOut().catch(function () {});
+    },
+
+    getUser: function () {
+      var c = client();
+      if (!c) return Promise.resolve(null);
+      return c.auth.getUser().then(function (r) { return (r && r.data) ? r.data.user : null; }).catch(function () { return null; });
+    },
+
+    // subscribe to auth changes; cb(user|null). returns an unsubscribe fn.
+    onAuth: function (cb) {
+      var c = client();
+      if (!c) return function () {};
+      var res = c.auth.onAuthStateChange(function (_evt, session) { cb(session ? session.user : null); });
+      return function () { try { res.data.subscription.unsubscribe(); } catch (_) {} };
+    },
+
+    // list the signed-in user's private resources for a deliverable
+    listResources: function (deliverableId) {
+      var c = client();
+      if (!c) return Promise.resolve([]);
+      return c.from('private_resources').select('*').eq('deliverable_id', deliverableId)
+        .order('created_at', { ascending: true })
+        .then(function (r) { return r.error ? [] : (r.data || []); })
+        .catch(function () { return []; });
+    },
+
+    addResource: function (res) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      return c.auth.getUser().then(function (u) {
+        var uid = u && u.data && u.data.user && u.data.user.id;
+        if (!uid) return { ok: false, error: 'Not signed in.' };
+        return c.from('private_resources').insert({
+          user_id: uid, deliverable_id: res.deliverableId,
+          kind: res.kind || 'link', title: res.title || '', url: res.url || '', note: res.note || '',
+        }).select().then(function (r) { return { ok: !r.error, error: r.error && r.error.message, row: r.data && r.data[0] }; });
+      }).catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    deleteResource: function (id) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false });
+      return c.from('private_resources').delete().eq('id', id)
+        .then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
   };
 
   window.dataService = dataService;
