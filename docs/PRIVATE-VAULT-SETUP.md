@@ -1,50 +1,52 @@
-# Private resources vault — Supabase setup
+# Auth, edit-lock & resources — Supabase setup
 
-Per-deliverable private resources (chat links, notes) that **only the signed-in
-owner** can read or write. Privacy is enforced by Supabase **Auth + Row Level
-Security**, not by the UI — rows are filtered server-side to `auth.uid()`.
+The app now uses **Supabase Auth** for everything:
 
-The app code is already wired (`data-service.js` auth + resource methods,
-`ResourcesPanel` in `deliverables.jsx`). It activates once the steps below are done.
+- **Login is required** — nothing renders until you sign in.
+- **Editing the shared workspace** (create/move/complete tasks & deliverables) is
+  locked to a single **editor account** (you). Everyone else is read-only.
+  The old `FMNavigate` edit password is **gone**.
+- **Resources** (chat links + notes) can be attached to any task or deliverable.
+  Each one is either **shared** (everyone sees it, lives in the workspace blob)
+  or **private** (only you, lives in `private_resources` under per-user RLS).
 
-> Why this is needed: the shared workspace blob is readable with the public anon
-> key, so anything stored there is visible to everyone. Private resources live in a
-> **separate table** gated by per-user RLS, so they are never sent to other users.
+If you set up the earlier vault already, you only need **steps 3 + 4** below
+(the migration and the workspace write-lock). Steps 1–2 you've done.
 
 ---
 
 ## 1. Enable email auth
 
-Supabase dashboard → **Authentication → Providers → Email** → enable.
+Supabase dashboard → **Authentication → Providers → Email** → enable, and turn
+**off** "Confirm email" for a quick internal setup.
 
-For a quick internal setup, turn **off** "Confirm email" (Authentication →
-Providers → Email → uncheck *Confirm email*). Otherwise each user must confirm
-via an email link before signing in.
+## 2. Create the accounts
 
-## 2. Create the user accounts
+Authentication → **Users → Add user** → one account per person:
 
-Authentication → **Users → Add user** → create an account for each person who
-needs a private vault:
+- **You** — `vihancmapa@gmail.com` (this is the editor; matches `EDITOR_EMAIL`
+  in `fm-navigate/config.js`).
+- **Richard** — his own email + password (read-only viewer).
 
-- your email + a password (this is "only you")
-- (optional) Richard, if he wants his **own** separate private vault
+> If you change the editor's email, update `EDITOR_EMAIL` in `config.js` to match.
 
-Each user only ever sees their own rows — accounts do not share resources.
+## 3. Resources table + RLS (create or migrate)
 
-## 3. Create the table + RLS policies
+SQL Editor → **New query** → **Run**.
 
-SQL Editor → **New query** → paste and **Run**:
+**If the table does not exist yet** (fresh setup):
 
 ```sql
 create table if not exists public.private_resources (
-  id            uuid primary key default gen_random_uuid(),
-  user_id       uuid not null references auth.users(id) on delete cascade,
-  deliverable_id text not null,
-  kind          text not null default 'link',   -- 'link' | 'note'
-  title         text default '',
-  url           text default '',
-  note          text default '',
-  created_at    timestamptz not null default now()
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references auth.users(id) on delete cascade,
+  parent_type text not null default 'deliverable',  -- 'task' | 'deliverable'
+  parent_id   text not null,
+  kind        text not null default 'link',          -- 'link' | 'note'
+  title       text default '',
+  url         text default '',
+  note        text default '',
+  created_at  timestamptz not null default now()
 );
 
 alter table public.private_resources enable row level security;
@@ -58,35 +60,55 @@ create policy "own rows - update" on public.private_resources
 create policy "own rows - delete" on public.private_resources
   for delete to authenticated using (auth.uid() = user_id);
 
-create index if not exists private_resources_owner_deliverable
-  on public.private_resources (user_id, deliverable_id);
+create index if not exists private_resources_owner_parent
+  on public.private_resources (user_id, parent_type, parent_id);
 ```
 
-## 4. Let signed-in users still read the shared workspace
-
-When you sign in, requests carry your user token (role `authenticated`) instead
-of `anon`. If the existing `workspace` SELECT policy only allows `anon`, the
-tasks/deliverables would fail to load while signed in. Add an authenticated read
-(safe — the workspace is shared anyway):
+**If you already created the earlier vault table** (it had `deliverable_id`),
+migrate it instead — existing rows are preserved as deliverable resources:
 
 ```sql
-create policy "workspace read (authenticated)" on public.workspace
-  for select to authenticated using (true);
+alter table public.private_resources rename column deliverable_id to parent_id;
+alter table public.private_resources add column if not exists parent_type text not null default 'deliverable';
+create index if not exists private_resources_owner_parent
+  on public.private_resources (user_id, parent_type, parent_id);
 ```
 
-(If you already have a `to public` select policy on `workspace`, you can skip this.)
+## 4. Lock workspace WRITES to the editor, allow READS to anyone signed in
+
+Reads (signed-in) and the editor's writes now go **directly** to the `workspace`
+table (no more Edge Function). Find your editor **User UID**: Authentication →
+Users → click your user → copy **User UID**. Paste it into the policy below.
+
+```sql
+-- everyone signed in can READ the shared workspace
+create policy "workspace read (authenticated)" on public.workspace
+  for select to authenticated using (true);
+
+-- only the editor (you) can WRITE it
+create policy "workspace write (editor only)" on public.workspace
+  for update to authenticated
+  using (auth.uid() = 'PASTE-YOUR-USER-UID-HERE')
+  with check (auth.uid() = 'PASTE-YOUR-USER-UID-HERE');
+```
+
+(If the read policy already exists from before, the editor `create policy` for it
+will error "already exists" — that's fine, just run the write policy.)
+
+> The old `tasks-mutate` Edge Function is no longer used and can be left in place
+> or deleted later — your call.
 
 ---
 
-## Using it
+## How it works now
 
-1. Open any deliverable → **Private resources** section at the bottom → **Sign in**.
-2. Enter your email + password.
-3. **Add resource** → Link or Note → paste a ChatGPT / Gemini / NotebookLM URL,
-   title, and an optional note → Save.
-4. Resources are tied to that deliverable and that account. Richard signed in as
-   himself (or not signed in) never sees them.
+1. Open the app → **Sign in** landing page → enter email + password.
+2. Signed in as **you** → full edit. Signed in as **Richard** (or anyone else) →
+   read-only view.
+3. On any task or deliverable → **Resources** → **Add resource** → choose
+   **Shared** (everyone) or **Private (only me)** → paste a ChatGPT / Gemini /
+   NotebookLM link, title, optional note → Save.
+4. The lock icon on a resource flips it between shared and private.
 
-**Caveat:** this protects against other *users*. A Supabase project owner with
-service-role/dashboard access can still read any table — that's inherent to being
-the project admin.
+**Caveat:** privacy protects against other *users*. A Supabase project owner with
+service-role/dashboard access can read any table — inherent to being the admin.

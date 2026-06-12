@@ -30,6 +30,8 @@ const I = {
   block:    (p) => <Ico {...p}><circle cx="12" cy="12" r="9"/><path d="M5.6 5.6l12.8 12.8"/></Ico>,
   flame:    (p) => <Ico {...p}><path d="M12 3c1.5 3 4.5 4.5 4.5 8.5a4.5 4.5 0 11-9 0c0-1.7.8-2.8 1.6-3.7C9 9.5 9.5 11 11 11c0-2.5-1-4 1-8z"/></Ico>,
   link:     (p) => <Ico {...p}><path d="M10 13a5 5 0 007 0l2-2a5 5 0 00-7-7l-1 1M14 11a5 5 0 00-7 0l-2 2a5 5 0 007 7l1-1"/></Ico>,
+  lock:     (p) => <Ico {...p}><rect x="4.5" y="11" width="15" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 018 0V11"/></Ico>,
+  unlock:   (p) => <Ico {...p}><rect x="4.5" y="11" width="15" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 017.6-1.8"/></Ico>,
   target:   (p) => <Ico {...p}><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></Ico>,
   user:     (p) => <Ico {...p}><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-6 8-6s8 2 8 6"/></Ico>,
   msg:      (p) => <Ico {...p}><path d="M21 12a8 8 0 01-11.5 7.2L4 20l1-4.8A8 8 0 1121 12z"/></Ico>,

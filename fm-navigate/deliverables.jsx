@@ -196,132 +196,148 @@ function DeliverablesScreen({ deliverables, tasks, canEdit, onOpen, onCreate }) 
   );
 }
 
-/* ---- PRIVATE resources vault (per-deliverable, per-user) ----
-   Real privacy via Supabase Auth + RLS: only the signed-in owner can
-   read/write their rows. Self-contained — manages its own auth. ---- */
-function ResourcesPanel({ deliverableId }) {
+/* ---- Resources (links + notes) on a task or deliverable ----
+   One unified list. Each resource is either SHARED (everyone sees it; lives in
+   the workspace blob; only the editor can change it) or PRIVATE (only you see
+   it; lives in Supabase under per-user RLS). A per-item lock toggles between
+   the two. parentType: 'task' | 'deliverable'.
+   onAddPublic(res) / onDeletePublic(id) mutate the shared blob (editor only). */
+function ResourceList({ parentType, parentId, publicItems = [], canEdit, onAddPublic, onDeletePublic }) {
   const I = window.I;
   const ds = window.dataService;
-  const supported = ds && ds.authReady && ds.authReady();
-  const [user, setUser] = useStateD(null);
-  const [items, setItems] = useStateD([]);
-  const [loading, setLoading] = useStateD(false);
+  const vault = ds && ds.authReady && ds.authReady(); // private storage available
+  const [priv, setPriv] = useStateD([]);
   const [err, setErr] = useStateD('');
-  // sign-in form
-  const [showSignIn, setShowSignIn] = useStateD(false);
-  const [email, setEmail] = useStateD('');
-  const [pw, setPw] = useStateD('');
-  // add-resource form
   const [adding, setAdding] = useStateD(false);
-  const [f, setF] = useStateD({ kind: 'link', title: '', url: '', note: '' });
-
-  useEffectD(() => {
-    if (!supported) return;
-    let alive = true;
-    ds.getUser().then(u => { if (alive) setUser(u); });
-    const off = ds.onAuth(u => { if (alive) setUser(u); });
-    return () => { alive = false; off && off(); };
-  }, [supported]);
+  const [busy, setBusy] = useStateD(false);
+  const [f, setF] = useStateD({ kind: 'link', title: '', url: '', note: '', private: !canEdit });
 
   const refresh = () => {
-    if (!user) { setItems([]); return; }
-    setLoading(true);
-    ds.listResources(deliverableId).then(rows => { setItems(rows); setLoading(false); });
+    if (!vault) { setPriv([]); return; }
+    ds.listResources(parentType, parentId).then(rows => setPriv((rows || []).map(r => ({ ...r, _private: true }))));
   };
-  useEffectD(() => { refresh(); }, [user, deliverableId]);
+  useEffectD(() => { refresh(); }, [parentType, parentId, vault]);
 
-  if (!supported) {
-    return (
-      <div className="card card-pad mt16">
-        <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.link size={13} /> Private resources</div>
-        <div className="muted" style={{ fontSize: 12.5 }}>Requires the shared (Supabase) backend with Auth enabled. See docs/PRIVATE-VAULT-SETUP.md.</div>
-      </div>
-    );
-  }
+  const items = [
+    ...publicItems.map(r => ({ ...r, _private: false })),
+    ...priv,
+  ];
 
-  const doSignIn = async () => {
-    setErr('');
-    const r = await ds.signIn(email.trim(), pw);
-    if (r.ok) { setShowSignIn(false); setEmail(''); setPw(''); }
-    else setErr(r.error || 'Sign-in failed.');
-  };
-  const doSignOut = async () => { await ds.signOut(); setItems([]); };
+  const resetForm = () => setF({ kind: 'link', title: '', url: '', note: '', private: !canEdit });
+
   const doAdd = async () => {
     setErr('');
     if (!f.title.trim() && !f.url.trim()) { setErr('Add a title or a link.'); return; }
-    const r = await ds.addResource({ deliverableId, kind: f.kind, title: f.title.trim(), url: f.url.trim(), note: f.note.trim() });
-    if (r.ok) { setF({ kind: 'link', title: '', url: '', note: '' }); setAdding(false); refresh(); }
-    else setErr(r.error || 'Could not save.');
+    const payload = { kind: f.kind, title: f.title.trim(), url: f.url.trim(), note: f.note.trim() };
+    if (f.private) {
+      if (!vault) { setErr('Private storage unavailable.'); return; }
+      setBusy(true);
+      const r = await ds.addResource({ parentType, parentId, ...payload });
+      setBusy(false);
+      if (!r.ok) { setErr(r.error || 'Could not save.'); return; }
+      refresh();
+    } else {
+      if (!canEdit) { setErr('Only the editor can add shared resources.'); return; }
+      onAddPublic && onAddPublic(payload);
+    }
+    resetForm(); setAdding(false);
   };
-  const doDelete = async (id) => {
-    const r = await ds.deleteResource(id);
-    if (r.ok) refresh(); else setErr(r.error || 'Could not delete.');
+
+  const doDelete = async (it) => {
+    setErr('');
+    if (it._private) {
+      const r = await ds.deleteResource(it.id);
+      if (r.ok) refresh(); else setErr(r.error || 'Could not delete.');
+    } else {
+      onDeletePublic && onDeletePublic(it.id);
+    }
   };
+
+  // flip an item between shared and private (touches the shared blob → editor only)
+  const doToggle = async (it) => {
+    setErr('');
+    if (!canEdit || !vault) return;
+    const base = { kind: it.kind, title: it.title || '', url: it.url || '', note: it.note || '' };
+    setBusy(true);
+    if (it._private) {
+      // private → shared
+      const r = await ds.deleteResource(it.id);
+      if (r.ok) { onAddPublic && onAddPublic(base); refresh(); } else setErr(r.error || 'Could not move.');
+    } else {
+      // shared → private
+      const r = await ds.addResource({ parentType, parentId, ...base });
+      if (r.ok) { onDeletePublic && onDeletePublic(it.id); refresh(); } else setErr(r.error || 'Could not move.');
+    }
+    setBusy(false);
+  };
+
+  const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (_) { return ''; } };
+  const canAdd = canEdit || vault; // editor can add shared; any signed-in user can add private
 
   return (
     <div className="card card-pad mt16">
       <div className="row between center mb8">
         <div className="section-eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-          <I.link size={13} /> Private resources
-          <span className="chip" style={{ fontSize: 10.5, padding: '1px 6px' }}>only you</span>
+          <I.link size={13} /> Resources
         </div>
-        {user
-          ? <span className="row gap8 center"><span className="muted" style={{ fontSize: 11.5 }}>{user.email}</span><button className="btn btn-subtle btn-sm" onClick={doSignOut}>Sign out</button></span>
-          : <button className="btn btn-subtle btn-sm" onClick={() => setShowSignIn(s => !s)}><I.user size={13} /> Sign in</button>}
+        {canAdd && !adding && <button className="btn btn-subtle btn-sm" onClick={() => { resetForm(); setAdding(true); }}><I.plus size={13} /> Add resource</button>}
       </div>
 
-      {!user && (
-        <>
-          <div className="muted" style={{ fontSize: 12.5, marginBottom: showSignIn ? 12 : 0 }}>
-            Save chat links (ChatGPT, Gemini, NotebookLM) and notes only you can see. Richard and third parties never receive them.
-          </div>
-          {showSignIn && (
-            <div className="col gap8" style={{ maxWidth: 320 }}>
-              <input className="input" type="email" placeholder="Email" value={email} onChange={e => setEmail(e.target.value)} />
-              <input className="input" type="password" placeholder="Password" value={pw} onChange={e => setPw(e.target.value)}
-                onKeyDown={e => { if (e.key === 'Enter') doSignIn(); }} />
-              <div className="row gap8"><button className="btn btn-primary btn-sm" onClick={doSignIn}>Sign in</button></div>
-            </div>
-          )}
-        </>
+      {items.length === 0 && !adding && (
+        <div className="muted" style={{ fontSize: 12.5 }}>No resources yet. Add links (ChatGPT, Gemini, NotebookLM…) or notes — keep them shared or mark them private to you.</div>
       )}
 
-      {user && (
-        <>
-          {loading && <div className="muted" style={{ fontSize: 12.5 }}>Loading…</div>}
-          {!loading && items.length === 0 && <div className="muted" style={{ fontSize: 12.5, marginBottom: 10 }}>No private resources yet.</div>}
-          <div className="col gap8">
-            {items.map(it => (
-              <div key={it.id} className="row gap10 center" style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
-                <span className="faint" style={{ flexShrink: 0 }}>{it.kind === 'note' ? <I.edit size={14} /> : <I.link size={14} />}</span>
-                <div className="grow" style={{ minWidth: 0 }}>
-                  {it.url
-                    ? <a href={it.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--accent)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' }}>{it.title || it.url}</a>
-                    : <div style={{ fontSize: 13.5, fontWeight: 600 }}>{it.title}</div>}
-                  {it.note && <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{it.note}</div>}
-                </div>
-                <button className="icon-btn" title="Delete" onClick={() => doDelete(it.id)} style={{ flexShrink: 0 }}><I.x size={15} /></button>
+      <div className="col gap8">
+        {items.map(it => (
+          <div key={(it._private ? 'p' : 's') + it.id} className="row gap10 center" style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+            <span className="faint" style={{ flexShrink: 0 }}>{it.kind === 'note' ? <I.edit size={14} /> : <I.link size={14} />}</span>
+            <div className="grow" style={{ minWidth: 0 }}>
+              <div className="row gap6 center" style={{ minWidth: 0 }}>
+                {it.url
+                  ? <a href={it.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--accent)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title || it.url}</a>
+                  : <span style={{ fontSize: 13.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title}</span>}
+                {it._private
+                  ? <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }} title="Only you can see this"><I.lock size={10} /> only you</span>
+                  : <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0, color: 'var(--muted)' }} title="Everyone in the workspace sees this">shared</span>}
+                {it.url && host(it.url) && <span className="faint" style={{ fontSize: 11, flexShrink: 0 }}>{host(it.url)}</span>}
               </div>
-            ))}
-          </div>
-
-          {adding ? (
-            <div className="col gap8 mt12" style={{ maxWidth: 480 }}>
-              <div className="row gap8 center">
-                <select className="input" style={{ width: 110 }} value={f.kind} onChange={e => setF(s => ({ ...s, kind: e.target.value }))}>
-                  <option value="link">Link</option>
-                  <option value="note">Note</option>
-                </select>
-                <input className="input grow" placeholder="Title (e.g. ChatGPT — architecture chat)" value={f.title} onChange={e => setF(s => ({ ...s, title: e.target.value }))} />
-              </div>
-              {f.kind === 'link' && <input className="input" placeholder="https://chat.openai.com/…" value={f.url} onChange={e => setF(s => ({ ...s, url: e.target.value }))} />}
-              <textarea className="ai-textarea" style={{ minHeight: 50, fontSize: 13 }} placeholder="Note (optional)" value={f.note} onChange={e => setF(s => ({ ...s, note: e.target.value }))} />
-              <div className="row gap8"><button className="btn btn-primary btn-sm" onClick={doAdd}><I.check size={13} /> Save</button><button className="btn btn-subtle btn-sm" onClick={() => setAdding(false)}>Cancel</button></div>
+              {it.note && <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{it.note}</div>}
             </div>
-          ) : (
-            <button className="btn btn-subtle btn-sm mt12" onClick={() => setAdding(true)}><I.plus size={13} /> Add resource</button>
+            {canEdit && vault && (
+              <button className="icon-btn" title={it._private ? 'Make shared' : 'Make private (only you)'} onClick={() => doToggle(it)} disabled={busy} style={{ flexShrink: 0 }}>
+                {it._private ? <I.unlock size={14} /> : <I.lock size={14} />}
+              </button>
+            )}
+            {(it._private || canEdit) && (
+              <button className="icon-btn" title="Delete" onClick={() => doDelete(it)} style={{ flexShrink: 0 }}><I.x size={15} /></button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {adding && (
+        <div className="col gap8 mt12" style={{ maxWidth: 480 }}>
+          <div className="row gap8 center">
+            <select className="input" style={{ width: 110 }} value={f.kind} onChange={e => setF(s => ({ ...s, kind: e.target.value }))}>
+              <option value="link">Link</option>
+              <option value="note">Note</option>
+            </select>
+            <input className="input grow" placeholder="Title (e.g. ChatGPT — architecture chat)" value={f.title} onChange={e => setF(s => ({ ...s, title: e.target.value }))} />
+          </div>
+          {f.kind === 'link' && <input className="input" placeholder="https://chat.openai.com/…" value={f.url} onChange={e => setF(s => ({ ...s, url: e.target.value }))} />}
+          <textarea className="ai-textarea" style={{ minHeight: 50, fontSize: 13 }} placeholder="Note (optional)" value={f.note} onChange={e => setF(s => ({ ...s, note: e.target.value }))} />
+          {/* shared vs private */}
+          {vault && (
+            <div className="seg" style={{ alignSelf: 'flex-start' }}>
+              <button className={!f.private ? 'active' : ''} disabled={!canEdit} title={canEdit ? '' : 'Only the editor can add shared resources'} onClick={() => setF(s => ({ ...s, private: false }))}><I.link size={13} /> Shared</button>
+              <button className={f.private ? 'active' : ''} onClick={() => setF(s => ({ ...s, private: true }))}><I.lock size={13} /> Private (only me)</button>
+            </div>
           )}
-        </>
+          <div className="row gap8">
+            <button className="btn btn-primary btn-sm" onClick={doAdd} disabled={busy}><I.check size={13} /> Save</button>
+            <button className="btn btn-subtle btn-sm" onClick={() => { setAdding(false); setErr(''); }}>Cancel</button>
+          </div>
+        </div>
       )}
 
       {err && <div style={{ color: 'var(--st-blocked)', fontSize: 12, marginTop: 8 }}>{err}</div>}
@@ -330,7 +346,7 @@ function ResourcesPanel({ deliverableId }) {
 }
 
 /* ---- detail: breadcrumb + rollup + sub-deliverables + tasks ---- */
-function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, onBack, onOpen, onOpenTask, onCreate, onEdit, onDelete, onAssign }) {
+function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, currentUser, onBack, onOpen, onOpenTask, onCreate, onEdit, onDelete, onAssign, onAddResource, onDeleteResource }) {
   const I = window.I;
   const [picking, setPicking] = useStateD(false);
   const [addingSub, setAddingSub] = useStateD(false);
@@ -452,8 +468,11 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, onBack, 
           ))}
         </div>
 
-        {/* private, per-user resource vault */}
-        <ResourcesPanel deliverableId={deliverable.id} />
+        {/* resources — shared + private, with a per-item lock toggle */}
+        <ResourceList parentType="deliverable" parentId={deliverable.id} publicItems={deliverable.resources || []}
+          canEdit={canEdit}
+          onAddPublic={(res) => onAddResource && onAddResource('deliverable', deliverable.id, res)}
+          onDeletePublic={(id) => onDeleteResource && onDeleteResource('deliverable', deliverable.id, id)} />
 
         {canEdit && (
           <div className="row mt16">
@@ -467,6 +486,6 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, onBack, 
 }
 
 Object.assign(window, {
-  DeliverablesScreen, DeliverableDetail, DeliverablePicker, DeliverableChip,
+  DeliverablesScreen, DeliverableDetail, DeliverablePicker, DeliverableChip, ResourceList,
   dlvHelpers: { rollup, childrenOf, subtreeIds, pathOf },
 });

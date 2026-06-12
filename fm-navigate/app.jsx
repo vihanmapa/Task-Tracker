@@ -57,46 +57,46 @@ function App() {
   // When applying a remote (load/realtime) change we must NOT echo it back.
   const skipSaveRef = useRefA(true); // skip the very first effect run (hydration)
 
-  // Persist: always mirror locally; push to Supabase only when editing is unlocked.
+  // ---- auth (Supabase) — identity drives edit rights ----
+  // undefined = still checking · null = signed out · object = signed in
+  const [authUser, setAuthUser] = useStateA(shared ? undefined : null);
+  const EDITOR_EMAIL = ((window.APP_CONFIG && window.APP_CONFIG.EDITOR_EMAIL) || '').toLowerCase();
+  const myEmail = ((authUser && authUser.email) || '').toLowerCase();
+  // The editor account = Vihan (PM). Any other signed-in account = read-only Founder view.
+  const currentUser = (!shared || myEmail === EDITOR_EMAIL) ? 'vihan' : 'richard';
+  const canEdit = !shared || (!!authUser && myEmail === EDITOR_EMAIL);
+
+  // Persist: always mirror locally; push to Supabase only when the editor is signed in.
   useEffectA(() => {
     try { localStorage.setItem('fm_tasks', JSON.stringify(tasks)); } catch (_) {}
     try { localStorage.setItem('fm_deliverables', JSON.stringify(deliverables)); } catch (_) {}
     if (skipSaveRef.current) { skipSaveRef.current = false; return; }
-    if (shared && editUnlocked) {
+    if (shared && canEdit) {
       const blob = [...tasks, ...deliverables.map(d => ({ ...d, kind: 'deliverable' }))];
       ds.saveTasks(blob).then(r => { if (!r.ok) console.warn('[app] remote save failed', r); });
     }
   }, [tasks, deliverables]);
 
-  // ---- active persona (who is signed in) ----
-  const [currentUser, setCurrentUser] = useStateA(() => {
-    try { const s = localStorage.getItem('fm_user'); if (s === 'vihan' || s === 'richard') return s; } catch (_) {}
-    return 'richard';
-  });
-  useEffectA(() => { try { localStorage.setItem('fm_user', currentUser); } catch (_) {} }, [currentUser]);
-
-  // Editing is unlocked by the shared password (local backend = always allowed).
-  const [editUnlocked, setEditUnlocked] = useStateA(() => !shared);
-  const canEdit = editUnlocked && currentUser === 'vihan'; // PM can mutate; Founder is read-only
-
-  // Initial remote load + realtime subscription (Supabase backend only).
+  // Resolve the current Supabase session, then keep it in sync.
   useEffectA(() => {
     if (!shared) return;
+    let alive = true;
+    ds.getUser().then(u => { if (alive) setAuthUser(u || null); });
+    const off = ds.onAuth(u => { if (alive) setAuthUser(u || null); });
+    return () => { alive = false; off && off(); };
+  }, []);
+
+  const signOut = useCallbackA(() => { ds.signOut().then(() => setAuthUser(null)); }, []);
+
+  // Initial remote load + realtime subscription — runs once signed in
+  // (reads now require an authenticated session).
+  useEffectA(() => {
+    if (!shared || !authUser) return;
     let unsub = () => {};
     ds.loadTasks().then(remote => { const s = splitBlob(remote); skipSaveRef.current = true; setTasks(s.tasks); setDeliverables(s.deliverables); });
     unsub = ds.subscribe(incoming => { const s = splitBlob(incoming); skipSaveRef.current = true; setTasks(s.tasks); setDeliverables(s.deliverables); });
     return () => unsub();
-  }, []);
-
-  // Prompt for the shared password, verify server-side, then unlock PM mode.
-  const unlockEdit = useCallbackA(async () => {
-    if (!shared) { setEditUnlocked(true); setCurrentUser('vihan'); return; }
-    const pw = window.prompt('Enter the edit password to unlock PM (edit) mode:');
-    if (pw == null) return;
-    const ok = await ds.verifyPassword(pw);
-    if (ok) { ds.setPassword(pw); setEditUnlocked(true); setCurrentUser('vihan'); }
-    else window.alert('Wrong password.');
-  }, [shared]);
+  }, [shared, authUser && authUser.id]);
 
   // ---- routing ----
   const [route, setRoute] = useStateA('dashboard');
@@ -151,6 +151,7 @@ function App() {
   }, [canEdit, currentUser]);
 
   const addComment = useCallbackA((id, text) => {
+    if (!canEdit) return;
     setTasks(ts => ts.map(t => t.id === id ? {
       ...t,
       comments: [...(t.comments || []), { id: 'c' + Date.now(), userId: currentUser, comment: text, createdAt: new Date().toISOString() }],
@@ -303,10 +304,26 @@ function App() {
     }));
   }, [canEdit, currentUser]);
 
+  // ---- shared (public) resources attached to a task or deliverable ----
+  // Private resources live in Supabase (per-user RLS); these public ones live
+  // in the shared blob so everyone sees them — only the editor can change them.
+  const rrid = () => 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const addEntityResource = useCallbackA((parentType, parentId, res) => {
+    if (!canEdit) return;
+    const item = { id: rrid(), kind: res.kind || 'link', title: res.title || '', url: res.url || '', note: res.note || '' };
+    if (parentType === 'task') setTasks(ts => ts.map(t => t.id === parentId ? { ...t, resources: [...(t.resources || []), item] } : t));
+    else setDeliverables(ds2 => ds2.map(d => d.id === parentId ? { ...d, resources: [...(d.resources || []), item] } : d));
+  }, [canEdit]);
+  const deleteEntityResource = useCallbackA((parentType, parentId, resId) => {
+    if (!canEdit) return;
+    if (parentType === 'task') setTasks(ts => ts.map(t => t.id === parentId ? { ...t, resources: (t.resources || []).filter(r => r.id !== resId) } : t));
+    else setDeliverables(ds2 => ds2.map(d => d.id === parentId ? { ...d, resources: (d.resources || []).filter(r => r.id !== resId) } : d));
+  }, [canEdit]);
+
   const goAsk = useCallbackA((q) => { if (typeof q === 'string') setAskQ(q); setRoute('ask'); }, []);
 
-  const loadDemo = () => { if (confirm('Load the demo FM Navigate task set? This replaces your current tasks.')) { setTasks(window.SEED_TASKS); setDeliverables(window.SEED_DELIVERABLES); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
-  const clearAll = () => { if (confirm('Clear ALL tasks and start from a blank slate? This cannot be undone.')) { setTasks([]); setDeliverables([]); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
+  const loadDemo = () => { if (!canEdit) return; if (confirm('Load the demo FM Navigate task set? This replaces your current tasks.')) { setTasks(window.SEED_TASKS); setDeliverables(window.SEED_DELIVERABLES); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
+  const clearAll = () => { if (!canEdit) return; if (confirm('Clear ALL tasks and start from a blank slate? This cannot be undone.')) { setTasks([]); setDeliverables([]); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
 
   // ---- counts for nav ----
   const counts = useMemoA(() => ({
@@ -318,6 +335,18 @@ function App() {
   const selectedDeliverable = useMemoA(() => deliverables.find(d => d.id === dlvSelected), [deliverables, dlvSelected]);
 
   const titleMap = { dashboard: 'Dashboard', tasks: 'Tasks', deliverables: 'Deliverables', dlvDetail: 'Deliverable', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
+
+  // ---- auth gate: login is required before anything renders ----
+  if (shared && authUser === undefined) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 14 }}>
+        Loading…
+      </div>
+    );
+  }
+  if (shared && !authUser) {
+    return <LoginScreen onSignedIn={setAuthUser} />;
+  }
 
   return (
     <div className="app">
@@ -347,23 +376,21 @@ function App() {
         <div className="sidebar-spacer" />
 
         <div className="nav-label">Signed in as</div>
-        {['richard', 'vihan'].map(uid => {
-          const u = window.USERS[uid];
-          const me = currentUser === uid;
-          return (
-            <button key={uid} className="team-row" onClick={() => {
-                setComposer(false);
-                if (uid === 'vihan' && !canEdit) { unlockEdit(); }
-                else { setCurrentUser(uid); }
-              }}
-              style={{ width: '100%', textAlign: 'left', border: me ? '1px solid var(--accent)' : '1px solid transparent', background: me ? 'var(--accent-soft)' : 'transparent' }}
-              title={`View as ${u.name}`}>
-              <window.Avatar user={uid} size={30} />
-              <div className="grow"><div className="team-name">{u.name}</div><div className="team-role">{u.role}{me ? ' · You' : ''}</div></div>
-              {me && <span className="nav-ico" style={{ color: 'var(--accent)' }}><I.check size={15} /></span>}
-            </button>
-          );
-        })}
+        <div className="team-row" style={{ width: '100%', textAlign: 'left', border: '1px solid var(--accent)', background: 'var(--accent-soft)' }}>
+          <window.Avatar user={currentUser} size={30} />
+          <div className="grow" style={{ minWidth: 0 }}>
+            <div className="team-name">{window.USERS[currentUser].name}</div>
+            <div className="team-role" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {shared && authUser ? authUser.email : window.USERS[currentUser].role}
+            </div>
+          </div>
+          <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }}>{canEdit ? 'PM' : 'Read-only'}</span>
+        </div>
+        {shared && authUser && (
+          <button className="btn btn-subtle btn-sm" style={{ width: '100%', marginTop: 8 }} onClick={signOut}>
+            <I.x size={13} /> Sign out
+          </button>
+        )}
       </aside>
 
       {/* ---- main ---- */}
@@ -396,14 +423,16 @@ function App() {
             onOpen={openDeliverable} onCreate={createDeliverable} />
         )}
         {route === 'dlvDetail' && (
-          <window.DeliverableDetail deliverable={selectedDeliverable} deliverables={deliverables} tasks={tasks} canEdit={canEdit}
+          <window.DeliverableDetail deliverable={selectedDeliverable} deliverables={deliverables} tasks={tasks} canEdit={canEdit} currentUser={currentUser}
             onBack={() => { setRoute('deliverables'); setDlvSelected(null); }} onOpen={openDeliverable} onOpenTask={openTask}
-            onCreate={createDeliverable} onEdit={editDeliverable} onDelete={deleteDeliverable} onAssign={assignDeliverable} />
+            onCreate={createDeliverable} onEdit={editDeliverable} onDelete={deleteDeliverable} onAssign={assignDeliverable}
+            onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} />
         )}
         {route === 'detail' && (
           <window.TaskDetail task={selectedTask} deliverables={deliverables} onClose={() => { setRoute('tasks'); setSelected(null); }}
             onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditTask={editTask} onRevertEdit={revertEdit}
-            onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onUpdate={() => {}} canEdit={canEdit} currentUser={currentUser} />
+            onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onUpdate={() => {}} canEdit={canEdit} currentUser={currentUser}
+            onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} />
         )}
         {route === 'summary' && <window.WeeklySummary tasks={tasks} onOpen={openTask} />}
         {route === 'ask' && <window.AskAI tasks={tasks} initialQuestion={askQ} clearInitial={() => setAskQ(null)} />}
@@ -492,5 +521,59 @@ function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, taskCount = 0 }) {
   );
 }
 
+/* ---------------- Login landing ----------------
+   Required gate: the whole app is hidden until a user signs in with their
+   Supabase account. The editor account unlocks editing; any other account
+   gets a read-only view. */
+function LoginScreen({ onSignedIn }) {
+  const I = window.I;
+  const ds = window.dataService;
+  const [email, setEmail] = useStateA('');
+  const [pw, setPw] = useStateA('');
+  const [busy, setBusy] = useStateA(false);
+  const [err, setErr] = useStateA('');
+
+  const submit = async () => {
+    if (busy) return;
+    setErr('');
+    if (!email.trim() || !pw) { setErr('Enter your email and password.'); return; }
+    setBusy(true);
+    const r = await ds.signIn(email.trim(), pw);
+    setBusy(false);
+    if (r.ok) { setPw(''); onSignedIn && onSignedIn(r.user || null); }
+    else setErr(r.error || 'Sign-in failed.');
+  };
+
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'var(--bg)' }}>
+      <div className="card card-pad fade-in" style={{ width: '100%', maxWidth: 380 }}>
+        <div className="brand" style={{ marginBottom: 20 }}>
+          <div className="brand-mark"><I.target size={18} /></div>
+          <div>
+            <div className="brand-name">FM Navigate</div>
+            <div className="brand-sub">EXECUTION HUB</div>
+          </div>
+        </div>
+        <div style={{ fontSize: 19, fontWeight: 800, letterSpacing: '-0.02em', marginBottom: 4 }}>Sign in</div>
+        <div className="muted" style={{ fontSize: 13, marginBottom: 18 }}>Sign in to view and manage the workspace.</div>
+        <div className="col gap10">
+          <input className="input" type="email" placeholder="Email" autoFocus value={email}
+            onChange={e => setEmail(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
+          <input className="input" type="password" placeholder="Password" value={pw}
+            onChange={e => setPw(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
+          <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }} onClick={submit} disabled={busy}>
+            {busy ? 'Signing in…' : <><I.user size={14} /> Sign in</>}
+          </button>
+        </div>
+        {err && <div style={{ color: 'var(--st-blocked)', fontSize: 12.5, marginTop: 12 }}>{err}</div>}
+        <div className="muted" style={{ fontSize: 11.5, marginTop: 16, lineHeight: 1.5 }}>
+          Accounts are managed in Supabase. Ask the workspace owner for access.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 window.App = App;
+window.LoginScreen = LoginScreen;
 window.ACCENTS = ACCENTS;
