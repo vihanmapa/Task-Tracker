@@ -225,10 +225,11 @@ function KanbanView({ tasks, onOpen, onMove, canEdit = true }) {
    Log a % complete + a note + evidence (a link or an attached document). */
 const MAX_FILE_BYTES = 1.5 * 1024 * 1024; // 1.5MB — kept small for localStorage
 
-function ProgressLog({ task, onLog, canEdit, currentUser }) {
+function ProgressLog({ task, onLog, onEdit, onDelete, canEdit, currentUser }) {
   const I = window.I;
   const log = [...(task.progressLog || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
   const [open, setOpen] = useStateT(false);
+  const [editingId, setEditingId] = useStateT(null); // null = logging new; else the entry id being edited
   const [status, setStatus] = useStateT(task.status);
   const [pct, setPct] = useStateT(task.progress || 0);
   const [note, setNote] = useStateT('');
@@ -243,7 +244,21 @@ function ProgressLog({ task, onLog, canEdit, currentUser }) {
   const today = dayStr();
   const [date, setDate] = useStateT(today);
 
-  const openForm = () => { setStatus(task.status); setPct(task.progress || 0); setNote(''); setLinks(['']); setFiles([]); setDate(dayStr()); setErr(''); setOpen(true); };
+  const openForm = () => { setEditingId(null); setStatus(task.status); setPct(task.progress || 0); setNote(''); setLinks(['']); setFiles([]); setDate(dayStr()); setErr(''); setOpen(true); };
+
+  // open the same form pre-filled to edit an existing entry
+  const openEditForm = (e) => {
+    setEditingId(e.id);
+    setStatus(e.status || task.status);
+    setPct(e.percent || 0);
+    setNote(e.note || '');
+    const ls = (e.links && e.links.length ? e.links : (e.link ? [e.link] : []));
+    setLinks(ls.length ? ls : ['']);
+    const fs = (e.files && e.files.length ? e.files : (e.fileName ? [{ name: e.fileName, data: e.fileData, type: '' }] : []));
+    setFiles(fs);
+    setDate(dayStr(e.at));
+    setErr(''); setOpen(true);
+  };
 
   const setLinkAt = (i, v) => setLinks(ls => ls.map((l, j) => j === i ? v : l));
   const addLink = () => setLinks(ls => [...ls, '']);
@@ -411,7 +426,7 @@ function ProgressLog({ task, onLog, canEdit, currentUser }) {
 }
 
 /* ---------------- Editable details panel ---------------- */
-function TaskEditPanel({ task, onSave, onCancel }) {
+function TaskEditPanel({ task, allTasks = [], onSave, onCancel }) {
   const I = window.I;
   const [f, setF] = useStateT({
     title: task.title || '',
@@ -423,8 +438,14 @@ function TaskEditPanel({ task, onSave, onCancel }) {
     effort: task.effort || 'M',
     category: task.category || 'Technical',
   });
+  const [depTaskIds, setDepTaskIds] = useStateT(task.depTaskIds || []);
   const set = (k, v) => setF(s => ({ ...s, [k]: v }));
   const Lbl = ({ children }) => <label className="field-label" style={{ marginBottom: 5, marginTop: 14, display: 'block' }}>{children}</label>;
+
+  // tasks selectable as dependencies: everything except this task and ones already added
+  const depOptions = allTasks.filter(t => t.id !== task.id && !depTaskIds.includes(t.id));
+  const addDep = (id) => { if (id) setDepTaskIds(ids => ids.includes(id) ? ids : [...ids, id]); };
+  const rmDep = (id) => setDepTaskIds(ids => ids.filter(x => x !== id));
 
   const save = () => {
     onSave({
@@ -432,6 +453,7 @@ function TaskEditPanel({ task, onSave, onCancel }) {
       description: f.description.trim(),
       successCriteria: f.successCriteria.trim(),
       dependencies: f.dependencies.split('\n').map(s => s.trim()).filter(Boolean),
+      depTaskIds,
       risk: f.risk.trim(),
       priority: f.priority,
       effort: f.effort,
@@ -450,7 +472,26 @@ function TaskEditPanel({ task, onSave, onCancel }) {
       <textarea className="ai-textarea" style={{ minHeight: 90, fontSize: 13.5 }} value={f.description} onChange={e => set('description', e.target.value)} />
       <Lbl>Success criteria</Lbl>
       <textarea className="ai-textarea" style={{ minHeight: 60, fontSize: 13.5 }} value={f.successCriteria} onChange={e => set('successCriteria', e.target.value)} />
-      <Lbl>Dependencies <span className="faint" style={{ fontWeight: 400, textTransform: 'none' }}>· one per line</span></Lbl>
+      <Lbl>Dependency tasks <span className="faint" style={{ fontWeight: 400, textTransform: 'none' }}>· link other tasks</span></Lbl>
+      {depTaskIds.length > 0 && (
+        <div className="row gap8 mb8" style={{ flexWrap: 'wrap' }}>
+          {depTaskIds.map(id => {
+            const dt = allTasks.find(x => x.id === id);
+            return (
+              <span key={id} className="chip">
+                <span style={{ width: 7, height: 7, borderRadius: 99, flexShrink: 0, background: dt ? ((window.STATUS_META[dt.status] || {}).c || 'var(--muted)') : 'var(--muted)' }} />
+                <span style={{ maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dt ? dt.title : id}</span>
+                <button className="icon-btn" style={{ width: 18, height: 18 }} onClick={() => rmDep(id)} title="Remove"><I.x size={12} /></button>
+              </span>
+            );
+          })}
+        </div>
+      )}
+      <select className="input" value="" onChange={e => { addDep(e.target.value); e.target.value = ''; }} disabled={!depOptions.length}>
+        <option value="">{depOptions.length ? '+ Add a dependency task…' : 'No other tasks to link'}</option>
+        {depOptions.map(t => <option key={t.id} value={t.id}>{t.id} · {t.title}</option>)}
+      </select>
+      <Lbl>Dependencies <span className="faint" style={{ fontWeight: 400, textTransform: 'none' }}>· free text, one per line</span></Lbl>
       <textarea className="ai-textarea" style={{ minHeight: 70, fontSize: 13.5 }} value={f.dependencies} onChange={e => set('dependencies', e.target.value)} />
       <Lbl>Risk</Lbl>
       <textarea className="ai-textarea" style={{ minHeight: 60, fontSize: 13.5 }} value={f.risk} onChange={e => set('risk', e.target.value)} />
@@ -483,7 +524,7 @@ function TaskEditPanel({ task, onSave, onCancel }) {
 }
 
 /* ---------------- Task detail ---------------- */
-function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onAddResource, onDeleteResource, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
+function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onAddResource, onDeleteResource, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
   const I = window.I;
   const [comment, setComment] = useStateT('');
   const [editing, setEditing] = useStateT(false);
@@ -491,8 +532,10 @@ function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, 
   const owner = window.USERS[task.ownerId];
   const dlv = deliverables.find(d => d.id === task.deliverableId);
 
+  const taskTitle = (id) => { const t = allTasks.find(x => x.id === id); return t ? `${t.id} ${t.title}` : id; };
   const fmtVal = (field, v) => {
     if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) return '—';
+    if (field === 'depTaskIds' && Array.isArray(v)) return v.map(taskTitle).join('; ');
     if (Array.isArray(v)) return v.join('; ');
     if (field === 'effort') return window.EFFORT_LABEL[v] || v;
     if (field === 'ownerId') return window.USERS[v]?.name || v;
@@ -549,7 +592,7 @@ function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, 
             </div>
 
             {editing ? (
-              <TaskEditPanel task={task}
+              <TaskEditPanel task={task} allTasks={allTasks}
                 onSave={(changes) => { onEditTask && onEditTask(task.id, changes); setEditing(false); }}
                 onCancel={() => setEditing(false)} />
             ) : (
@@ -565,6 +608,26 @@ function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, 
                     <div className="crit-item" style={{ background: 'var(--st-completed-bg)', borderRadius: 'var(--r-md)', padding: '11px 14px', marginBottom: 16 }}>
                       <span style={{ color: 'var(--st-completed)', marginTop: 1 }}><I.check size={16} /></span>
                       <span>{task.successCriteria}</span>
+                    </div>
+                  </>
+                )}
+
+                {task.depTaskIds?.length > 0 && (
+                  <>
+                    <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.link size={13} /> Dependency tasks</div>
+                    <div className="row gap8 mb16" style={{ flexWrap: 'wrap' }}>
+                      {task.depTaskIds.map(id => {
+                        const dt = allTasks.find(x => x.id === id);
+                        if (!dt) return <span key={id} className="chip faint">{id} (deleted)</span>;
+                        return (
+                          <button key={id} type="button" className="chip" onClick={() => onOpenTask && onOpenTask(id)}
+                            title={dt.title} style={{ cursor: 'pointer', maxWidth: 320 }}>
+                            <span style={{ width: 7, height: 7, borderRadius: 99, flexShrink: 0, background: (window.STATUS_META[dt.status] || {}).c || 'var(--muted)' }} />
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dt.title}</span>
+                            <span className="faint mono" style={{ fontSize: 11 }}>{dt.id}</span>
+                          </button>
+                        );
+                      })}
                     </div>
                   </>
                 )}
@@ -628,7 +691,7 @@ function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, 
             )}
 
             {/* progress log */}
-            <ProgressLog task={task} onLog={onLogProgress} canEdit={canEdit} currentUser={currentUser} />
+            <ProgressLog task={task} onLog={onLogProgress} onEdit={onEditProgress} onDelete={onDeleteProgress} canEdit={canEdit} currentUser={currentUser} />
 
             {/* resources — shared + private (per-item lock toggle) */}
             <div className="mt24">
