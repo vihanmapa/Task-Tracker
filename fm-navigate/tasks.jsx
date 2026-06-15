@@ -482,7 +482,14 @@ function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, 
     if (v == null || v === '' || (Array.isArray(v) && v.length === 0)) return '—';
     if (Array.isArray(v)) return v.join('; ');
     if (field === 'effort') return window.EFFORT_LABEL[v] || v;
+    if (field === 'ownerId') return window.USERS[v]?.name || v;
+    if (field === 'dueDate') return window.fmtDate(v);
     return String(v);
+  };
+  const toDateInput = (iso) => {
+    if (!iso) return '';
+    const dt = new Date(iso);
+    return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
   };
   const edits = [...(task.edits || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
 
@@ -668,12 +675,47 @@ function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, 
                       ? <window.DeliverableChip deliverable={dlv} onClick={() => onOpenDeliverable && onOpenDeliverable(dlv.id)} />
                       : <span className="meta-v">—</span>)}
               </div>
-              <div className="meta-row"><span className="meta-k">Status</span><window.StatusPill status={task.status} /></div>
-              <div className="meta-row"><span className="meta-k">Priority</span><window.PriorityTag priority={task.priority} /></div>
-              <div className="meta-row"><span className="meta-k">Owner</span><span className="row gap6 center"><window.Avatar user={owner} size={22} /><span className="meta-v">{owner.name}</span></span></div>
-              <div className="meta-row"><span className="meta-k">Due date</span><span className="meta-v"><window.DueTag iso={task.dueDate} /></span></div>
-              <div className="meta-row"><span className="meta-k">Effort</span><span className="meta-v">{window.EFFORT_LABEL[task.effort] || task.effort}</span></div>
-              <div className="meta-row"><span className="meta-k">Category</span><window.CatChip category={task.category} /></div>
+              <div className="meta-row"><span className="meta-k">Status</span>
+                {canEdit
+                  ? <select className="select meta-edit" value={task.status} onChange={e => onEditTask && onEditTask(task.id, { status: e.target.value })}>
+                      {window.STATUSES.map(s => <option key={s}>{s}</option>)}
+                    </select>
+                  : <window.StatusPill status={task.status} />}
+              </div>
+              <div className="meta-row"><span className="meta-k">Priority</span>
+                {canEdit
+                  ? <select className="select meta-edit" value={task.priority} onChange={e => onEditTask && onEditTask(task.id, { priority: e.target.value })}>
+                      {window.PRIORITIES.map(p => <option key={p}>{p}</option>)}
+                    </select>
+                  : <window.PriorityTag priority={task.priority} />}
+              </div>
+              <div className="meta-row"><span className="meta-k">Owner</span>
+                {canEdit
+                  ? <select className="select meta-edit" value={task.ownerId} onChange={e => onEditTask && onEditTask(task.id, { ownerId: e.target.value })}>
+                      {Object.values(window.USERS).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                    </select>
+                  : <span className="row gap6 center"><window.Avatar user={owner} size={22} /><span className="meta-v">{owner.name}</span></span>}
+              </div>
+              <div className="meta-row"><span className="meta-k">Due date</span>
+                {canEdit
+                  ? <input type="date" className="select meta-edit" value={toDateInput(task.dueDate)}
+                      onChange={e => onEditTask && onEditTask(task.id, { dueDate: e.target.value ? new Date(e.target.value + 'T17:00:00').toISOString() : null })} />
+                  : <span className="meta-v"><window.DueTag iso={task.dueDate} /></span>}
+              </div>
+              <div className="meta-row"><span className="meta-k">Effort</span>
+                {canEdit
+                  ? <select className="select meta-edit" value={task.effort} onChange={e => onEditTask && onEditTask(task.id, { effort: e.target.value })}>
+                      {Object.keys(window.EFFORT_LABEL).map(k => <option key={k} value={k}>{window.EFFORT_LABEL[k]}</option>)}
+                    </select>
+                  : <span className="meta-v">{window.EFFORT_LABEL[task.effort] || task.effort}</span>}
+              </div>
+              <div className="meta-row"><span className="meta-k">Category</span>
+                {canEdit
+                  ? <select className="select meta-edit" value={task.category} onChange={e => onEditTask && onEditTask(task.id, { category: e.target.value })}>
+                      {window.CATEGORIES.map(c => <option key={c}>{c}</option>)}
+                    </select>
+                  : <window.CatChip category={task.category} />}
+              </div>
               <div className="meta-row"><span className="meta-k">Created</span><span className="meta-v">{window.fmtDate(task.createdAt)}</span></div>
               <div className="meta-row"><span className="meta-k">Last updated</span><span className="meta-v">{window.fmtRelTime(task.updatedAt)}</span></div>
             </div>

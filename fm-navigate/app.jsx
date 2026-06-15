@@ -218,7 +218,7 @@ function App() {
   }, [canEdit, currentUser]);
 
   // edit task fields — diff each field, log the change, keep it revertable
-  const EDIT_LABELS = { title: 'Title', description: 'Description', successCriteria: 'Success criteria', dependencies: 'Dependencies', risk: 'Risk', priority: 'Priority', effort: 'Effort', category: 'Category' };
+  const EDIT_LABELS = { title: 'Title', description: 'Description', successCriteria: 'Success criteria', dependencies: 'Dependencies', risk: 'Risk', priority: 'Priority', effort: 'Effort', category: 'Category', status: 'Status', ownerId: 'Owner', dueDate: 'Due date' };
   const sameVal = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
   const editTask = useCallbackA((id, changes) => {
@@ -238,7 +238,13 @@ function App() {
         changed = true;
         const eid = 'ed' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
         edits.push({ id: eid, field, label: EDIT_LABELS[field], from: from ?? null, to: to ?? null, userId: currentUser, at: now, reverted: false });
-        act.push({ type: 'edit', userId: currentUser, at: now, detail: EDIT_LABELS[field] });
+        if (field === 'status') {
+          act.push({ type: to === 'Completed' ? 'completed' : 'status', userId: currentUser, at: now, detail: `${from} → ${to}` });
+          if (to === 'Completed') { next.progress = 100; next.completedAt = now; }
+          else if (from === 'Completed') { next.completedAt = null; }
+        } else {
+          act.push({ type: 'edit', userId: currentUser, at: now, detail: EDIT_LABELS[field] });
+        }
         next[field] = to;
       });
       if (!changed) return t;
