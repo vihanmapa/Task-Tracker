@@ -43,6 +43,7 @@ const I = {
   drag:     (p) => <Ico {...p}><circle cx="9" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="6" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.3" fill="currentColor" stroke="none"/><circle cx="9" cy="18" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="18" r="1.3" fill="currentColor" stroke="none"/></Ico>,
   filter:   (p) => <Ico {...p}><path d="M3 5h18l-7 8v6l-4-2v-4z"/></Ico>,
   edit:     (p) => <Ico {...p}><path d="M4 20h4L18.5 9.5a2 2 0 00-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/></Ico>,
+  trash:    (p) => <Ico {...p}><path d="M4 7h16M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2M6 7l1 13a2 2 0 002 2h6a2 2 0 002-2l1-13M10 11v6M14 11v6"/></Ico>,
   wand:     (p) => <Ico {...p}><path d="M5 19l9-9M13.5 6.5l1.5-1.5M15 11l1.5 1.5M9 3.5l.7 1.8 1.8.7-1.8.7L9 8.5l-.7-1.8L6.5 6l1.8-.7z"/></Ico>,
   refresh:  (p) => <Ico {...p}><path d="M20 11a8 8 0 10-1.5 5M20 5v6h-6"/></Ico>,
   flag:     (p) => <Ico {...p}><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></Ico>,
