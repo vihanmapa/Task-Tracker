@@ -33,6 +33,42 @@ const nid = () => `T-${++_id}`;
 let _did = 0;
 const did = () => `D-${++_did}`;
 
+// ---- id safety -------------------------------------------------------------
+// Seeds hardcode T-101.. / D-1.., but the counters above reset to their seed
+// start on every page load. The first item created in a session therefore
+// reused a seed id — so a task assigned to it showed up under BOTH records.
+// Fix: before generating, advance the counters past everything already loaded;
+// and renumber any record that still collides with an earlier one.
+const _suffix = (prefix, id) => {
+  if (typeof id !== 'string' || !id.startsWith(prefix)) return 0;
+  const n = parseInt(id.slice(prefix.length), 10);
+  return Number.isFinite(n) ? n : 0;
+};
+const syncIds = (tasks, deliverables) => {
+  (tasks || []).forEach(t => { _id = Math.max(_id, _suffix('T-', t.id)); });
+  (deliverables || []).forEach(d => { _did = Math.max(_did, _suffix('D-', d.id)); });
+};
+// Counters are synced first so any fresh id is guaranteed unique. The earlier
+// occurrence keeps the id; later duplicates get a new one. Returns
+// { tasks, deliverables, changed }.
+const repairData = (tasks, deliverables) => {
+  syncIds(tasks, deliverables);
+  let changed = false;
+  const seenD = new Set();
+  const fixedD = (deliverables || []).map(d => {
+    if (!seenD.has(d.id)) { seenD.add(d.id); return d; }
+    changed = true; const id = did(); seenD.add(id);
+    return { ...d, id };
+  });
+  const seenT = new Set();
+  const fixedT = (tasks || []).map(t => {
+    if (!seenT.has(t.id)) { seenT.add(t.id); return t; }
+    changed = true; const id = nid(); seenT.add(id);
+    return { ...t, id };
+  });
+  return { tasks: fixedT, deliverables: fixedD, changed };
+};
+
 const SEED_TASKS = [
   {
     id: 'T-101',
@@ -399,5 +435,5 @@ SEED_TASKS.forEach(t => { t.deliverableId = SEED_TASK_DELIVERABLE[t.id] || null;
 
 Object.assign(window, {
   USERS, CATEGORIES, STATUSES, KANBAN_COLS, PRIORITIES,
-  DELIVERABLE_STATUSES, SEED_TASKS, SEED_DELIVERABLES, TODAY, nid, did,
+  DELIVERABLE_STATUSES, SEED_TASKS, SEED_DELIVERABLES, TODAY, nid, did, syncIds, repairData,
 });
