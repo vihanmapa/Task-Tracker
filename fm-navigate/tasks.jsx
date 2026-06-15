@@ -238,7 +238,12 @@ function ProgressLog({ task, onLog, canEdit, currentUser }) {
   const [preview, setPreview] = useStateT(null); // { src, name } — in-app lightbox
   const fileRef = useRefT(null);
 
-  const openForm = () => { setStatus(task.status); setPct(task.progress || 0); setNote(''); setLinks(['']); setFiles([]); setErr(''); setOpen(true); };
+  // local yyyy-mm-dd (no UTC day-shift); `date` lets the update be back-dated
+  const dayStr = (iso) => { const d = iso ? new Date(iso) : new Date(); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 10); };
+  const today = dayStr();
+  const [date, setDate] = useStateT(today);
+
+  const openForm = () => { setStatus(task.status); setPct(task.progress || 0); setNote(''); setLinks(['']); setFiles([]); setDate(dayStr()); setErr(''); setOpen(true); };
 
   const setLinkAt = (i, v) => setLinks(ls => ls.map((l, j) => j === i ? v : l));
   const addLink = () => setLinks(ls => [...ls, '']);
@@ -273,7 +278,9 @@ function ProgressLog({ task, onLog, canEdit, currentUser }) {
   const submit = () => {
     const cleanLinks = links.map(l => l.trim()).filter(Boolean);
     if (!note.trim() && !cleanLinks.length && !files.length) { setErr('Add a note, a link, or evidence before saving.'); return; }
-    onLog(task.id, { status, percent: effPct, note: note.trim(), links: cleanLinks, files });
+    // back-dated entries land at local noon; today keeps the precise current time
+    const at = (date && date < today) ? new Date(date + 'T12:00:00').toISOString() : new Date().toISOString();
+    onLog(task.id, { status, percent: effPct, note: note.trim(), links: cleanLinks, files, at });
     setNote(''); setLinks(['']); setFiles([]); setErr(''); setOpen(false);
     if (fileRef.current) fileRef.current.value = '';
   };
@@ -294,11 +301,17 @@ function ProgressLog({ task, onLog, canEdit, currentUser }) {
             <span className="field-label" style={{ margin: 0 }}>Update — {effPct}% complete</span>
             <button className="icon-btn" onClick={() => { setOpen(false); setErr(''); }}><I.x size={15} /></button>
           </div>
-          <div className="field mb8">
-            <label className="field-label">Status</label>
-            <select className="select" value={status} onChange={e => onStatusChange(e.target.value)}>
-              {window.STATUSES.map(s => <option key={s}>{s}</option>)}
-            </select>
+          <div className="row gap12" style={{ flexWrap: 'wrap' }}>
+            <div className="field mb8" style={{ flex: 1, minWidth: 160 }}>
+              <label className="field-label">Status</label>
+              <select className="select" value={status} onChange={e => onStatusChange(e.target.value)}>
+                {window.STATUSES.map(s => <option key={s}>{s}</option>)}
+              </select>
+            </div>
+            <div className="field mb8" style={{ flex: 1, minWidth: 160 }}>
+              <label className="field-label">Date {date < today && <span className="faint" style={{ fontWeight: 400, textTransform: 'none' }}>· back-dated</span>}</label>
+              <input className="input" type="date" max={today} value={date} onChange={e => setDate(e.target.value || today)} />
+            </div>
           </div>
           <label className="field-label" style={{ marginBottom: 4 }}>% complete {pctLocked && <span className="faint" style={{ fontWeight: 400, textTransform: 'none' }}>· locked at 100% while Completed</span>}</label>
           <input type="range" min="0" max="100" step="5" value={effPct} disabled={pctLocked}
