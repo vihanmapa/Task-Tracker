@@ -178,7 +178,7 @@ function App() {
       id: window.nid(),
       title: data.title, description: data.description,
       priority: data.priority, category: data.category, status: data.status || 'Not Started',
-      dueDate: data.dueDate || null, dependencies: data.dependencies || [],
+      dueDate: data.dueDate || null, dependencies: data.dependencies || [], depTaskIds: data.depTaskIds || [],
       successCriteria: data.successCriteria || '', risk: data.risk || '', effort: data.effort || 'M',
       deliverableId: data.deliverableId || null,
       ownerId: currentUser, progress: data.status === 'Completed' ? 100 : data.status === 'In Progress' ? 10 : 0,
@@ -240,8 +240,51 @@ function App() {
     }));
   }, [canEdit, currentUser]);
 
+  // task.progress/status mirror the most recent progress entry; recompute it
+  // after a log entry is edited or removed
+  const syncFromLatest = (t, now) => {
+    const log = t.progressLog || [];
+    if (!log.length) return { ...t, progress: 0, updatedAt: now };
+    const latest = log.reduce((a, b) => new Date(b.at) > new Date(a.at) ? b : a);
+    return { ...t, progress: latest.percent, status: latest.status || t.status,
+      completedAt: latest.status === 'Completed' ? latest.at : null, updatedAt: now };
+  };
+
+  // edit an existing progress entry in place, then re-derive task progress/status
+  const editProgress = useCallbackA((id, entryId, entry) => {
+    if (!canEdit) return;
+    const now = new Date().toISOString();
+    const at = entry.at && new Date(entry.at) <= new Date(now) ? entry.at : now;
+    setTasks(ts => ts.map(t => {
+      if (t.id !== id) return t;
+      let status = entry.status || t.status;
+      let pct = Math.max(0, Math.min(100, Math.round(entry.percent)));
+      if (status === 'Completed') pct = 100;
+      else if (pct >= 100) pct = 99;
+      const files = entry.files || (entry.fileName ? [{ name: entry.fileName, data: entry.fileData, type: '' }] : []);
+      const log = (t.progressLog || []).map(e => e.id === entryId
+        ? { ...e, percent: pct, status, note: entry.note || '', links: entry.links || (entry.link ? [entry.link] : []), files, at, editedAt: now }
+        : e);
+      const act = [...(t.activity || []), { type: 'edit', userId: currentUser, at: now, detail: 'Progress update' }];
+      return syncFromLatest({ ...t, progressLog: log, activity: act }, now);
+    }));
+  }, [canEdit, currentUser]);
+
+  // permanently remove a single progress entry, then re-derive task progress/status
+  const deleteProgress = useCallbackA((id, entryId) => {
+    if (!canEdit) return;
+    if (!confirm('Delete this progress update? This cannot be undone.')) return;
+    const now = new Date().toISOString();
+    setTasks(ts => ts.map(t => {
+      if (t.id !== id) return t;
+      const log = (t.progressLog || []).filter(e => e.id !== entryId);
+      const act = [...(t.activity || []), { type: 'edit', userId: currentUser, at: now, detail: 'Removed a progress update' }];
+      return syncFromLatest({ ...t, progressLog: log, activity: act }, now);
+    }));
+  }, [canEdit, currentUser]);
+
   // edit task fields — diff each field, log the change, keep it revertable
-  const EDIT_LABELS = { title: 'Title', description: 'Description', successCriteria: 'Success criteria', dependencies: 'Dependencies', risk: 'Risk', priority: 'Priority', effort: 'Effort', category: 'Category', status: 'Status', ownerId: 'Owner', dueDate: 'Due date' };
+  const EDIT_LABELS = { title: 'Title', description: 'Description', successCriteria: 'Success criteria', dependencies: 'Dependencies', depTaskIds: 'Dependency tasks', risk: 'Risk', priority: 'Priority', effort: 'Effort', category: 'Category', status: 'Status', ownerId: 'Owner', dueDate: 'Due date' };
   const sameVal = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
   const editTask = useCallbackA((id, changes) => {
@@ -458,9 +501,9 @@ function App() {
             onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} />
         )}
         {route === 'detail' && (
-          <window.TaskDetail task={selectedTask} deliverables={deliverables} onClose={() => { setRoute('tasks'); setSelected(null); }}
-            onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditTask={editTask} onRevertEdit={revertEdit}
-            onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onUpdate={() => {}} onDeleteTask={deleteTask} canEdit={canEdit} currentUser={currentUser}
+          <window.TaskDetail task={selectedTask} deliverables={deliverables} allTasks={tasks} onClose={() => { setRoute('tasks'); setSelected(null); }}
+            onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditProgress={editProgress} onDeleteProgress={deleteProgress} onEditTask={editTask} onRevertEdit={revertEdit}
+            onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onOpenTask={openTask} onUpdate={() => {}} onDeleteTask={deleteTask} canEdit={canEdit} currentUser={currentUser}
             onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} />
         )}
         {route === 'summary' && <window.WeeklySummary tasks={tasks} onOpen={openTask} />}
