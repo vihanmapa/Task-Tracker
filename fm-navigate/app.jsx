@@ -93,8 +93,19 @@ function App() {
   useEffectA(() => {
     if (!shared || !authUser) return;
     let unsub = () => {};
-    ds.loadTasks().then(remote => { const s = splitBlob(remote); skipSaveRef.current = true; setTasks(s.tasks); setDeliverables(s.deliverables); });
-    unsub = ds.subscribe(incoming => { const s = splitBlob(incoming); skipSaveRef.current = true; setTasks(s.tasks); setDeliverables(s.deliverables); });
+    ds.loadTasks().then(remote => {
+      const s = splitBlob(remote);
+      const fixed = window.repairData(s.tasks, s.deliverables);
+      // If we renumbered a duplicate, let the save effect persist the cleaned blob.
+      skipSaveRef.current = !fixed.changed;
+      setTasks(fixed.tasks); setDeliverables(fixed.deliverables);
+    });
+    unsub = ds.subscribe(incoming => {
+      const s = splitBlob(incoming);
+      const fixed = window.repairData(s.tasks, s.deliverables);
+      skipSaveRef.current = true; // realtime echo: dedupe locally, don't re-persist
+      setTasks(fixed.tasks); setDeliverables(fixed.deliverables);
+    });
     return () => unsub();
   }, [shared, authUser && authUser.id]);
 
