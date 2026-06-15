@@ -218,6 +218,8 @@ function App() {
   const logProgress = useCallbackA((id, entry) => {
     if (!canEdit) return;
     const now = new Date().toISOString();
+    // when the update happened — back-datable from the form; never in the future
+    const at = entry.at && new Date(entry.at) <= new Date(now) ? entry.at : now;
     setTasks(ts => ts.map(t => {
       if (t.id !== id) return t;
       // status: from the form if given, else keep current
@@ -227,13 +229,13 @@ function App() {
       if (status === 'Completed') pct = 100;
       else if (pct >= 100) pct = 99; // not-completed can't sit at 100
       const files = entry.files || (entry.fileName ? [{ name: entry.fileName, data: entry.fileData, type: '' }] : []);
-      const rec = { id: 'pl' + Date.now(), percent: pct, status, note: entry.note || '', links: entry.links || (entry.link ? [entry.link] : []), files, userId: currentUser, at: now };
+      const rec = { id: 'pl' + Date.now(), percent: pct, status, note: entry.note || '', links: entry.links || (entry.link ? [entry.link] : []), files, userId: currentUser, at };
       const log = [...(t.progressLog || []), rec];
       const act = [...(t.activity || [])];
-      if (status !== t.status) act.push({ type: status === 'Completed' ? 'completed' : 'status', userId: currentUser, at: now, detail: `${t.status} → ${status}` });
-      act.push({ type: 'progress', userId: currentUser, at: now, detail: `${pct}%` });
+      if (status !== t.status) act.push({ type: status === 'Completed' ? 'completed' : 'status', userId: currentUser, at, detail: `${t.status} → ${status}` });
+      act.push({ type: 'progress', userId: currentUser, at, detail: `${pct}%` });
       return { ...t, progress: pct, progressLog: log, status, updatedAt: now,
-        completedAt: status === 'Completed' ? now : (status !== 'Completed' ? null : t.completedAt),
+        completedAt: status === 'Completed' ? at : (status !== 'Completed' ? null : t.completedAt),
         activity: act };
     }));
   }, [canEdit, currentUser]);
