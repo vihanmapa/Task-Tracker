@@ -295,8 +295,10 @@ function ProgressLog({ task, onLog, onEdit, onDelete, canEdit, currentUser }) {
     if (!note.trim() && !cleanLinks.length && !files.length) { setErr('Add a note, a link, or evidence before saving.'); return; }
     // back-dated entries land at local noon; today keeps the precise current time
     const at = (date && date < today) ? new Date(date + 'T12:00:00').toISOString() : new Date().toISOString();
-    onLog(task.id, { status, percent: effPct, note: note.trim(), links: cleanLinks, files, at });
-    setNote(''); setLinks(['']); setFiles([]); setErr(''); setOpen(false);
+    const payload = { status, percent: effPct, note: note.trim(), links: cleanLinks, files, at };
+    if (editingId) onEdit(task.id, editingId, payload);
+    else onLog(task.id, payload);
+    setNote(''); setLinks(['']); setFiles([]); setErr(''); setOpen(false); setEditingId(null);
     if (fileRef.current) fileRef.current.value = '';
   };
   const isImg = (f) => (f.type || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.name || '');
@@ -313,8 +315,8 @@ function ProgressLog({ task, onLog, onEdit, onDelete, canEdit, currentUser }) {
       {open && (
         <div className="card card-pad mb12 fade-in" style={{ background: 'var(--bg-sunken)' }} onPaste={onPaste}>
           <div className="row between center mb8">
-            <span className="field-label" style={{ margin: 0 }}>Update — {effPct}% complete</span>
-            <button className="icon-btn" onClick={() => { setOpen(false); setErr(''); }}><I.x size={15} /></button>
+            <span className="field-label" style={{ margin: 0 }}>{editingId ? 'Edit update' : 'Update'} — {effPct}% complete</span>
+            <button className="icon-btn" onClick={() => { setOpen(false); setErr(''); setEditingId(null); }}><I.x size={15} /></button>
           </div>
           <div className="row gap12" style={{ flexWrap: 'wrap' }}>
             <div className="field mb8" style={{ flex: 1, minWidth: 160 }}>
@@ -361,7 +363,7 @@ function ProgressLog({ task, onLog, onEdit, onDelete, canEdit, currentUser }) {
               <input ref={fileRef} type="file" multiple accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.txt,.csv" style={{ display: 'none' }} onChange={e => { addFiles(e.target.files); if (fileRef.current) fileRef.current.value = ''; }} />
               <span className="faint" style={{ fontSize: 11 }}>or paste a screenshot (⌘V)</span>
             </div>
-            <button className="btn btn-primary btn-sm" onClick={submit}><I.check size={13} /> Save update</button>
+            <button className="btn btn-primary btn-sm" onClick={submit}><I.check size={13} /> {editingId ? 'Save changes' : 'Save update'}</button>
           </div>
           {err && <div style={{ color: 'var(--st-blocked)', fontSize: 12, marginTop: 8 }}>{err}</div>}
         </div>
@@ -377,7 +379,14 @@ function ProgressLog({ task, onLog, onEdit, onDelete, canEdit, currentUser }) {
                 <div key={e.id} className="comment" style={{ alignItems: 'flex-start' }}>
                   <window.Ring value={e.percent} size={34} />
                   <div className="grow" style={{ minWidth: 0 }}>
-                    <div className="comment-meta row gap8 center" style={{ flexWrap: 'wrap' }}><b style={{ color: 'var(--text)' }}>{e.percent}%</b>{e.status && <window.StatusPill status={e.status} />}<span>· {u?.name || 'Someone'} · {window.fmtRelTime(e.at)}</span></div>
+                    <div className="comment-meta row gap8 center" style={{ flexWrap: 'wrap' }}><b style={{ color: 'var(--text)' }}>{e.percent}%</b>{e.status && <window.StatusPill status={e.status} />}<span>· {u?.name || 'Someone'} · {window.fmtRelTime(e.at)}{e.editedAt && ' · edited'}</span>
+                      {canEdit && (
+                        <span className="row gap8 center" style={{ marginLeft: 'auto' }}>
+                          <button className="icon-btn" title="Edit update" onClick={() => openEditForm(e)}><I.edit size={14} /></button>
+                          <button className="icon-btn" title="Delete update" onClick={() => onDelete(task.id, e.id)}><I.trash size={14} /></button>
+                        </span>
+                      )}
+                    </div>
                     {e.note && <div className="comment-body">{e.note}</div>}
                     {(() => {
                       // links: `links` (array) or legacy `link` (string)
