@@ -204,6 +204,16 @@ function App() {
     setSelected(null); setRoute('tasks');
   }, [canEdit, buildTask]);
 
+  // permanently remove a task (editor only); land back on the Tasks list
+  const deleteTask = useCallbackA((id) => {
+    if (!canEdit) return;
+    const t = tasks.find(x => x.id === id);
+    if (!confirm(`Delete "${t ? t.title : id}"? This permanently removes the task and its history. This cannot be undone.`)) return;
+    setTasks(ts => ts.filter(x => x.id !== id));
+    if (selected === id) setSelected(null);
+    setRoute('tasks');
+  }, [canEdit, tasks, selected]);
+
   // log a progress update: status + % complete + note + evidence (link or attached file)
   const logProgress = useCallbackA((id, entry) => {
     if (!canEdit) return;
@@ -448,7 +458,7 @@ function App() {
         {route === 'detail' && (
           <window.TaskDetail task={selectedTask} deliverables={deliverables} onClose={() => { setRoute('tasks'); setSelected(null); }}
             onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditTask={editTask} onRevertEdit={revertEdit}
-            onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onUpdate={() => {}} canEdit={canEdit} currentUser={currentUser}
+            onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onUpdate={() => {}} onDeleteTask={deleteTask} canEdit={canEdit} currentUser={currentUser}
             onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} />
         )}
         {route === 'summary' && <window.WeeklySummary tasks={tasks} onOpen={openTask} />}

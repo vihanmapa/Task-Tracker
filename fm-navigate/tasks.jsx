@@ -470,7 +470,7 @@ function TaskEditPanel({ task, onSave, onCancel }) {
 }
 
 /* ---------------- Task detail ---------------- */
-function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onAddResource, onDeleteResource, canEdit = true, currentUser = 'richard' }) {
+function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onAddResource, onDeleteResource, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
   const I = window.I;
   const [comment, setComment] = useStateT('');
   const [editing, setEditing] = useStateT(false);
@@ -651,6 +651,14 @@ function TaskDetail({ task, deliverables = [], onClose, onUpdate, onAddComment, 
                 <button className="btn btn-primary btn-sm" onClick={submitComment} disabled={!comment.trim()}><I.send size={14} /></button>
               </div>
             </div>
+
+            {/* danger zone — permanent delete */}
+            {canEdit && onDeleteTask && (
+              <div className="row mt24" style={{ paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+                <button className="btn btn-ghost btn-sm" onClick={() => onDeleteTask(task.id)}
+                  style={{ color: 'var(--st-blocked)', borderColor: 'var(--st-blocked)' }}><I.x size={13} /> Delete task</button>
+              </div>
+            )}
           </div>
 
           {/* sidebar meta */}
