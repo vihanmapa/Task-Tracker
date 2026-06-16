@@ -150,8 +150,25 @@ function Modal({ children, onClose, width = 640 }) {
 /* effort label */
 const EFFORT_LABEL = { S: 'Small', M: 'Medium', L: 'Large', XL: 'X-Large' };
 
+/* Markdown — renders pasted markdown (headings, bold, lists, tables) as HTML.
+   Sanitized with DOMPurify since notes are shared/multi-user. Falls back to
+   plain text if the CDN libs failed to load. */
+function Markdown({ text, className }) {
+  const html = useMemo(() => {
+    const src = text == null ? '' : String(text);
+    if (!src.trim()) return '';
+    if (!window.marked) return null; // signal plaintext fallback
+    const raw = window.marked.parse(src, { gfm: true, breaks: true });
+    return window.DOMPurify ? window.DOMPurify.sanitize(raw) : raw;
+  }, [text]);
+  if (text == null || !String(text).trim()) return null;
+  const cls = ('md ' + (className || '')).trim();
+  if (html === null) return <div className={cls} style={{ whiteSpace: 'pre-wrap' }}>{String(text)}</div>;
+  return <div className={cls} dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
 Object.assign(window, {
   STATUS_META, PRIO_META, EFFORT_LABEL,
   startOfWeek, endOfWeek, daysBetween, relDue, fmtDate, fmtDateFull, fmtRelTime,
-  Avatar, StatusPill, PriorityTag, DueTag, CatChip, Progress, Ring, Spark, Modal,
+  Avatar, StatusPill, PriorityTag, DueTag, CatChip, Progress, Ring, Spark, Modal, Markdown,
 });
