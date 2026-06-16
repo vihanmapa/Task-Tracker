@@ -4,31 +4,35 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FM Navigate — Execution Hub</title>
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=32" />
 </head>
 <body>
   <div id="root"></div>
 
   <!-- runtime config + shared-data layer (plain JS, runs before React/babel) -->
-  <script src="config.js?v=31"></script>
+  <script src="config.js?v=32"></script>
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
-  <script src="data-service.js?v=31"></script>
+  <script src="data-service.js?v=32"></script>
 
   <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 
-  <script src="data.js?v=31"></script>
-  <script type="text/babel" src="icons.jsx?v=31"></script>
-  <script type="text/babel" src="components.jsx?v=31"></script>
-  <script type="text/babel" src="ai-service.jsx?v=31"></script>
-  <script type="text/babel" src="tweaks-panel.jsx?v=31"></script>
-  <script type="text/babel" src="dashboard.jsx?v=31"></script>
-  <script type="text/babel" src="ai-compose.jsx?v=31"></script>
-  <script type="text/babel" src="tasks.jsx?v=31"></script>
-  <script type="text/babel" src="deliverables.jsx?v=31"></script>
-  <script type="text/babel" src="screens.jsx?v=31"></script>
-  <script type="text/babel" src="app.jsx?v=31"></script>
+  <!-- markdown rendering for pasted notes/descriptions (plain JS globals) -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+
+  <script src="data.js?v=32"></script>
+  <script type="text/babel" src="icons.jsx?v=32"></script>
+  <script type="text/babel" src="components.jsx?v=32"></script>
+  <script type="text/babel" src="ai-service.jsx?v=32"></script>
+  <script type="text/babel" src="tweaks-panel.jsx?v=32"></script>
+  <script type="text/babel" src="dashboard.jsx?v=32"></script>
+  <script type="text/babel" src="ai-compose.jsx?v=32"></script>
+  <script type="text/babel" src="tasks.jsx?v=32"></script>
+  <script type="text/babel" src="deliverables.jsx?v=32"></script>
+  <script type="text/babel" src="screens.jsx?v=32"></script>
+  <script type="text/babel" src="app.jsx?v=32"></script>
   <script type="text/babel" data-presets="react">
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<window.App />);

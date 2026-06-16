@@ -387,7 +387,7 @@ function ProgressLog({ task, onLog, onEdit, onDelete, canEdit, currentUser }) {
                         </span>
                       )}
                     </div>
-                    {e.note && <div className="comment-body">{e.note}</div>}
+                    {e.note && <window.Markdown className="comment-body" text={e.note} />}
                     {(() => {
                       // links: `links` (array) or legacy `link` (string)
                       const ls = (e.links && e.links.length ? e.links : (e.link ? [e.link] : []));
@@ -609,14 +609,14 @@ function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate,
                 <h1 style={{ fontSize: 26, fontWeight: 800, letterSpacing: '-0.02em', lineHeight: 1.2, marginBottom: 18 }}>{task.title}</h1>
 
                 <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.edit size={13} /> Description</div>
-                <div className="desc-block mb16">{task.description}</div>
+                <window.Markdown className="desc-block mb16" text={task.description} />
 
                 {task.successCriteria && (
                   <>
                     <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.target size={13} /> Success criteria</div>
                     <div className="crit-item" style={{ background: 'var(--st-completed-bg)', borderRadius: 'var(--r-md)', padding: '11px 14px', marginBottom: 16 }}>
                       <span style={{ color: 'var(--st-completed)', marginTop: 1 }}><I.check size={16} /></span>
-                      <span>{task.successCriteria}</span>
+                      <span style={{ whiteSpace: 'pre-wrap' }}>{task.successCriteria}</span>
                     </div>
                   </>
                 )}
@@ -660,7 +660,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate,
                     <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.alert size={13} /> Risk</div>
                     <div className="crit-item" style={{ background: 'var(--st-blocked-bg)', borderRadius: 'var(--r-md)', padding: '11px 14px', marginBottom: 16 }}>
                       <span style={{ color: 'var(--st-blocked)', marginTop: 1 }}><I.alert size={16} /></span>
-                      <span>{task.risk}</span>
+                      <span style={{ whiteSpace: 'pre-wrap' }}>{task.risk}</span>
                     </div>
                   </>
                 )}
