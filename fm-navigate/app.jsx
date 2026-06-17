@@ -342,6 +342,7 @@ function App() {
       id: window.did(), kind: 'deliverable',
       title: data.title, description: data.description || '',
       parentId: data.parentId || null,
+      category: data.category || null,
       ownerId: currentUser, status: data.status || 'Active',
       targetDate: data.targetDate || null, createdAt: now, updatedAt: now,
     };

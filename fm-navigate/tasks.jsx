@@ -537,6 +537,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate,
   const I = window.I;
   const [comment, setComment] = useStateT('');
   const [editing, setEditing] = useStateT(false);
+  const [histOpen, setHistOpen] = useStateT(false);
   if (!task) return null;
   const owner = window.USERS[task.ownerId];
   const dlv = deliverables.find(d => d.id === task.deliverableId);
@@ -670,8 +671,11 @@ function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate,
             {/* change history */}
             {edits.length > 0 && (
               <>
-                <div className="section-eyebrow mt24 mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.clock size={13} /> Change history · {edits.length}</div>
-                <div className="mb8">
+                <div className="section-eyebrow mt24 mb8" onClick={() => setHistOpen(o => !o)} style={{ display: 'flex', alignItems: 'center', gap: 7, cursor: 'pointer', userSelect: 'none' }}>
+                  <I.clock size={13} /> Change history · {edits.length}
+                  <span style={{ marginLeft: 'auto', display: 'inline-flex', transform: histOpen ? 'rotate(90deg)' : 'none', transition: 'transform .15s' }}><I.chevR size={14} /></span>
+                </div>
+                {histOpen && <div className="mb8">
                   {edits.map(e => {
                     const u = window.USERS[e.userId];
                     return (
@@ -695,7 +699,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate,
                       </div>
                     );
                   })}
-                </div>
+                </div>}
               </>
             )}
 

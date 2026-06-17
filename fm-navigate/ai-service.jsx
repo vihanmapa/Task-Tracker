@@ -325,18 +325,41 @@ function parseTabularRow(cells) {
      ...
    This is ONE task, not many. Detect it and map the labels to fields. */
 const _LABELS = ['title', 'description', 'priority', 'category', 'due date', 'due', 'status', 'dependencies', 'dependency', 'success criteria', 'success', 'risk', 'effort', 'owner', 'notes'];
+// Strip markdown label decoration: heading hashes, bold/italic stars, trailing colon.
+const _stripLabelMarkup = (s) => (s || '')
+  .replace(/^\s*#{1,6}\s*/, '')      // ### Title
+  .replace(/^\*{1,3}\s*/, '')        // **Title
+  .replace(/\s*\*{1,3}$/, '')        // Title**
+  .replace(/:$/, '')
+  .trim();
+const _isLabel = (line) => _LABELS.includes(_stripLabelMarkup(line).toLowerCase());
 const _labelKey = (s) => {
-  let k = s.toLowerCase().replace(/:$/, '').trim();
+  let k = _stripLabelMarkup(s).toLowerCase();
   if (k === 'dependency') k = 'dependencies';
   if (k === 'success') k = 'success criteria';
   if (k === 'due') k = 'due date';
   return k;
 };
 function isLabeledBlock(text) {
-  const lines = (text || '').split(/\r?\n/).map(l => l.trim());
+  const lines = (text || '').split(/\r?\n/);
   const hits = new Set();
-  for (const l of lines) { const k = _labelKey(l); if (_LABELS.includes(l.toLowerCase().replace(/:$/, '').trim())) hits.add(k); }
+  for (const l of lines) { if (_isLabel(l)) hits.add(_labelKey(l)); }
   return hits.has('title') && hits.size >= 3;
+}
+/* Split a paste of several labeled blocks separated by horizontal rules
+   (--- / *** / ___ on their own line). Returns the block strings only when
+   there are >=2 and each one is itself a labeled block; otherwise null. */
+function splitLabeledBlocks(text) {
+  const hr = /^\s*[-*_]{3,}\s*$/;
+  const blocks = [];
+  let cur = [];
+  for (const ln of (text || '').split(/\r?\n/)) {
+    if (hr.test(ln)) { blocks.push(cur.join('\n')); cur = []; }
+    else cur.push(ln);
+  }
+  blocks.push(cur.join('\n'));
+  const clean = blocks.map(b => b.trim()).filter(Boolean);
+  return (clean.length >= 2 && clean.every(isLabeledBlock)) ? clean : null;
 }
 function parseLabeledBlock(text) {
   const lines = (text || '').split(/\r?\n/);
@@ -344,9 +367,10 @@ function parseLabeledBlock(text) {
   let cur = null;
   for (const raw of lines) {
     const line = raw.trim();
-    const norm = line.toLowerCase().replace(/:$/, '').trim();
-    if (_LABELS.includes(norm)) { cur = _labelKey(line); vals[cur] = vals[cur] || []; continue; }
-    if (cur && line) vals[cur].push(line);
+    if (_isLabel(line)) { cur = _labelKey(line); vals[cur] = vals[cur] || []; continue; }
+    // strip leading list markers from value lines (• · - *)
+    const val = line.replace(/^\s*[•·*-]\s+/, '').trim();
+    if (cur && val) vals[cur].push(val);
   }
   const j = (k) => (vals[k] || []).join(' ').trim();
   const arr = (k) => (vals[k] || []).filter(Boolean);
@@ -430,6 +454,8 @@ const aiService = {
   async extractMultiple(text) {
     // TODO(gemini): a cloud version could ask the model to segment + extract
     //   in one call. Local version splits, then runs the heuristic per chunk.
+    const blocks = splitLabeledBlocks(text);
+    if (blocks) { await think(Math.min(1100, 360 + blocks.length * 120)); return blocks.map(parseLabeledBlock); }
     if (isLabeledBlock(text)) { await think(520); return [parseLabeledBlock(text)]; }
     const rows = tabularRows(text);
     if (rows) {
@@ -443,6 +469,8 @@ const aiService = {
 
   /* How many tasks a pasted block would produce (no extraction). */
   countTasks(text) {
+    const blocks = splitLabeledBlocks(text);
+    if (blocks) return blocks.length;
     if (isLabeledBlock(text)) return 1;
     const rows = tabularRows(text);
     return rows ? rows.length : splitDescriptions(text).length;

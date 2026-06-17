@@ -408,19 +408,28 @@ const SEED_TASKS = [
 // ---- Deliverables: parent milestones that group related tasks ----
 const DELIVERABLE_STATUSES = ['Active', 'On Hold', 'Delivered', 'Cancelled'];
 
+// Functional buckets so Vihan & Richard can navigate deliverables by area.
+const DELIVERABLE_CATEGORIES = [
+  { code: 'A', label: 'Delivery & Technical Team Management' },
+  { code: 'B', label: 'Communication & Reporting' },
+  { code: 'C', label: 'Marketing, Pre-Sales & Sales' },
+  { code: 'D', label: 'Operational Readiness & Compliance' },
+  { code: 'E', label: 'Continuous Improvement & Coordination' },
+];
+
 const SEED_DELIVERABLES = [
   {
     id: 'D-1', kind: 'deliverable',
     title: 'ACME Logistics Pilot Launch',
     description: 'First paying-adjacent pilot. Everything required to stand up, harden, and rehearse the ACME tenant: sprint plan, environment, onboarding, API hardening, and user management.',
-    ownerId: 'vihan', status: 'Active', targetDate: d(7),
+    ownerId: 'vihan', status: 'Active', category: 'A', targetDate: d(7),
     createdAt: d(-8), updatedAt: d(0, 8),
   },
   {
     id: 'D-2', kind: 'deliverable',
     title: 'SOC 2 Type I Readiness',
     description: 'Documentation and evidence package needed before the compliance auditor begins fieldwork.',
-    ownerId: 'vihan', status: 'Active', targetDate: d(9),
+    ownerId: 'vihan', status: 'Active', category: 'D', targetDate: d(9),
     createdAt: d(-9), updatedAt: d(-1, 15),
   },
 ];
@@ -435,5 +444,5 @@ SEED_TASKS.forEach(t => { t.deliverableId = SEED_TASK_DELIVERABLE[t.id] || null;
 
 Object.assign(window, {
   USERS, CATEGORIES, STATUSES, KANBAN_COLS, PRIORITIES,
-  DELIVERABLE_STATUSES, SEED_TASKS, SEED_DELIVERABLES, TODAY, nid, did, syncIds, repairData,
+  DELIVERABLE_STATUSES, DELIVERABLE_CATEGORIES, SEED_TASKS, SEED_DELIVERABLES, TODAY, nid, did, syncIds, repairData,
 });

@@ -52,6 +52,21 @@ function DlvStatusPill({ status }) {
   return <span className="chip" style={{ color: m.c, background: m.bg, borderColor: 'transparent', fontWeight: 600 }}>{status}</span>;
 }
 
+/* ---- deliverable category (A–E functional buckets) ---- */
+function dlvCat(code) {
+  return (window.DELIVERABLE_CATEGORIES || []).find(c => c.code === code) || null;
+}
+function DlvCatBadge({ code, full }) {
+  const c = dlvCat(code);
+  if (!c) return null;
+  return (
+    <span className="chip" title={c.label}
+      style={{ fontWeight: 700, gap: 5, maxWidth: full ? 'none' : 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      <span style={{ color: 'var(--accent)' }}>{c.code}</span>{full ? ` · ${c.label}` : ''}
+    </span>
+  );
+}
+
 /* ---- compact chip used on task rows / detail ---- */
 function DeliverableChip({ deliverable, onClick }) {
   const I = window.I;
@@ -86,7 +101,7 @@ function DeliverablePicker({ value, deliverables, onChange }) {
 /* ---- create form (top-level or sub) ---- */
 function DeliverableForm({ onCreate, onCancel, parentTitle }) {
   const I = window.I;
-  const [f, setF] = useStateD({ title: '', description: '', targetDate: '', status: 'Active' });
+  const [f, setF] = useStateD({ title: '', description: '', targetDate: '', status: 'Active', category: '' });
   const set = (k, v) => setF(s => ({ ...s, [k]: v }));
   const submit = () => {
     if (!f.title.trim()) return;
@@ -95,6 +110,7 @@ function DeliverableForm({ onCreate, onCancel, parentTitle }) {
       description: f.description.trim(),
       targetDate: f.targetDate ? new Date(f.targetDate + 'T17:00:00').toISOString() : null,
       status: f.status,
+      category: f.category || null,
     });
   };
   return (
@@ -108,6 +124,11 @@ function DeliverableForm({ onCreate, onCancel, parentTitle }) {
       <label className="field-label" style={{ marginBottom: 5, marginTop: 14, display: 'block' }}>Description</label>
       <textarea className="ai-textarea" style={{ minHeight: 80, fontSize: 13.5 }} value={f.description}
         placeholder="What this milestone delivers, and what 'done' means." onChange={e => set('description', e.target.value)} />
+      <label className="field-label" style={{ marginBottom: 5, marginTop: 14, display: 'block' }}>Category</label>
+      <select className="input" value={f.category} onChange={e => set('category', e.target.value)}>
+        <option value="">— Uncategorized —</option>
+        {window.DELIVERABLE_CATEGORIES.map(c => <option key={c.code} value={c.code}>{c.code}. {c.label}</option>)}
+      </select>
       <div className="row gap12 mt12" style={{ flexWrap: 'wrap' }}>
         <div style={{ flex: 1, minWidth: 160 }}>
           <label className="field-label" style={{ marginBottom: 5, display: 'block' }}>Target date</label>
@@ -140,7 +161,10 @@ function DlvCard({ d, tasks, deliverables, onOpen }) {
           <span style={{ color: 'var(--accent)' }}><I.flag size={15} /></span>
           <span style={{ fontWeight: 700, fontSize: 15.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</span>
         </div>
-        <DlvStatusPill status={d.status} />
+        <span className="row gap6 center" style={{ flexShrink: 0 }}>
+          {d.category && <DlvCatBadge code={d.category} />}
+          <DlvStatusPill status={d.status} />
+        </span>
       </div>
       {d.description && <div className="muted" style={{ fontSize: 12.5, marginBottom: 12, lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{d.description}</div>}
       <div className="row gap12 center" style={{ marginBottom: 6 }}>
@@ -163,6 +187,13 @@ function DeliverablesScreen({ deliverables, tasks, canEdit, onOpen, onCreate }) 
   const [creating, setCreating] = useStateD(false);
   const roots = childrenOf(null, deliverables);
   const unassigned = tasks.filter(t => !t.deliverableId && !['Completed', 'Cancelled'].includes(t.status)).length;
+
+  // group top-level deliverables into the A–E functional buckets (+ Uncategorized)
+  const cats = window.DELIVERABLE_CATEGORIES || [];
+  const groups = [
+    ...cats.map(c => ({ code: c.code, label: c.label, items: roots.filter(d => d.category === c.code) })),
+    { code: null, label: 'Uncategorized', items: roots.filter(d => !d.category || !cats.some(c => c.code === d.category)) },
+  ].filter(g => g.items.length > 0);
 
   return (
     <div className="scroll-area fade-in">
@@ -188,8 +219,17 @@ function DeliverablesScreen({ deliverables, tasks, canEdit, onOpen, onCreate }) 
           </div>
         )}
 
-        <div className="col gap12">
-          {roots.map(d => <DlvCard key={d.id} d={d} tasks={tasks} deliverables={deliverables} onOpen={onOpen} />)}
+        <div className="col" style={{ gap: 24 }}>
+          {groups.map(g => (
+            <div key={g.code || 'none'} className="col gap12">
+              <div className="row gap8 center" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 8 }}>
+                {g.code && <span className="chip" style={{ fontWeight: 800, color: 'var(--accent)' }}>{g.code}</span>}
+                <span style={{ fontWeight: 700, fontSize: 14, letterSpacing: '0.01em' }}>{g.label}</span>
+                <span className="faint" style={{ fontSize: 12.5 }}>· {g.items.length}</span>
+              </div>
+              {g.items.map(d => <DlvCard key={d.id} d={d} tasks={tasks} deliverables={deliverables} onOpen={onOpen} />)}
+            </div>
+          ))}
         </div>
       </div>
     </div>
@@ -382,6 +422,13 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, currentU
           </span>
         ))}
         <span className="grow" />
+        {canEdit
+          ? <select className="input" style={{ width: 'auto', maxWidth: 240 }} value={deliverable.category || ''}
+              onChange={e => onEdit(deliverable.id, { category: e.target.value || null })} title="Category">
+              <option value="">— Uncategorized —</option>
+              {window.DELIVERABLE_CATEGORIES.map(c => <option key={c.code} value={c.code}>{c.code}. {c.label}</option>)}
+            </select>
+          : (deliverable.category && <DlvCatBadge code={deliverable.category} full />)}
         {canEdit
           ? <button className="btn btn-subtle btn-sm" onClick={cycleStatus} title="Click to change status"><DlvStatusPill status={deliverable.status} /></button>
           : <DlvStatusPill status={deliverable.status} />}
