@@ -489,7 +489,7 @@ function App() {
         )}
         {route === 'tasks' && (
           <window.TasksScreen tasks={tasks} deliverables={deliverables} view={taskView} setView={setTaskView} onOpen={openTask}
-            onCompose={() => setComposer(true)} onMove={moveTask} onToggleDone={toggleDone} canEdit={canEdit} />
+            onOpenDeliverable={openDeliverable} onCompose={() => setComposer(true)} onMove={moveTask} onToggleDone={toggleDone} canEdit={canEdit} />
         )}
         {route === 'deliverables' && (
           <window.DeliverablesScreen deliverables={deliverables} tasks={tasks} canEdit={canEdit}

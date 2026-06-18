@@ -4,11 +4,12 @@
 const { useState: useStateT, useMemo: useMemoT, useRef: useRefT } = React;
 
 /* ---------------- Tasks screen ---------------- */
-function TasksScreen({ tasks, view, setView, onOpen, onCompose, onMove, onToggleDone, canEdit = true }) {
+function TasksScreen({ tasks, deliverables = [], view, setView, onOpen, onOpenDeliverable, onCompose, onMove, onToggleDone, canEdit = true }) {
   const I = window.I;
   const [q, setQ] = useStateT('');
   const [fStatus, setFStatus] = useStateT('All');
   const [fPrio, setFPrio] = useStateT('All');
+  const [grouped, setGrouped] = useStateT(false);
 
   const filtered = useMemoT(() => {
     return tasks.filter(t => {
@@ -36,6 +37,12 @@ function TasksScreen({ tasks, view, setView, onOpen, onCompose, onMove, onToggle
         <select className="select" style={{ width: 'auto' }} value={fPrio} onChange={e => setFPrio(e.target.value)}>
           <option value="All">All priorities</option>{window.PRIORITIES.map(p => <option key={p}>{p}</option>)}
         </select>
+        {view === 'list' && (
+          <button className={`btn btn-sm ${grouped ? 'btn-primary' : ''}`} onClick={() => setGrouped(g => !g)}
+            title="Group tasks under their deliverable">
+            <I.flag size={14} /> Group by deliverable
+          </button>
+        )}
         <span className="grow" />
         <span className="muted mono" style={{ fontSize: 12 }}>{filtered.length} tasks</span>
         {canEdit && <button className="btn btn-primary btn-sm" onClick={onCompose}><I.spark size={14} /> New task</button>}
@@ -54,7 +61,7 @@ function TasksScreen({ tasks, view, setView, onOpen, onCompose, onMove, onToggle
           </div>
         )
         : view === 'list'
-          ? <ListView tasks={filtered} onOpen={onOpen} onToggleDone={onToggleDone} canEdit={canEdit} />
+          ? <ListView tasks={filtered} deliverables={deliverables} grouped={grouped} onOpen={onOpen} onOpenDeliverable={onOpenDeliverable} onToggleDone={onToggleDone} canEdit={canEdit} />
           : <KanbanView tasks={filtered} onOpen={onOpen} onMove={onMove} canEdit={canEdit} />}
     </div>
   );
@@ -62,7 +69,7 @@ function TasksScreen({ tasks, view, setView, onOpen, onCompose, onMove, onToggle
 
 /* ---------------- List view ---------------- */
 const PRIO_ORDER = { Critical: 0, High: 1, Medium: 2, Low: 3 };
-const STATUS_ORDER = { 'Not Started': 0, 'In Progress': 1, 'Waiting': 2, 'Blocked': 3, 'Completed': 4, 'Cancelled': 5 };
+const STATUS_ORDER = { 'Not Started': 0, 'In Progress': 1, 'Waiting': 2, 'Blocked': 3, 'MD Review': 4, 'Completed': 5, 'Cancelled': 6 };
 const SORT_KEYS = {
   // key: [comparator(a,b), defaultDir]
   title:    [(a, b) => a.title.localeCompare(b.title), 'asc'],
@@ -74,7 +81,7 @@ const SORT_KEYS = {
   progress: [(a, b) => (a.progress || 0) - (b.progress || 0), 'desc'],
 };
 
-function ListView({ tasks, onOpen, onToggleDone, canEdit = true }) {
+function ListView({ tasks, deliverables = [], grouped = false, onOpen, onOpenDeliverable, onToggleDone, canEdit = true }) {
   const I = window.I;
   const [sortKey, setSortKey] = useStateT('priority');
   const [sortDir, setSortDir] = useStateT('asc');
@@ -84,10 +91,11 @@ function ListView({ tasks, onOpen, onToggleDone, canEdit = true }) {
     else { setSortKey(key); setSortDir(SORT_KEYS[key][1]); }
   };
 
-  const sorted = [...tasks].sort((a, b) => {
+  const sortTasks = (arr) => [...arr].sort((a, b) => {
     const cmp = SORT_KEYS[sortKey][0](a, b);
     return sortDir === 'asc' ? cmp : -cmp;
   });
+  const sorted = sortTasks(tasks);
 
   const Th = ({ k, children, style }) => (
     <button className="tlist-th" onClick={() => setSort(k)} style={style}>
@@ -97,6 +105,53 @@ function ListView({ tasks, onOpen, onToggleDone, canEdit = true }) {
       </span>
     </button>
   );
+
+  const Row = (t) => {
+    const done = t.status === 'Completed';
+    const cancelled = t.status === 'Cancelled';
+    return (
+      <div key={t.id} className="trow" onClick={() => onOpen(t.id)}>
+        <button className={`check ${done ? 'done' : ''}`} disabled={!canEdit}
+          style={canEdit ? null : { cursor: 'default', opacity: done ? 1 : 0.5 }}
+          onClick={e => { e.stopPropagation(); if (canEdit) onToggleDone(t.id); }}
+          title={canEdit ? 'Toggle complete' : 'Read-only — sign in as Vihan to edit'}>
+          {done && <I.check size={13} />}
+        </button>
+        <div style={{ minWidth: 0 }}>
+          <div className="trow-title" style={{ textDecoration: done || cancelled ? 'line-through' : 'none', color: done || cancelled ? 'var(--text-3)' : 'var(--text)' }}>
+            {t.title}
+          </div>
+          <div className="trow-sub mono">{t.id} · {t.successCriteria || t.description.slice(0, 70)}</div>
+          {t.progress > 0 && !done && !cancelled && (
+            <div className="row gap8 center mt4" style={{ maxWidth: 220 }}>
+              <div className="grow"><window.Progress value={t.progress} height={4} /></div>
+              <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-3)', flexShrink: 0 }}>{t.progress}%</span>
+            </div>
+          )}
+        </div>
+        <div><window.StatusPill status={t.status} /></div>
+        <div className="col" style={{ gap: 3 }}>
+          <window.PriorityTag priority={t.priority} />
+          <window.DueTag iso={t.dueDate} />
+        </div>
+        <div><window.CatChip category={t.category} /></div>
+        <div className="row gap6 center">
+          <window.Avatar user={t.ownerId} size={24} />
+        </div>
+      </div>
+    );
+  };
+
+  // Build deliverable-grouped sections: each deliverable in data order, then Unassigned last.
+  const groups = useMemoT(() => {
+    if (!grouped) return null;
+    const byId = {};
+    tasks.forEach(t => { const k = t.deliverableId || '_none'; (byId[k] = byId[k] || []).push(t); });
+    const out = [];
+    deliverables.forEach(d => { if (byId[d.id]) out.push({ deliverable: d, rows: sortTasks(byId[d.id]) }); });
+    if (byId._none) out.push({ deliverable: null, rows: sortTasks(byId._none) });
+    return out;
+  }, [grouped, tasks, deliverables, sortKey, sortDir]);
 
   return (
     <div className="scroll-area fade-in">
@@ -109,42 +164,25 @@ function ListView({ tasks, onOpen, onToggleDone, canEdit = true }) {
           <Th k="category">Category</Th>
           <Th k="owner">Owner</Th>
         </div>
-        {sorted.map(t => {
-          const done = t.status === 'Completed';
-          const cancelled = t.status === 'Cancelled';
-          return (
-            <div key={t.id} className="trow" onClick={() => onOpen(t.id)}>
-              <button className={`check ${done ? 'done' : ''}`} disabled={!canEdit}
-                style={canEdit ? null : { cursor: 'default', opacity: done ? 1 : 0.5 }}
-                onClick={e => { e.stopPropagation(); if (canEdit) onToggleDone(t.id); }}
-                title={canEdit ? 'Toggle complete' : 'Read-only — sign in as Vihan to edit'}>
-                {done && <I.check size={13} />}
-              </button>
-              <div style={{ minWidth: 0 }}>
-                <div className="trow-title" style={{ textDecoration: done || cancelled ? 'line-through' : 'none', color: done || cancelled ? 'var(--text-3)' : 'var(--text)' }}>
-                  {t.title}
-                </div>
-                <div className="trow-sub mono">{t.id} · {t.successCriteria || t.description.slice(0, 70)}</div>
-                {t.progress > 0 && !done && !cancelled && (
-                  <div className="row gap8 center mt4" style={{ maxWidth: 220 }}>
-                    <div className="grow"><window.Progress value={t.progress} height={4} /></div>
-                    <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-3)', flexShrink: 0 }}>{t.progress}%</span>
+        {grouped
+          ? groups.map(g => {
+              const d = g.deliverable;
+              return (
+                <React.Fragment key={d ? d.id : '_none'}>
+                  <div className="tlist-group"
+                    onClick={() => d && onOpenDeliverable && onOpenDeliverable(d.id)}
+                    style={{ cursor: d && onOpenDeliverable ? 'pointer' : 'default' }}>
+                    <I.flag size={13} />
+                    <span className="tlist-group-title">{d ? d.title : 'Unassigned'}</span>
+                    {d && d.category && <window.DlvCatBadge code={d.category} />}
+                    <span className="kcol-count mono">{g.rows.length}</span>
                   </div>
-                )}
-              </div>
-              <div><window.StatusPill status={t.status} /></div>
-              <div className="col" style={{ gap: 3 }}>
-                <window.PriorityTag priority={t.priority} />
-                <window.DueTag iso={t.dueDate} />
-              </div>
-              <div><window.CatChip category={t.category} /></div>
-              <div className="row gap6 center">
-                <window.Avatar user={t.ownerId} size={24} />
-              </div>
-            </div>
-          );
-        })}
-        {sorted.length === 0 && <div className="empty">No tasks match your filters.</div>}
+                  {g.rows.map(Row)}
+                </React.Fragment>
+              );
+            })
+          : sorted.map(Row)}
+        {((grouped ? groups.length : sorted.length) === 0) && <div className="empty">No tasks match your filters.</div>}
       </div>
     </div>
   );
