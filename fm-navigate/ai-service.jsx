@@ -258,7 +258,7 @@ function tabularRows(text) {
 }
 
 const _PRIOS = ['Critical', 'High', 'Medium', 'Low'];
-const _STATS = ['Not Started', 'In Progress', 'Waiting', 'Blocked', 'Completed', 'Cancelled'];
+const _STATS = ['Not Started', 'In Progress', 'Waiting', 'Blocked', 'MD Review', 'Completed', 'Cancelled'];
 const titleCase = (s) => s.replace(/\b\w/g, m => m.toUpperCase());
 function hoursToEffort(h) { return h <= 2 ? 'S' : h <= 6 ? 'M' : h <= 16 ? 'L' : 'XL'; }
 function mapCategory(s) {

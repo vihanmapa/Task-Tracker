@@ -14,8 +14,8 @@ const CATEGORIES = [
   'Sales', 'Marketing', 'Operations', 'Administration', 'Personal',
 ];
 
-const STATUSES = ['Not Started', 'In Progress', 'Waiting', 'Blocked', 'Completed', 'Cancelled'];
-const KANBAN_COLS = ['Not Started', 'In Progress', 'Waiting', 'Blocked', 'Completed'];
+const STATUSES = ['Not Started', 'In Progress', 'Waiting', 'Blocked', 'MD Review', 'Completed', 'Cancelled'];
+const KANBAN_COLS = ['Not Started', 'In Progress', 'Waiting', 'Blocked', 'MD Review', 'Completed'];
 const PRIORITIES = ['Critical', 'High', 'Medium', 'Low'];
 
 // "today" anchor — real current date (seed/demo dates are relative offsets from this)

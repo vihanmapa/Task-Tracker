@@ -9,6 +9,7 @@ const STATUS_META = {
   'In Progress': { c: 'var(--st-inprogress)', bg: 'var(--st-inprogress-bg)' },
   'Waiting':     { c: 'var(--st-waiting)',    bg: 'var(--st-waiting-bg)' },
   'Blocked':     { c: 'var(--st-blocked)',    bg: 'var(--st-blocked-bg)' },
+  'MD Review':   { c: 'var(--st-mdreview)',   bg: 'var(--st-mdreview-bg)' },
   'Completed':   { c: 'var(--st-completed)',  bg: 'var(--st-completed-bg)' },
   'Cancelled':   { c: 'var(--st-cancelled)',  bg: 'var(--st-cancelled-bg)' },
 };
