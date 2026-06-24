@@ -81,9 +81,15 @@ function App() {
   useEffectA(() => {
     if (!shared) return;
     let alive = true;
-    ds.getUser().then(u => { if (alive) setAuthUser(u || null); });
-    const off = ds.onAuth(u => { if (alive) setAuthUser(u || null); });
-    return () => { alive = false; off && off(); };
+    // Fallback: if the backend is unreachable (e.g. PostgREST/auth 522), getUser()
+    // can hang on retries and leave the gate stuck on "Loading…" forever. Force the
+    // login screen after a few seconds so the app stays usable.
+    const timer = setTimeout(() => {
+      if (alive) setAuthUser(u => (u === undefined ? null : u));
+    }, 8000);
+    ds.getUser().then(u => { if (alive) { clearTimeout(timer); setAuthUser(u || null); } });
+    const off = ds.onAuth(u => { if (alive) { clearTimeout(timer); setAuthUser(u || null); } });
+    return () => { alive = false; clearTimeout(timer); off && off(); };
   }, []);
 
   const signOut = useCallbackA(() => { ds.signOut().then(() => setAuthUser(null)); }, []);
