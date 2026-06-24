@@ -45,7 +45,9 @@ function AIComposer({ onClose, onCreate, onCreateMany }) {
     } else {
       const result = await window.aiService.extractTasks(desc.trim());
       setSource(result._source);
-      setFields({ ...result, description: desc.trim() });
+      // keep the parser's cleaned description (labeled/tabular pastes strip the
+      // label lines); fall back to the raw paste for plain text.
+      setFields({ ...result, description: result.description || desc.trim() });
       setPhase('review');
     }
   };
@@ -57,7 +59,7 @@ function AIComposer({ onClose, onCreate, onCreateMany }) {
   const rmDep = (i) => setFields(f => ({ ...f, dependencies: f.dependencies.filter((_, j) => j !== i) }));
   const save = () => {
     const clean = { ...fields, dependencies: (fields.dependencies || []).filter(s => s.trim()) };
-    onCreate({ ...clean, description: fields.description || desc.trim() });
+    onCreate({ ...clean, description: (fields.description || '').trim() || desc.trim() });
   };
 
   /* batch editors */
@@ -139,6 +141,11 @@ function AIComposer({ onClose, onCreate, onCreateMany }) {
             <div className="field mb16 ai-filled">
               <label className="field-label">Title</label>
               <input className="input" style={{ fontSize: 15, fontWeight: 600 }} value={fields.title} onChange={e => set('title', e.target.value)} />
+            </div>
+
+            <div className="field mb16 ai-filled">
+              <label className="field-label"><I.edit size={13} /> Description</label>
+              <textarea className="input" style={{ minHeight: 84, resize: 'vertical' }} value={fields.description || ''} onChange={e => set('description', e.target.value)} placeholder="What the task involves…" />
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginBottom: 16 }}>
