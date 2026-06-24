@@ -67,6 +67,30 @@ function DlvCatBadge({ code, full }) {
   );
 }
 
+/* ---- delivery model (one-time / recurring / target-based) ---- */
+function deliveryType(code) {
+  const list = window.DELIVERY_TYPES || [];
+  return list.find(t => t.code === code) || list[0] || { code: 'one-time', label: 'One-Time' };
+}
+const DLV_TYPE_ICON = { 'one-time': 'target', 'recurring': 'refresh', 'target-based': 'trend' };
+// progress for a target-based deliverable: current/target, capped at 100
+function targetProgress(d) {
+  const tv = Number(d.targetValue) || 0;
+  const cv = Number(d.currentValue) || 0;
+  if (tv <= 0) return 0;
+  return Math.min(100, Math.round((cv / tv) * 100));
+}
+function DlvTypeBadge({ type }) {
+  const I = window.I;
+  const t = deliveryType(type);
+  const Icon = I[DLV_TYPE_ICON[t.code] || 'target'];
+  return (
+    <span className="chip" title={t.hint || t.label} style={{ gap: 5, fontWeight: 600, color: 'var(--muted)' }}>
+      <Icon size={12} /> {t.label}
+    </span>
+  );
+}
+
 /* ---- compact chip used on task rows / detail ---- */
 function DeliverableChip({ deliverable, onClick }) {
   const I = window.I;
@@ -98,49 +122,129 @@ function DeliverablePicker({ value, deliverables, onChange }) {
   );
 }
 
-/* ---- create form (top-level or sub) ---- */
+/* ---- create form (top-level or sub) — adapts to the chosen delivery model ---- */
 function DeliverableForm({ onCreate, onCancel, parentTitle }) {
   const I = window.I;
-  const [f, setF] = useStateD({ title: '', description: '', targetDate: '', status: 'Active', category: '' });
+  const [f, setF] = useStateD({
+    deliveryType: 'one-time',
+    title: '', description: '', category: '', ownerId: '', status: 'Active',
+    startDate: '', targetDate: '',
+    recurrence: '', currentCycle: '',
+    targetValue: '', currentValue: '', unit: '',
+  });
   const set = (k, v) => setF(s => ({ ...s, [k]: v }));
+  const iso = (v) => v ? new Date(v + 'T17:00:00').toISOString() : null;
+  const dateLabel = { 'one-time': 'Due date', 'recurring': 'Next due date', 'target-based': 'Deadline' }[f.deliveryType];
+
   const submit = () => {
     if (!f.title.trim()) return;
-    onCreate({
+    const base = {
+      deliveryType: f.deliveryType,
       title: f.title.trim(),
       description: f.description.trim(),
-      targetDate: f.targetDate ? new Date(f.targetDate + 'T17:00:00').toISOString() : null,
-      status: f.status,
       category: f.category || null,
-    });
+      ownerId: f.ownerId || null,
+      status: f.status,
+      targetDate: iso(f.targetDate),
+    };
+    if (f.deliveryType === 'one-time') base.startDate = iso(f.startDate);
+    if (f.deliveryType === 'recurring') {
+      base.recurrence = f.recurrence.trim() || null;
+      base.currentCycle = f.currentCycle.trim() || null;
+      base.instances = [];
+    }
+    if (f.deliveryType === 'target-based') {
+      base.targetValue = f.targetValue === '' ? null : Number(f.targetValue);
+      base.currentValue = f.currentValue === '' ? 0 : Number(f.currentValue);
+      base.unit = f.unit.trim() || null;
+    }
+    onCreate(base);
   };
+
+  const Field = ({ label, children, minWidth = 160 }) => (
+    <div style={{ flex: 1, minWidth }}>
+      <label className="field-label" style={{ marginBottom: 5, display: 'block' }}>{label}</label>
+      {children}
+    </div>
+  );
+
   return (
     <div className="card card-pad mb16">
       <div className="section-eyebrow mb12" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
         <I.target size={13} /> {parentTitle ? `New sub-deliverable under “${parentTitle}”` : 'New deliverable'}
       </div>
+
+      {/* delivery model picker */}
+      <label className="field-label" style={{ marginBottom: 6, display: 'block' }}>Delivery type</label>
+      <div className="seg" style={{ marginBottom: 6, flexWrap: 'wrap' }}>
+        {(window.DELIVERY_TYPES || []).map(t => {
+          const Icon = I[DLV_TYPE_ICON[t.code] || 'target'];
+          return (
+            <button key={t.code} className={f.deliveryType === t.code ? 'active' : ''} onClick={() => set('deliveryType', t.code)}>
+              <Icon size={13} /> {t.label}
+            </button>
+          );
+        })}
+      </div>
+      <div className="muted" style={{ fontSize: 12, marginBottom: 12 }}>{deliveryType(f.deliveryType).hint}</div>
+
       <label className="field-label" style={{ marginBottom: 5, display: 'block' }}>Title</label>
       <input className="input" autoFocus value={f.title} placeholder="e.g. Architecture Assessment Scope & Engagement Package"
         onChange={e => set('title', e.target.value)} />
+
       <label className="field-label" style={{ marginBottom: 5, marginTop: 14, display: 'block' }}>Description</label>
       <textarea className="ai-textarea" style={{ minHeight: 80, fontSize: 13.5 }} value={f.description}
         placeholder="What this milestone delivers, and what 'done' means." onChange={e => set('description', e.target.value)} />
-      <label className="field-label" style={{ marginBottom: 5, marginTop: 14, display: 'block' }}>Category</label>
-      <select className="input" value={f.category} onChange={e => set('category', e.target.value)}>
-        <option value="">— Uncategorized —</option>
-        {window.DELIVERABLE_CATEGORIES.map(c => <option key={c.code} value={c.code}>{c.code}. {c.label}</option>)}
-      </select>
+
       <div className="row gap12 mt12" style={{ flexWrap: 'wrap' }}>
-        <div style={{ flex: 1, minWidth: 160 }}>
-          <label className="field-label" style={{ marginBottom: 5, display: 'block' }}>Target date</label>
-          <input type="date" className="input" value={f.targetDate} onChange={e => set('targetDate', e.target.value)} />
-        </div>
-        <div style={{ flex: 1, minWidth: 160 }}>
-          <label className="field-label" style={{ marginBottom: 5, display: 'block' }}>Status</label>
+        <Field label="Category">
+          <select className="input" value={f.category} onChange={e => set('category', e.target.value)}>
+            <option value="">— Uncategorized —</option>
+            {window.DELIVERABLE_CATEGORIES.map(c => <option key={c.code} value={c.code}>{c.code}. {c.label}</option>)}
+          </select>
+        </Field>
+        <Field label="Owner">
+          <select className="input" value={f.ownerId} onChange={e => set('ownerId', e.target.value)}>
+            <option value="">— Me (default) —</option>
+            {Object.values(window.USERS).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+          </select>
+        </Field>
+        <Field label="Status">
           <select className="input" value={f.status} onChange={e => set('status', e.target.value)}>
             {window.DELIVERABLE_STATUSES.map(s => <option key={s}>{s}</option>)}
           </select>
-        </div>
+        </Field>
       </div>
+
+      {/* one-time */}
+      {f.deliveryType === 'one-time' && (
+        <div className="row gap12 mt12" style={{ flexWrap: 'wrap' }}>
+          <Field label="Start date"><input type="date" className="input" value={f.startDate} onChange={e => set('startDate', e.target.value)} /></Field>
+          <Field label={dateLabel}><input type="date" className="input" value={f.targetDate} onChange={e => set('targetDate', e.target.value)} /></Field>
+        </div>
+      )}
+
+      {/* recurring */}
+      {f.deliveryType === 'recurring' && (
+        <div className="row gap12 mt12" style={{ flexWrap: 'wrap' }}>
+          <Field label="Recurrence"><input className="input" list="dlv-recurrence" placeholder="e.g. Every 2 weeks" value={f.recurrence} onChange={e => set('recurrence', e.target.value)} />
+            <datalist id="dlv-recurrence"><option value="Weekly" /><option value="Every 2 weeks" /><option value="Monthly" /><option value="Quarterly" /></datalist>
+          </Field>
+          <Field label="Current cycle"><input className="input" placeholder="e.g. Sprint 59" value={f.currentCycle} onChange={e => set('currentCycle', e.target.value)} /></Field>
+          <Field label={dateLabel}><input type="date" className="input" value={f.targetDate} onChange={e => set('targetDate', e.target.value)} /></Field>
+        </div>
+      )}
+
+      {/* target-based */}
+      {f.deliveryType === 'target-based' && (
+        <div className="row gap12 mt12" style={{ flexWrap: 'wrap' }}>
+          <Field label="Target" minWidth={100}><input type="number" className="input" placeholder="e.g. 3" value={f.targetValue} onChange={e => set('targetValue', e.target.value)} /></Field>
+          <Field label="Current" minWidth={100}><input type="number" className="input" placeholder="e.g. 1" value={f.currentValue} onChange={e => set('currentValue', e.target.value)} /></Field>
+          <Field label="Unit" minWidth={120}><input className="input" placeholder="e.g. clients" value={f.unit} onChange={e => set('unit', e.target.value)} /></Field>
+          <Field label={dateLabel}><input type="date" className="input" value={f.targetDate} onChange={e => set('targetDate', e.target.value)} /></Field>
+        </div>
+      )}
+
       <div className="row gap8 mt16">
         <button className="btn btn-primary btn-sm" onClick={submit}><I.check size={13} /> Create</button>
         <button className="btn btn-subtle btn-sm" onClick={onCancel}>Cancel</button>
@@ -153,6 +257,10 @@ function DeliverableForm({ onCreate, onCancel, parentTitle }) {
 function DlvCard({ d, tasks, deliverables, onOpen }) {
   const I = window.I;
   const r = rollup(d.id, tasks, deliverables);
+  const type = d.deliveryType || 'one-time';
+  const isTarget = type === 'target-based';
+  const isRecurring = type === 'recurring';
+  const progress = isTarget ? targetProgress(d) : r.progress;
   return (
     <button className="card card-pad" onClick={() => onOpen(d.id)}
       style={{ textAlign: 'left', cursor: 'pointer', width: '100%', display: 'block' }}>
@@ -162,19 +270,23 @@ function DlvCard({ d, tasks, deliverables, onOpen }) {
           <span style={{ fontWeight: 700, fontSize: 15.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</span>
         </div>
         <span className="row gap6 center" style={{ flexShrink: 0 }}>
+          <DlvTypeBadge type={type} />
           {d.category && <DlvCatBadge code={d.category} />}
           <DlvStatusPill status={d.status} />
         </span>
       </div>
       {d.description && <div className="muted" style={{ fontSize: 12.5, marginBottom: 12, lineHeight: 1.5, display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{d.description}</div>}
       <div className="row gap12 center" style={{ marginBottom: 6 }}>
-        <div className="grow"><window.Progress value={r.progress} height={6} /></div>
-        <span style={{ fontSize: 12.5, fontWeight: 700 }}>{r.progress}%</span>
+        <div className="grow"><window.Progress value={progress} height={6} /></div>
+        <span style={{ fontSize: 12.5, fontWeight: 700 }}>{progress}%</span>
       </div>
       <div className="row gap12 center" style={{ fontSize: 12, color: 'var(--muted)' }}>
-        <span>{r.done}/{r.total} done</span>
-        {r.subCount > 0 && <span>· {r.subCount} sub</span>}
-        {r.blocked > 0 && <span style={{ color: 'var(--st-blocked)' }}>· {r.blocked} blocked</span>}
+        {isTarget
+          ? <span>{(d.currentValue ?? 0)}/{d.targetValue ?? '—'}{d.unit ? ` ${d.unit}` : ''}</span>
+          : isRecurring
+            ? <span>{d.currentCycle || d.recurrence || 'Recurring'}{(d.instances || []).length ? ` · ${d.instances.length} cycles` : ''}</span>
+            : <span>{r.done}/{r.total} done{r.subCount > 0 ? ` · ${r.subCount} sub` : ''}</span>}
+        {!isTarget && !isRecurring && r.blocked > 0 && <span style={{ color: 'var(--st-blocked)' }}>· {r.blocked} blocked</span>}
         {d.targetDate && <span>· <window.DueTag iso={d.targetDate} /></span>}
       </div>
     </button>
@@ -385,14 +497,109 @@ function ResourceList({ parentType, parentId, publicItems = [], canEdit, onAddPu
   );
 }
 
+/* ---- recurring: per-cycle instance log ---- */
+const DLV_INSTANCE_STATUSES = ['Active', 'Completed', 'Skipped'];
+function InstanceLog({ deliverable, canEdit, onEdit }) {
+  const I = window.I;
+  const instances = [...(deliverable.instances || [])].sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+  const [adding, setAdding] = useStateD(false);
+  const [f, setF] = useStateD({ label: '', date: '', status: 'Active' });
+
+  const save = (next) => onEdit(deliverable.id, { instances: next });
+  const add = () => {
+    if (!f.label.trim()) return;
+    const item = {
+      id: 'in-' + Date.now().toString(36),
+      label: f.label.trim(),
+      date: f.date ? new Date(f.date + 'T17:00:00').toISOString() : null,
+      status: f.status,
+    };
+    save([...(deliverable.instances || []), item]);
+    setF({ label: '', date: '', status: 'Active' });
+    setAdding(false);
+  };
+  const setStatus = (id, status) => save((deliverable.instances || []).map(i => i.id === id ? { ...i, status } : i));
+  const remove = (id) => save((deliverable.instances || []).filter(i => i.id !== id));
+
+  const stColor = { Active: 'var(--accent)', Completed: 'var(--st-completed)', Skipped: 'var(--muted)' };
+
+  return (
+    <div className="card card-pad mb16">
+      <div className="row between center mb8">
+        <div className="section-eyebrow" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.refresh size={13} /> Cycle history</div>
+        {canEdit && !adding && <button className="btn btn-subtle btn-sm" onClick={() => setAdding(true)}><I.plus size={13} /> Log a cycle</button>}
+      </div>
+
+      {instances.length === 0 && !adding && (
+        <div className="muted" style={{ fontSize: 12.5 }}>No cycles logged yet. Log each occurrence as it runs.</div>
+      )}
+
+      <div className="col gap8">
+        {instances.map(i => (
+          <div key={i.id} className="row gap10 center" style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+            <span style={{ width: 8, height: 8, borderRadius: 999, background: stColor[i.status] || 'var(--muted)', flexShrink: 0 }} />
+            <span className="grow" style={{ fontSize: 13.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{i.label}</span>
+            {i.date && <span className="muted" style={{ fontSize: 12, flexShrink: 0 }}>{window.fmtDate(i.date)}</span>}
+            {canEdit
+              ? <select className="input" style={{ width: 'auto', padding: '3px 6px', fontSize: 12 }} value={i.status} onChange={e => setStatus(i.id, e.target.value)}>
+                  {DLV_INSTANCE_STATUSES.map(s => <option key={s}>{s}</option>)}
+                </select>
+              : <span className="chip" style={{ fontSize: 11, color: stColor[i.status] }}>{i.status}</span>}
+            {canEdit && <button className="icon-btn" title="Remove" onClick={() => remove(i.id)} style={{ flexShrink: 0 }}><I.x size={15} /></button>}
+          </div>
+        ))}
+      </div>
+
+      {adding && (
+        <div className="row gap8 center mt12" style={{ flexWrap: 'wrap' }}>
+          <input className="input" style={{ flex: 1, minWidth: 140 }} autoFocus placeholder="Cycle label (e.g. Sprint 60)" value={f.label} onChange={e => setF(s => ({ ...s, label: e.target.value }))} />
+          <input type="date" className="input" style={{ width: 150 }} value={f.date} onChange={e => setF(s => ({ ...s, date: e.target.value }))} />
+          <select className="input" style={{ width: 'auto' }} value={f.status} onChange={e => setF(s => ({ ...s, status: e.target.value }))}>
+            {DLV_INSTANCE_STATUSES.map(s => <option key={s}>{s}</option>)}
+          </select>
+          <button className="btn btn-primary btn-sm" onClick={add}><I.check size={13} /> Add</button>
+          <button className="btn btn-subtle btn-sm" onClick={() => { setAdding(false); setF({ label: '', date: '', status: 'Active' }); }}>Cancel</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ---- detail: breadcrumb + rollup + sub-deliverables + tasks ---- */
 function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, currentUser, onBack, onOpen, onOpenTask, onCreate, onEdit, onDelete, onAssign, onAddResource, onDeleteResource }) {
   const I = window.I;
   const [picking, setPicking] = useStateD(false);
   const [addingSub, setAddingSub] = useStateD(false);
+  const [editingHead, setEditingHead] = useStateD(false);
+  const [head, setHead] = useStateD({ title: '', description: '' });
   if (!deliverable) return null;
   const r = rollup(deliverable.id, tasks, deliverables);
   const owner = window.USERS[deliverable.ownerId];
+  const type = deliverable.deliveryType || 'one-time';
+  const tProg = targetProgress(deliverable);
+
+  // inline-edit helpers (editor only)
+  const isoIn = (v) => v ? new Date(v + 'T17:00:00').toISOString() : null;
+  const dval = (iso) => iso ? new Date(iso).toISOString().slice(0, 10) : '';
+  const edit = (changes) => onEdit(deliverable.id, changes);
+  const DateField = ({ label, field, due }) => (
+    <div className="col" style={{ gap: 3 }}>
+      <span className="muted" style={{ fontSize: 11.5 }}>{label}</span>
+      {canEdit
+        ? <input type="date" className="input" style={{ width: 150, padding: '4px 8px', fontSize: 12.5 }}
+            value={dval(deliverable[field])} onChange={e => edit({ [field]: isoIn(e.target.value) })} />
+        : <span style={{ fontSize: 13, fontWeight: 600 }}>{deliverable[field] ? (due ? <window.DueTag iso={deliverable[field]} /> : window.fmtDate(deliverable[field])) : '—'}</span>}
+    </div>
+  );
+  const TextField = ({ label, field, placeholder, width = 150 }) => (
+    <div className="col" style={{ gap: 3 }}>
+      <span className="muted" style={{ fontSize: 11.5 }}>{label}</span>
+      {canEdit
+        ? <input className="input" style={{ width, padding: '4px 8px', fontSize: 12.5 }} placeholder={placeholder}
+            value={deliverable[field] || ''} onChange={e => edit({ [field]: e.target.value })} />
+        : <span style={{ fontSize: 13, fontWeight: 600 }}>{deliverable[field] || '—'}</span>}
+    </div>
+  );
   const path = pathOf(deliverable.id, deliverables);
   const subs = childrenOf(deliverable.id, deliverables);
   const directTasks = tasks.filter(t => t.deliverableId === deliverable.id)
@@ -423,6 +630,12 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, currentU
         ))}
         <span className="grow" />
         {canEdit
+          ? <select className="input" style={{ width: 'auto' }} value={deliverable.deliveryType || 'one-time'}
+              onChange={e => onEdit(deliverable.id, { deliveryType: e.target.value })} title="Delivery type">
+              {window.DELIVERY_TYPES.map(t => <option key={t.code} value={t.code}>{t.label}</option>)}
+            </select>
+          : <DlvTypeBadge type={deliverable.deliveryType} />}
+        {canEdit
           ? <select className="input" style={{ width: 'auto', maxWidth: 240 }} value={deliverable.category || ''}
               onChange={e => onEdit(deliverable.id, { category: e.target.value || null })} title="Category">
               <option value="">— Uncategorized —</option>
@@ -435,29 +648,95 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, currentU
       </div>
 
       <div className="page-pad" style={{ paddingTop: 24, maxWidth: 920 }}>
-        <div className="row gap10 center mb12">
-          <span style={{ color: 'var(--accent)' }}><I.flag size={18} /></span>
-          <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.02em', lineHeight: 1.2, margin: 0 }}>{deliverable.title}</h1>
-        </div>
-        {deliverable.description && <div className="desc-block mb16">{deliverable.description}</div>}
+        {editingHead ? (
+          <div className="card card-pad mb16">
+            <label className="field-label" style={{ marginBottom: 5, display: 'block' }}>Title</label>
+            <input className="input" autoFocus value={head.title} onChange={e => setHead(s => ({ ...s, title: e.target.value }))} />
+            <label className="field-label" style={{ marginBottom: 5, marginTop: 14, display: 'block' }}>Description</label>
+            <textarea className="ai-textarea" style={{ minHeight: 80, fontSize: 13.5 }} value={head.description}
+              placeholder="What this milestone delivers, and what 'done' means." onChange={e => setHead(s => ({ ...s, description: e.target.value }))} />
+            <div className="row gap8 mt16">
+              <button className="btn btn-primary btn-sm" disabled={!head.title.trim()}
+                onClick={() => { if (!head.title.trim()) return; edit({ title: head.title.trim(), description: head.description.trim() }); setEditingHead(false); }}>
+                <I.check size={13} /> Save
+              </button>
+              <button className="btn btn-subtle btn-sm" onClick={() => setEditingHead(false)}>Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div className="row gap10 center mb12">
+              <span style={{ color: 'var(--accent)' }}><I.flag size={18} /></span>
+              <h1 style={{ fontSize: 24, fontWeight: 800, letterSpacing: '-0.02em', lineHeight: 1.2, margin: 0 }}>{deliverable.title}</h1>
+              {canEdit && (
+                <button className="icon-btn" title="Edit title & description"
+                  onClick={() => { setHead({ title: deliverable.title || '', description: deliverable.description || '' }); setEditingHead(true); }}
+                  style={{ flexShrink: 0 }}><I.edit size={15} /></button>
+              )}
+            </div>
+            {deliverable.description && <div className="desc-block mb16">{deliverable.description}</div>}
+          </>
+        )}
 
         <div className="card card-pad mb16">
           <div className="row gap16 center" style={{ flexWrap: 'wrap' }}>
+            {/* progress ring — target-based uses its metric, others use task rollup */}
             <div className="row gap12 center">
-              <window.Ring value={r.progress} size={46} />
-              <div><div style={{ fontSize: 20, fontWeight: 800 }}>{r.progress}%</div><div className="muted" style={{ fontSize: 11.5 }}>rolled up</div></div>
+              <window.Ring value={type === 'target-based' ? tProg : r.progress} size={46} />
+              <div>
+                <div style={{ fontSize: 20, fontWeight: 800 }}>{type === 'target-based' ? tProg : r.progress}%</div>
+                <div className="muted" style={{ fontSize: 11.5 }}>{type === 'target-based' ? 'of target' : type === 'recurring' ? 'tasks this cycle' : 'rolled up'}</div>
+              </div>
             </div>
             <span style={{ width: 1, height: 38, background: 'var(--border)' }} />
-            <div><div style={{ fontSize: 18, fontWeight: 700 }}>{r.done}/{r.total}</div><div className="muted" style={{ fontSize: 11.5 }}>tasks done</div></div>
-            {r.subCount > 0 && <div><div style={{ fontSize: 18, fontWeight: 700 }}>{r.subCount}</div><div className="muted" style={{ fontSize: 11.5 }}>sub-deliverables</div></div>}
-            {r.blocked > 0 && <div><div style={{ fontSize: 18, fontWeight: 700, color: 'var(--st-blocked)' }}>{r.blocked}</div><div className="muted" style={{ fontSize: 11.5 }}>blocked</div></div>}
+
+            {/* type-specific middle stats */}
+            {type === 'target-based' && (
+              <div className="col" style={{ gap: 3 }}>
+                <span className="muted" style={{ fontSize: 11.5 }}>Progress</span>
+                <div className="row gap6 center">
+                  {canEdit
+                    ? <input type="number" className="input" style={{ width: 64, padding: '4px 8px', fontSize: 13 }} value={deliverable.currentValue ?? ''} onChange={e => edit({ currentValue: e.target.value === '' ? 0 : Number(e.target.value) })} />
+                    : <span style={{ fontSize: 18, fontWeight: 800 }}>{deliverable.currentValue ?? 0}</span>}
+                  <span className="muted">/</span>
+                  {canEdit
+                    ? <input type="number" className="input" style={{ width: 64, padding: '4px 8px', fontSize: 13 }} value={deliverable.targetValue ?? ''} onChange={e => edit({ targetValue: e.target.value === '' ? null : Number(e.target.value) })} />
+                    : <span style={{ fontSize: 18, fontWeight: 800 }}>{deliverable.targetValue ?? '—'}</span>}
+                  {canEdit
+                    ? <input className="input" style={{ width: 90, padding: '4px 8px', fontSize: 13 }} placeholder="unit" value={deliverable.unit || ''} onChange={e => edit({ unit: e.target.value })} />
+                    : <span style={{ fontSize: 13, fontWeight: 600 }}>{deliverable.unit || ''}</span>}
+                </div>
+              </div>
+            )}
+
+            {type === 'recurring' && <>
+              {TextField({ label: 'Current cycle', field: 'currentCycle', placeholder: 'e.g. Sprint 59', width: 130 })}
+              {TextField({ label: 'Recurrence', field: 'recurrence', placeholder: 'e.g. Every 2 weeks', width: 130 })}
+              <div><div style={{ fontSize: 18, fontWeight: 700 }}>{(deliverable.instances || []).filter(i => i.status === 'Completed').length}/{(deliverable.instances || []).length}</div><div className="muted" style={{ fontSize: 11.5 }}>cycles done</div></div>
+            </>}
+
+            {type === 'one-time' && <>
+              <div><div style={{ fontSize: 18, fontWeight: 700 }}>{r.done}/{r.total}</div><div className="muted" style={{ fontSize: 11.5 }}>tasks done</div></div>
+              {r.subCount > 0 && <div><div style={{ fontSize: 18, fontWeight: 700 }}>{r.subCount}</div><div className="muted" style={{ fontSize: 11.5 }}>sub-deliverables</div></div>}
+              {r.blocked > 0 && <div><div style={{ fontSize: 18, fontWeight: 700, color: 'var(--st-blocked)' }}>{r.blocked}</div><div className="muted" style={{ fontSize: 11.5 }}>blocked</div></div>}
+            </>}
+
             <span className="grow" />
-            <div className="col" style={{ textAlign: 'right' }}>
-              <span className="row gap6 center" style={{ justifyContent: 'flex-end' }}><window.Avatar user={owner} size={20} /><span className="meta-v">{owner ? owner.name : '—'}</span></span>
-              {deliverable.targetDate && <span className="muted" style={{ fontSize: 12, marginTop: 4 }}>Target <window.DueTag iso={deliverable.targetDate} /></span>}
+
+            {/* dates + owner */}
+            {type === 'one-time' && DateField({ label: 'Start', field: 'startDate' })}
+            {DateField({ label: { 'one-time': 'Due', 'recurring': 'Next due', 'target-based': 'Deadline' }[type], field: 'targetDate', due: true })}
+            <div className="col" style={{ gap: 4 }}>
+              <span className="muted" style={{ fontSize: 11.5 }}>Owner</span>
+              <span className="row gap6 center"><window.Avatar user={owner} size={20} /><span className="meta-v">{owner ? owner.name : '—'}</span></span>
             </div>
           </div>
         </div>
+
+        {/* recurring — instance log */}
+        {type === 'recurring' && (
+          <InstanceLog deliverable={deliverable} canEdit={canEdit} onEdit={onEdit} />
+        )}
 
         {/* sub-deliverables */}
         <div className="row between center mb12">

@@ -343,8 +343,19 @@ function App() {
       title: data.title, description: data.description || '',
       parentId: data.parentId || null,
       category: data.category || null,
-      ownerId: currentUser, status: data.status || 'Active',
-      targetDate: data.targetDate || null, createdAt: now, updatedAt: now,
+      ownerId: data.ownerId || currentUser, status: data.status || 'Active',
+      deliveryType: data.deliveryType || 'one-time',
+      startDate: data.startDate || null,
+      targetDate: data.targetDate || null,
+      // recurring
+      recurrence: data.recurrence || null,
+      currentCycle: data.currentCycle || null,
+      instances: data.instances || [],
+      // target-based
+      targetValue: (data.targetValue ?? null),
+      currentValue: (data.currentValue ?? null),
+      unit: data.unit || null,
+      createdAt: now, updatedAt: now,
     };
     setDeliverables(ds => [dv, ...ds]);
     return dv.id;
