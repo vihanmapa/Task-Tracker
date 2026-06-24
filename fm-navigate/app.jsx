@@ -210,6 +210,9 @@ function App() {
     const t = tasks.find(x => x.id === id);
     if (!confirm(`Delete "${t ? t.title : id}"? This permanently removes the task and its history. This cannot be undone.`)) return;
     setTasks(ts => ts.filter(x => x.id !== id));
+    // purge private resources so they don't orphan and resurface on a reused id
+    const ds = window.dataService;
+    if (ds && ds.authReady && ds.authReady()) ds.deleteResourcesFor('task', id);
     if (selected === id) setSelected(null);
     setRoute('tasks');
   }, [canEdit, tasks, selected]);
@@ -375,6 +378,8 @@ function App() {
       return ds.filter(d => d.id !== id).map(d => d.parentId === id ? { ...d, parentId: newParent } : d);
     });
     setTasks(ts => ts.map(t => t.deliverableId === id ? { ...t, deliverableId: null } : t));
+    const ds = window.dataService;
+    if (ds && ds.authReady && ds.authReady()) ds.deleteResourcesFor('deliverable', id);
     setRoute('deliverables'); setDlvSelected(null);
   }, [canEdit]);
 
@@ -516,6 +521,7 @@ function App() {
           <window.TaskDetail task={selectedTask} deliverables={deliverables} allTasks={tasks} onClose={() => { setRoute('tasks'); setSelected(null); }}
             onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditProgress={editProgress} onDeleteProgress={deleteProgress} onEditTask={editTask} onRevertEdit={revertEdit}
             onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onOpenTask={openTask} onUpdate={() => {}} onDeleteTask={deleteTask} canEdit={canEdit} currentUser={currentUser}
+            onCreateLinked={(t) => setComposer({ linkTo: { taskId: t.id, title: t.title, deliverableId: t.deliverableId } })}
             onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} />
         )}
         {route === 'summary' && <window.WeeklySummary tasks={tasks} onOpen={openTask} />}
@@ -523,7 +529,7 @@ function App() {
         {route === 'settings' && <Settings tweaks={tweaks} setTweak={setTweak} onLoadDemo={loadDemo} onClearAll={clearAll} taskCount={tasks.length} />}
       </div>
 
-      {composer && <window.AIComposer onClose={() => setComposer(false)} onCreate={createTask} onCreateMany={createTasks} />}
+      {composer && <window.AIComposer onClose={() => setComposer(false)} onCreate={createTask} onCreateMany={createTasks} linkTo={composer && composer.linkTo} />}
 
       {/* ---- Tweaks panel ---- */}
       <window.TweaksPanel>

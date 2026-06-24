@@ -28,17 +28,31 @@ const d = (offsetDays, h = 17) => {
 };
 
 let _id = 100;
-const nid = () => `T-${++_id}`;
-
 let _did = 0;
-const did = () => `D-${++_did}`;
 
 // ---- id safety -------------------------------------------------------------
 // Seeds hardcode T-101.. / D-1.., but the counters above reset to their seed
-// start on every page load. The first item created in a session therefore
-// reused a seed id — so a task assigned to it showed up under BOTH records.
-// Fix: before generating, advance the counters past everything already loaded;
-// and renumber any record that still collides with an earlier one.
+// start on every page load, and syncIds() reseeds them from the MAX id still
+// present. That meant deleting the highest task dropped the counter, so the
+// next new task RECLAIMED the deleted id — and inherited the deleted record's
+// orphaned private_resources rows in Supabase (they key off the display id).
+// Fix: persist a monotonic high-water mark per prefix in localStorage so a new
+// id is never reused after a delete. (One editor account writes the shared
+// blob, so a per-browser mark is enough; syncIds keeps it >= the live max.)
+const _HWM_KEY = 'fm_id_hwm';
+const _loadHWM = () => { try { return JSON.parse(localStorage.getItem(_HWM_KEY)) || {}; } catch (_) { return {}; } };
+const _bumpHWM = (prefix, n) => {
+  const h = _loadHWM();
+  if (n > (h[prefix] || 0)) { h[prefix] = n; try { localStorage.setItem(_HWM_KEY, JSON.stringify(h)); } catch (_) {} }
+};
+const _nextId = (prefix, counter) => {
+  const next = Math.max(counter, _loadHWM()[prefix] || 0) + 1;
+  _bumpHWM(prefix, next);
+  return next;
+};
+const nid = () => { _id = _nextId('T-', _id); return `T-${_id}`; };
+const did = () => { _did = _nextId('D-', _did); return `D-${_did}`; };
+
 const _suffix = (prefix, id) => {
   if (typeof id !== 'string' || !id.startsWith(prefix)) return 0;
   const n = parseInt(id.slice(prefix.length), 10);
@@ -47,6 +61,7 @@ const _suffix = (prefix, id) => {
 const syncIds = (tasks, deliverables) => {
   (tasks || []).forEach(t => { _id = Math.max(_id, _suffix('T-', t.id)); });
   (deliverables || []).forEach(d => { _did = Math.max(_did, _suffix('D-', d.id)); });
+  _bumpHWM('T-', _id); _bumpHWM('D-', _did);
 };
 // Counters are synced first so any fresh id is guaranteed unique. The earlier
 // occurrence keeps the id; later duplicates get a new one. Returns

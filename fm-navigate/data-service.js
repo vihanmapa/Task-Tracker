@@ -154,6 +154,20 @@
         .then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; })
         .catch(function (e) { return { ok: false, error: String(e) }; });
     },
+
+    // Purge ALL private resources for one parent (called when a task or
+    // deliverable is deleted) so they don't orphan and resurface on a future
+    // record. RLS scopes the delete to the caller's own rows; other users'
+    // private rows for the same parent can't be reached from here (and are
+    // protected from resurfacing by the id high-water mark in data.js).
+    deleteResourcesFor: function (parentType, parentId) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: true });
+      return c.from('private_resources').delete()
+        .eq('parent_type', parentType).eq('parent_id', parentId)
+        .then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
   };
 
   window.dataService = dataService;

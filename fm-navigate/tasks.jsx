@@ -263,7 +263,7 @@ function KanbanView({ tasks, onOpen, onMove, canEdit = true }) {
    Log a % complete + a note + evidence (a link or an attached document). */
 const MAX_FILE_BYTES = 1.5 * 1024 * 1024; // 1.5MB — kept small for localStorage
 
-function ProgressLog({ task, onLog, onEdit, onDelete, canEdit, currentUser }) {
+function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, currentUser }) {
   const I = window.I;
   const log = [...(task.progressLog || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
   const [open, setOpen] = useStateT(false);
@@ -345,7 +345,12 @@ function ProgressLog({ task, onLog, onEdit, onDelete, canEdit, currentUser }) {
     <>
       <div className="section-eyebrow mt24 mb8" style={{ display: 'flex', alignItems: 'center', gap: 7, justifyContent: 'space-between' }}>
         <span style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.trend size={13} /> Progress · {task.progress || 0}%</span>
-        {canEdit && !open && <button className="btn btn-ghost btn-sm" onClick={openForm}><I.plus size={13} /> Log progress</button>}
+        {canEdit && !open && (
+          <span className="row gap8 center">
+            {onCreateLinked && <button className="btn btn-ghost btn-sm" onClick={onCreateLinked} title="Create a follow-up task linked to this one"><I.link size={13} /> New linked task</button>}
+            <button className="btn btn-ghost btn-sm" onClick={openForm}><I.plus size={13} /> Log progress</button>
+          </span>
+        )}
       </div>
 
       <div className="mb12"><window.Progress value={task.progress || 0} height={8} /></div>
@@ -571,7 +576,7 @@ function TaskEditPanel({ task, allTasks = [], onSave, onCancel }) {
 }
 
 /* ---------------- Task detail ---------------- */
-function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onAddResource, onDeleteResource, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
+function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onCreateLinked, onAddResource, onDeleteResource, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
   const I = window.I;
   const [comment, setComment] = useStateT('');
   const [editing, setEditing] = useStateT(false);
@@ -680,6 +685,27 @@ function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate,
                   </>
                 )}
 
+                {(() => {
+                  // incoming links: tasks that point at this one (e.g. follow-ups created from it)
+                  const linkedFrom = allTasks.filter(t => t.id !== task.id && (t.depTaskIds || []).includes(task.id));
+                  if (!linkedFrom.length) return null;
+                  return (
+                    <>
+                      <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.link size={13} /> Linked tasks <span className="faint" style={{ fontWeight: 400, textTransform: 'none' }}>· follow-ups & tasks that link here</span></div>
+                      <div className="row gap8 mb16" style={{ flexWrap: 'wrap' }}>
+                        {linkedFrom.map(dt => (
+                          <button key={dt.id} type="button" className="chip" onClick={() => onOpenTask && onOpenTask(dt.id)}
+                            title={dt.title} style={{ cursor: 'pointer', maxWidth: 320 }}>
+                            <span style={{ width: 7, height: 7, borderRadius: 99, flexShrink: 0, background: (window.STATUS_META[dt.status] || {}).c || 'var(--muted)' }} />
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dt.title}</span>
+                            <span className="faint mono" style={{ fontSize: 11 }}>{dt.id}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  );
+                })()}
+
                 {task.dependencies?.length > 0 && (
                   <>
                     <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.link size={13} /> Dependencies</div>
@@ -742,7 +768,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate,
             )}
 
             {/* progress log */}
-            <ProgressLog task={task} onLog={onLogProgress} onEdit={onEditProgress} onDelete={onDeleteProgress} canEdit={canEdit} currentUser={currentUser} />
+            <ProgressLog task={task} onLog={onLogProgress} onEdit={onEditProgress} onDelete={onDeleteProgress} onCreateLinked={onCreateLinked && (() => onCreateLinked(task))} canEdit={canEdit} currentUser={currentUser} />
 
             {/* resources — shared + private (per-item lock toggle) */}
             <div className="mt24">

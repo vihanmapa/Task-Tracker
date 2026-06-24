@@ -20,7 +20,7 @@ const STATUSES4 = ['Not Started', 'In Progress', 'Waiting', 'Blocked'];
 const toDateInput = (iso) => iso ? new Date(iso).toISOString().slice(0, 10) : '';
 const fromDateInput = (v) => v ? new Date(v + 'T17:00:00').toISOString() : null;
 
-function AIComposer({ onClose, onCreate, onCreateMany }) {
+function AIComposer({ onClose, onCreate, onCreateMany, linkTo }) {
   const I = window.I;
   const [desc, setDesc] = useStateC('');
   const [phase, setPhase] = useStateC('input'); // input | parsing | review | batch
@@ -57,9 +57,14 @@ function AIComposer({ onClose, onCreate, onCreateMany }) {
   const setDep = (i, v) => setFields(f => { const d = [...f.dependencies]; d[i] = v; return { ...f, dependencies: d }; });
   const addDep = () => setFields(f => ({ ...f, dependencies: [...f.dependencies, ''] }));
   const rmDep = (i) => setFields(f => ({ ...f, dependencies: f.dependencies.filter((_, j) => j !== i) }));
+  // when launched as a follow-up, link the new task back to its origin and
+  // inherit the origin's deliverable so both sit under the same group.
+  const withLink = (t) => linkTo
+    ? { ...t, depTaskIds: [...(t.depTaskIds || []), linkTo.taskId], deliverableId: t.deliverableId || linkTo.deliverableId || null }
+    : t;
   const save = () => {
     const clean = { ...fields, dependencies: (fields.dependencies || []).filter(s => s.trim()) };
-    onCreate({ ...clean, description: (fields.description || '').trim() || desc.trim() });
+    onCreate(withLink({ ...clean, description: (fields.description || '').trim() || desc.trim() }));
   };
 
   /* batch editors */
@@ -68,7 +73,7 @@ function AIComposer({ onClose, onCreate, onCreateMany }) {
   const saveBatch = () => {
     const rows = batch
       .filter(r => r.title.trim())
-      .map(r => ({ ...r, dependencies: (r.dependencies || []).filter(s => s.trim()) }));
+      .map(r => withLink({ ...r, dependencies: (r.dependencies || []).filter(s => s.trim()) }));
     onCreateMany(rows);
   };
 
@@ -86,6 +91,13 @@ function AIComposer({ onClose, onCreate, onCreateMany }) {
       </div>
 
       <div className="modal-body">
+        {linkTo && (
+          <div className="row gap8 center mb16" style={{ background: 'var(--bg-sunken)', border: '1px solid var(--border)', borderRadius: 'var(--r-md)', padding: '8px 11px', fontSize: 12.5 }}>
+            <I.link size={13} style={{ flexShrink: 0, color: 'var(--accent)' }} />
+            <span className="muted">Linking back to</span>
+            <b style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{linkTo.title}</b>
+          </div>
+        )}
         {/* description — shown in input/parsing only */}
         {(phase === 'input' || phase === 'parsing') && (
           <div className="field mb16">

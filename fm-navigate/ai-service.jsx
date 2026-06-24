@@ -266,7 +266,7 @@ function mapCategory(s) {
   const m = [
     [/complian|\biso\b|gdpr|audit|\bpolicy\b|soc\s?2|regulat/, 'Compliance'],
     [/technical|infra|devops|architectur|\bapi\b|migration|backend|database/, 'Technical'],
-    [/product|strategy|design|\bux\b|prototype|feature|roadmap/, 'Product Development'],
+    [/product|strategy|design|\bux\b|prototype|feature|roadmap|discovery|requirement|assessment|research|analysis|scoping|planning/, 'Product Development'],
     [/deliver|sprint|release|ship|deploy|pilot env/, 'Delivery'],
     [/sales|deal|prospect|customer|pilot|partner/, 'Sales'],
     [/marketing|launch|campaign|pricing page|website/, 'Marketing'],
@@ -276,6 +276,72 @@ function mapCategory(s) {
   ];
   for (const [re, c] of m) if (re.test(lc)) return c;
   return 'Operations';
+}
+// Resolve a free-text category to one of the fixed app categories: exact match
+// first (case-insensitive), then keyword mapping. The category set is closed
+// (window.CATEGORIES), so unrecognised labels like "Requirements Gathering"
+// can't be stored verbatim — they map to the closest fit.
+function resolveCategory(raw) {
+  const s = (raw || '').trim();
+  const cats = window.CATEGORIES || [];
+  const exact = cats.find(c => c.toLowerCase() === s.toLowerCase());
+  return exact || mapCategory(s);
+}
+
+// Status / priority aliases → canonical app values (so "Done", "WIP", "Urgent"
+// etc. don't silently fall back to defaults). Returns null when unrecognised.
+const _STATUS_ALIASES = {
+  done: 'Completed', complete: 'Completed', completed: 'Completed', closed: 'Completed',
+  finished: 'Completed', resolved: 'Completed', shipped: 'Completed',
+  open: 'Not Started', todo: 'Not Started', 'to do': 'Not Started', 'to-do': 'Not Started',
+  'not started': 'Not Started', 'not-started': 'Not Started', new: 'Not Started', backlog: 'Not Started',
+  wip: 'In Progress', 'in progress': 'In Progress', 'in-progress': 'In Progress',
+  doing: 'In Progress', ongoing: 'In Progress', started: 'In Progress', active: 'In Progress',
+  review: 'MD Review', 'in review': 'MD Review', 'md review': 'MD Review', 'in md review': 'MD Review',
+  blocked: 'Blocked', stuck: 'Blocked',
+  waiting: 'Waiting', pending: 'Waiting', 'on hold': 'Waiting', hold: 'Waiting',
+  cancelled: 'Cancelled', canceled: 'Cancelled', dropped: 'Cancelled',
+};
+function canonStatus(raw) {
+  const k = (raw || '').trim().toLowerCase();
+  if (!k) return null;
+  if (_STATUS_ALIASES[k]) return _STATUS_ALIASES[k];
+  return _STATS.find(s => s.toLowerCase() === k) || null;
+}
+const _PRIO_ALIASES = {
+  urgent: 'Critical', critical: 'Critical', highest: 'Critical', p0: 'Critical', blocker: 'Critical',
+  high: 'High', p1: 'High', med: 'Medium', medium: 'Medium', normal: 'Medium', p2: 'Medium',
+  low: 'Low', lowest: 'Low', minor: 'Low', p3: 'Low',
+};
+function canonPriority(raw) {
+  const k = (raw || '').trim().toLowerCase();
+  if (!k) return null;
+  if (_PRIO_ALIASES[k]) return _PRIO_ALIASES[k];
+  return _PRIOS.find(p => p.toLowerCase() === k) || null;
+}
+
+// Parse an explicit calendar date the heuristic phrase-parser can't handle:
+// ISO (2026-06-11), DD-Mon-YYYY (11-Jun-2026), "Jun 11, 2026", DD/MM/YYYY.
+// Returns an ISO string (noon UTC to avoid timezone date-rollback) or null.
+const _MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+function _mkDate(y, mo, d) {
+  if (mo == null || !(d >= 1 && d <= 31)) return null;
+  const dt = new Date(Date.UTC(y, mo, d, 12, 0, 0));
+  return isNaN(dt.getTime()) ? null : dt.toISOString();
+}
+function parseExplicitDate(raw) {
+  const s = (raw || '').trim();
+  if (!s) return null;
+  let m;
+  if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/))) return _mkDate(+m[1], +m[2] - 1, +m[3]);
+  if ((m = s.match(/^(\d{1,2})[-/ ]([A-Za-z]{3,})[-/ ,]*\s*(\d{4})$/))) return _mkDate(+m[3], _MONTHS[m[2].slice(0, 3).toLowerCase()], +m[1]);
+  if ((m = s.match(/^([A-Za-z]{3,})\.?\s+(\d{1,2}),?\s+(\d{4})$/))) return _mkDate(+m[3], _MONTHS[m[1].slice(0, 3).toLowerCase()], +m[2]);
+  if ((m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})$/))) {
+    let dd = +m[1], mm = +m[2];
+    if (mm > 12 && dd <= 12) { const t = dd; dd = mm; mm = t; } // tolerate MM/DD
+    return mm >= 1 && mm <= 12 ? _mkDate(+m[3], mm - 1, dd) : null;
+  }
+  return null;
 }
 
 /* One spreadsheet row → one structured task.
@@ -293,15 +359,17 @@ function parseTabularRow(cells) {
   let prioSet = false, statSet = false, effSet = false, dueSet = false, catSet = false;
   for (let i = 1; i < C.length; i++) {
     const cell = C[i], cl = cell.toLowerCase();
-    if (!prioSet && _PRIOS.some(p => p.toLowerCase() === cl)) { base.priority = titleCase(cl); prioSet = true; consumed.add(i); continue; }
-    if (!statSet && _STATS.some(s => s.toLowerCase() === cl)) { base.status = titleCase(cl); statSet = true; consumed.add(i); continue; }
+    if (!prioSet) { const p = canonPriority(cell); if (p) { base.priority = p; prioSet = true; consumed.add(i); continue; } }
+    if (!statSet) { const s = canonStatus(cell); if (s) { base.status = s; statSet = true; consumed.add(i); continue; } }
     if (!effSet && /^\d+\s*h(ours?|rs?)?$/.test(cl)) { base.effort = hoursToEffort(parseInt(cl, 10)); effSet = true; consumed.add(i); continue; }
     if (!effSet && /^(s|m|l|xl)$/.test(cl)) { base.effort = cl.toUpperCase(); effSet = true; consumed.add(i); continue; }
-    if (!dueSet && (/^(today|tomorrow|eow|end of week|next week|next month)$/.test(cl) || /^(by |on |before )?(next\s+)?(sun|mon|tue|wed|thu|fri|sat)/.test(cl) || /\d{4}-\d{2}-\d{2}/.test(cl))) {
-      const d = heuristicParse('due ' + cell).dueDate; if (d) { base.dueDate = d; dueSet = true; consumed.add(i); continue; }
+    if (!dueSet) {
+      const d = parseExplicitDate(cell)
+        || ((/^(today|tomorrow|eow|end of week|next week|next month)$/.test(cl) || /^(by |on |before )?(next\s+)?(sun|mon|tue|wed|thu|fri|sat)/.test(cl)) ? heuristicParse('due ' + cell).dueDate : null);
+      if (d) { base.dueDate = d; dueSet = true; consumed.add(i); continue; }
     }
     // category cells are short-ish ("X / Y Governance"); don't swallow long prose cells
-    if (!catSet && cell.length <= 60 && /governance|complian|technical|deliver|product|strateg|sales|marketing|operation|admin|personal|\biso\b/i.test(cl)) { base.category = mapCategory(cell); catSet = true; consumed.add(i); continue; }
+    if (!catSet && cell.length <= 60 && /governance|complian|technical|deliver|product|strateg|sales|marketing|operation|admin|personal|\biso\b|requirement|discovery|assessment/i.test(cl)) { base.category = resolveCategory(cell); catSet = true; consumed.add(i); continue; }
   }
 
   // Unconsumed long text cells → dependencies (first) / success criteria (last).
@@ -406,17 +474,19 @@ function parseLabeledBlock(text) {
   base.title = title || base.title;
   base.description = desc;
 
-  const pr = j('priority');
-  if (_PRIOS.some(p => p.toLowerCase() === pr.toLowerCase())) base.priority = titleCase(pr.toLowerCase());
-  const st = j('status');
-  if (_STATS.some(s => s.toLowerCase() === st.toLowerCase())) base.status = titleCase(st.toLowerCase());
-  if (vals['category']) base.category = mapCategory(j('category'));
+  const pr = canonPriority(j('priority'));
+  if (pr) base.priority = pr;
+  const st = canonStatus(j('status'));
+  if (st) base.status = st;
+  if (vals['category']) base.category = resolveCategory(j('category'));
   const dueRaw = j('due date');
-  if (dueRaw) { const d = heuristicParse('due ' + dueRaw).dueDate; if (d) base.dueDate = d; }
+  if (dueRaw) { const d = parseExplicitDate(dueRaw) || heuristicParse('due ' + dueRaw).dueDate; if (d) base.dueDate = d; }
   const ef = j('effort');
   if (/^\d+\s*h/i.test(ef)) base.effort = hoursToEffort(parseInt(ef, 10));
   else if (/^(s|m|l|xl)$/i.test(ef)) base.effort = ef.toUpperCase();
-  if (arr('dependencies').length) base.dependencies = arr('dependencies');
+  // "None" / "N/A" / "-" are placeholders, not real dependencies — drop them.
+  const deps = arr('dependencies').filter(d => !/^(none|n\/?a|na|nil|-)$/i.test(d.trim()));
+  if (arr('dependencies').length) base.dependencies = deps;
   if (arr('success criteria').length) base.successCriteria = arr('success criteria').join('; ');
   if (j('risk')) base.risk = j('risk');
   base._source = 'local';
