@@ -332,18 +332,37 @@ const _stripLabelMarkup = (s) => (s || '')
   .replace(/\s*\*{1,3}$/, '')        // Title**
   .replace(/:$/, '')
   .trim();
-const _isLabel = (line) => _LABELS.includes(_stripLabelMarkup(line).toLowerCase());
-const _labelKey = (s) => {
-  let k = _stripLabelMarkup(s).toLowerCase();
+// Map a label string to its canonical key, or null when it isn't a known label.
+// Tolerates a leading "task " prefix ("Task Title" → title).
+const _canonLabel = (s) => {
+  let k = _stripLabelMarkup(s).toLowerCase().replace(/^task\s+/, '');
+  if (!_LABELS.includes(k)) return null;
   if (k === 'dependency') k = 'dependencies';
   if (k === 'success') k = 'success criteria';
   if (k === 'due') k = 'due date';
   return k;
 };
+// Parse one line as a label. Handles both the bare-label form ("Priority")
+// and the inline form ("Priority: High"). Returns {key, value} or null.
+// value is '' for a bare label (value lives on following lines).
+function _parseLabelLine(raw) {
+  const line = (raw || '').trim();
+  if (!line) return null;
+  const bare = _canonLabel(line);
+  if (bare) return { key: bare, value: '' };
+  const ci = line.indexOf(':');
+  if (ci > 0) {
+    const key = _canonLabel(line.slice(0, ci));
+    if (key) return { key, value: line.slice(ci + 1).trim() };
+  }
+  return null;
+}
 function isLabeledBlock(text) {
-  const lines = (text || '').split(/\r?\n/);
   const hits = new Set();
-  for (const l of lines) { if (_isLabel(l)) hits.add(_labelKey(l)); }
+  for (const l of (text || '').split(/\r?\n/)) {
+    const p = _parseLabelLine(l);
+    if (p) hits.add(p.key);
+  }
   return hits.has('title') && hits.size >= 3;
 }
 /* Split a paste of several labeled blocks separated by horizontal rules
@@ -367,7 +386,13 @@ function parseLabeledBlock(text) {
   let cur = null;
   for (const raw of lines) {
     const line = raw.trim();
-    if (_isLabel(line)) { cur = _labelKey(line); vals[cur] = vals[cur] || []; continue; }
+    const p = _parseLabelLine(line);
+    if (p) {
+      cur = p.key;
+      vals[cur] = vals[cur] || [];
+      if (p.value) vals[cur].push(p.value);  // inline "Label: value"
+      continue;
+    }
     // strip leading list markers from value lines (• · - *)
     const val = line.replace(/^\s*[•·*-]\s+/, '').trim();
     if (cur && val) vals[cur].push(val);
