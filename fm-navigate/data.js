@@ -55,7 +55,9 @@ const repairData = (tasks, deliverables) => {
   syncIds(tasks, deliverables);
   let changed = false;
   const seenD = new Set();
-  const fixedD = (deliverables || []).map(d => {
+  const fixedD = (deliverables || []).map(d0 => {
+    // default the delivery model for older records that predate the field
+    const d = d0.deliveryType ? d0 : { ...d0, deliveryType: 'one-time' };
     if (!seenD.has(d.id)) { seenD.add(d.id); return d; }
     changed = true; const id = did(); seenD.add(id);
     return { ...d, id };
@@ -417,20 +419,50 @@ const DELIVERABLE_CATEGORIES = [
   { code: 'E', label: 'Continuous Improvement & Coordination' },
 ];
 
+// Delivery models — how a deliverable is structured and measured as "done".
+const DELIVERY_TYPES = [
+  { code: 'one-time',     label: 'One-Time',     hint: 'A single milestone with a start and due date.' },
+  { code: 'recurring',    label: 'Recurring',    hint: 'Repeats on a cycle (e.g. every sprint).' },
+  { code: 'target-based', label: 'Target-Based', hint: 'Progress toward a numeric target by a deadline.' },
+];
+
 const SEED_DELIVERABLES = [
   {
     id: 'D-1', kind: 'deliverable',
     title: 'ACME Logistics Pilot Launch',
     description: 'First paying-adjacent pilot. Everything required to stand up, harden, and rehearse the ACME tenant: sprint plan, environment, onboarding, API hardening, and user management.',
-    ownerId: 'vihan', status: 'Active', category: 'A', targetDate: d(7),
+    ownerId: 'vihan', status: 'Active', category: 'A',
+    deliveryType: 'one-time', startDate: d(-8), targetDate: d(7),
     createdAt: d(-8), updatedAt: d(0, 8),
   },
   {
     id: 'D-2', kind: 'deliverable',
     title: 'SOC 2 Type I Readiness',
     description: 'Documentation and evidence package needed before the compliance auditor begins fieldwork.',
-    ownerId: 'vihan', status: 'Active', category: 'D', targetDate: d(9),
+    ownerId: 'vihan', status: 'Active', category: 'D',
+    deliveryType: 'one-time', startDate: d(-9), targetDate: d(9),
     createdAt: d(-9), updatedAt: d(-1, 15),
+  },
+  {
+    id: 'D-3', kind: 'deliverable',
+    title: 'Sprint Delivery Management',
+    description: 'Plan, run, and close each development sprint on a two-week cadence — planning, standups, review, and retro.',
+    ownerId: 'vihan', status: 'Active', category: 'A',
+    deliveryType: 'recurring', recurrence: 'Every 2 weeks', currentCycle: 'Sprint 59', targetDate: d(6),
+    instances: [
+      { id: 'in-57', label: 'Sprint 57', date: d(-22), status: 'Completed' },
+      { id: 'in-58', label: 'Sprint 58', date: d(-8),  status: 'Completed' },
+      { id: 'in-59', label: 'Sprint 59', date: d(6),   status: 'Active' },
+    ],
+    createdAt: d(-30), updatedAt: d(0, 9),
+  },
+  {
+    id: 'D-4', kind: 'deliverable',
+    title: 'Client Acquisition Programme',
+    description: 'Sign the first three paying clients for FM Navigate.',
+    ownerId: 'richard', status: 'Active', category: 'C',
+    deliveryType: 'target-based', targetValue: 3, currentValue: 1, unit: 'clients', targetDate: d(75),
+    createdAt: d(-20), updatedAt: d(-2, 15),
   },
 ];
 
@@ -444,5 +476,5 @@ SEED_TASKS.forEach(t => { t.deliverableId = SEED_TASK_DELIVERABLE[t.id] || null;
 
 Object.assign(window, {
   USERS, CATEGORIES, STATUSES, KANBAN_COLS, PRIORITIES,
-  DELIVERABLE_STATUSES, DELIVERABLE_CATEGORIES, SEED_TASKS, SEED_DELIVERABLES, TODAY, nid, did, syncIds, repairData,
+  DELIVERABLE_STATUSES, DELIVERABLE_CATEGORIES, DELIVERY_TYPES, SEED_TASKS, SEED_DELIVERABLES, TODAY, nid, did, syncIds, repairData,
 });
