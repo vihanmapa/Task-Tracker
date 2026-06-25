@@ -446,8 +446,8 @@ function ResourceList({ parentType, parentId, publicItems = [], canEdit, onAddPu
             <div className="grow" style={{ minWidth: 0 }}>
               <div className="row gap6 center" style={{ minWidth: 0 }}>
                 {it.url
-                  ? <a href={it.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--accent)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title || it.url}</a>
-                  : <span style={{ fontSize: 13.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title}</span>}
+                  ? <a href={it.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--accent)', display: 'block', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title || it.url}</a>
+                  : <span style={{ fontSize: 13.5, fontWeight: 600, display: 'block', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title}</span>}
                 {it._private
                   ? <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }} title="Only you can see this"><I.lock size={10} /> only you</span>
                   : <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0, color: 'var(--muted)' }} title="Everyone in the workspace sees this">shared</span>}
