@@ -424,6 +424,16 @@ function ResourceList({ parentType, parentId, publicItems = [], canEdit, onAddPu
   };
 
   const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (_) { return ''; } };
+  // clean display label for a bare link: host + path, query/hash dropped, length-capped.
+  // keeps long SharePoint/query-string URLs from filling the row — full URL stays in href.
+  const pretty = (u) => {
+    try {
+      const x = new URL(u);
+      const path = decodeURIComponent(x.pathname).replace(/\/+$/, '');
+      const s = x.hostname.replace(/^www\./, '') + path;
+      return s.length > 64 ? s.slice(0, 63) + '…' : s;
+    } catch (_) { return u; }
+  };
   const canAdd = canEdit || vault; // editor can add shared; any signed-in user can add private
 
   return (
@@ -446,12 +456,12 @@ function ResourceList({ parentType, parentId, publicItems = [], canEdit, onAddPu
             <div className="grow" style={{ minWidth: 0 }}>
               <div className="row gap6 center" style={{ minWidth: 0 }}>
                 {it.url
-                  ? <a href={it.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--accent)', display: 'block', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title || it.url}</a>
+                  ? <a href={it.url} target="_blank" rel="noopener noreferrer" title={it.url} style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--accent)', display: 'block', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title || pretty(it.url)}</a>
                   : <span style={{ fontSize: 13.5, fontWeight: 600, display: 'block', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title}</span>}
                 {it._private
                   ? <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }} title="Only you can see this"><I.lock size={10} /> only you</span>
                   : <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0, color: 'var(--muted)' }} title="Everyone in the workspace sees this">shared</span>}
-                {it.url && host(it.url) && <span className="faint" style={{ fontSize: 11, flexShrink: 0 }}>{host(it.url)}</span>}
+                {it.url && it.title && host(it.url) && <span className="faint" style={{ fontSize: 11, flexShrink: 0 }}>{host(it.url)}</span>}
               </div>
               {it.note && <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{it.note}</div>}
             </div>
