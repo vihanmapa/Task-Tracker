@@ -22,6 +22,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 
 const NAV = [
   { key: 'dashboard',    label: 'Dashboard', icon: 'grid' },
+  { key: 'kpi',          label: 'KPI Scorecard', icon: 'trend' },
   { key: 'deliverables', label: 'Deliverables', icon: 'target' },
   { key: 'tasks',        label: 'Tasks',     icon: 'list' },
   { key: 'summary',      label: 'Weekly Summary', icon: 'summary' },
@@ -57,6 +58,15 @@ function App() {
   // When applying a remote (load/realtime) change we must NOT echo it back.
   const skipSaveRef = useRefA(true); // skip the very first effect run (hydration)
 
+  // ---- KPI scorecard (own backend collection 'kpiScores') ----
+  // Shape: { 'YYYY-MM': { 'A1': { score, notes, links:[] }, ... } }
+  const [kpiScores, setKpiScores] = useStateA(() => {
+    try { const s = localStorage.getItem('fm_col_kpiScores'); if (s) return JSON.parse(s); } catch (_) {}
+    return {};
+  });
+  const [kpiMonth, setKpiMonth] = useStateA(() => window.kpiMonthKey(new Date()));
+  const kpiSkipRef = useRefA(true);
+
   // ---- auth (Supabase) — identity drives edit rights ----
   // undefined = still checking · null = signed out · object = signed in
   const [authUser, setAuthUser] = useStateA(shared ? undefined : null);
@@ -76,6 +86,25 @@ function App() {
       ds.saveTasks(blob).then(r => { if (!r.ok) console.warn('[app] remote save failed', r); });
     }
   }, [tasks, deliverables]);
+
+  // Persist KPI scores to their own collection (editor only); mirror locally.
+  useEffectA(() => {
+    try { localStorage.setItem('fm_col_kpiScores', JSON.stringify(kpiScores)); } catch (_) {}
+    if (kpiSkipRef.current) { kpiSkipRef.current = false; return; }
+    if (shared && canEdit) {
+      ds.saveCollection('kpiScores', kpiScores).then(r => { if (!r.ok) console.warn('[app] KPI save failed', r.error); });
+    }
+  }, [kpiScores]);
+
+  // Edit one KPI cell for one month (editor only).
+  const patchKpi = useCallbackA((month, code, patch) => {
+    if (!canEdit) return;
+    setKpiScores(prev => {
+      const m = { ...(prev[month] || {}) };
+      m[code] = { ...(m[code] || {}), ...patch };
+      return { ...prev, [month]: m };
+    });
+  }, [canEdit]);
 
   // Resolve the current Supabase session, then keep it in sync.
   useEffectA(() => {
@@ -112,7 +141,18 @@ function App() {
       skipSaveRef.current = true; // realtime echo: dedupe locally, don't re-persist
       setTasks(fixed.tasks); setDeliverables(fixed.deliverables);
     });
-    return () => unsub();
+
+    // KPI scores live in their own collection row.
+    ds.loadCollection('kpiScores', {}).then(remote => {
+      kpiSkipRef.current = true; // don't echo the freshly loaded data back
+      setKpiScores(remote && typeof remote === 'object' ? remote : {});
+    });
+    const unsubKpi = ds.subscribeCollection('kpiScores', incoming => {
+      kpiSkipRef.current = true;
+      setKpiScores(incoming && typeof incoming === 'object' ? incoming : {});
+    });
+
+    return () => { unsub(); unsubKpi(); };
   }, [shared, authUser && authUser.id]);
 
   // ---- routing ----
@@ -429,7 +469,7 @@ function App() {
   const selectedTask = useMemoA(() => tasks.find(t => t.id === selected), [tasks, selected]);
   const selectedDeliverable = useMemoA(() => deliverables.find(d => d.id === dlvSelected), [deliverables, dlvSelected]);
 
-  const titleMap = { dashboard: 'Dashboard', tasks: 'Tasks', deliverables: 'Deliverables', dlvDetail: 'Deliverable', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
+  const titleMap = { dashboard: 'Dashboard', kpi: 'KPI Scorecard', tasks: 'Tasks', deliverables: 'Deliverables', dlvDetail: 'Deliverable', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
 
   // ---- auth gate: login is required before anything renders ----
   if (shared && authUser === undefined) {
@@ -503,6 +543,12 @@ function App() {
           <button className="icon-btn" title="Notifications"><I.bell size={18} /></button>
           <window.Avatar user={currentUser} size={32} />
         </header>
+
+        {route === 'kpi' && (
+          <div className="scroll-area">
+            <window.KpiScorecard scores={kpiScores} month={kpiMonth} setMonth={setKpiMonth} onPatch={patchKpi} canEdit={canEdit} />
+          </div>
+        )}
 
         {route === 'dashboard' && (
           <div className="scroll-area">

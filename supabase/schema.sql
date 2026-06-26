@@ -23,6 +23,16 @@ insert into public.workspace (id, tasks)
 values ('main', '[]'::jsonb)
 on conflict (id) do nothing;
 
+-- Multi-collection: each module gets its OWN workspace row, keyed by id.
+-- The `tasks` jsonb column holds whatever JSON that collection needs (the
+-- KPI scorecard stores an object, not an array). The editor UPDATE policy
+-- below already covers every row, so writes need no change — but each row
+-- must be SEEDED once here (there is no INSERT policy). Re-run this file
+-- after adding a new collection id.
+insert into public.workspace (id, tasks) values
+  ('kpiScores', '{}'::jsonb)
+on conflict (id) do nothing;
+
 -- Row Level Security: only signed-in users may READ; only the editor may
 -- WRITE (UPDATE). No INSERT/DELETE policy: the single 'main' row already
 -- exists and is never created or removed via the public API. Reads/writes

@@ -25,7 +25,7 @@ Conventions: PM-edit gated by password (`canEdit`), Founder read-only. Reuse the
 
 ## Phase 1 — KPI Scorecard + Risk Register
 
-- [ ] **U1 · Backend: multi-collection**
+- [x] **U1 · Backend: multi-collection**
   Files: `supabase/functions/tasks-mutate/index.ts`, `fm-navigate/data-service.js`,
   `supabase/schema.sql`.
   Add a `collection` param to the function (upsert `workspace` row `id=collection`,
@@ -34,19 +34,19 @@ Conventions: PM-edit gated by password (`canEdit`), Founder read-only. Reuse the
   User action: redeploy `tasks-mutate`. **Done-when:** can read+write a `__test`
   collection from the live client; tasks still load.
 
-- [ ] **U2 · KPI definitions constant**
+- [x] **U2 · KPI definitions constant**
   Files: NEW `fm-navigate/kpi-data.js`, `index.html`.
   Ship the 22 `KpiDef`s from PLAN §3 as `window.KPI_DEFS` + category meta + a
   `monthKey()` helper. No UI. **Done-when:** `window.KPI_DEFS.length === 22`,
   category counts A5/B4/C6/D3/E4.
 
-- [ ] **U3 · KPI Scorecard screen (read-only)**
+- [x] **U3 · KPI Scorecard screen (read-only)**
   Files: NEW `fm-navigate/kpi.jsx`, `app.jsx` (NAV + route), `index.html`, `styles.css`.
   Grouped by category A–E, month selector, shows score/notes/status/evidence per KPI,
   computes **category avg + overall**. Loads `kpiScores` collection. **Done-when:**
   renders 22 rows grouped, rollups match, month switch works.
 
-- [ ] **U4 · KPI scoring edit**
+- [x] **U4 · KPI scoring edit**
   Files: `fm-navigate/kpi.jsx`, `app.jsx`.
   0–5 input + status + notes + evidence (reuse attachment UI); save per KPI/month to
   `kpiScores`; password-gated; activity entry. **Done-when:** edit persists, syncs to
@@ -96,4 +96,11 @@ Conventions: PM-edit gated by password (`canEdit`), Founder read-only. Reuse the
 
 ## Session notes (append one line per completed unit)
 
-_(empty — fill as units land, e.g. "U1 done a1b2c3 — collection param + dataService.load/save; user redeployed fn")_
+- U1–U4 done (v48) — multi-collection `dataService.loadCollection/saveCollection/subscribeCollection`
+  (no Edge Function; editor RLS already covers every `workspace` row, new rows just need seeding
+  in `schema.sql`). New `kpi-data.js` (22 KPI_DEFS) + `kpi.jsx` Scorecard screen: month selector,
+  A–E sections, 0–5 score select, auto status band (workbook score guide), notes, evidence links,
+  category-avg bars + overall rollup. NAV `KPI Scorecard`. Status derived from score (not a
+  separate field). Evidence = link URLs only for now (no file/base64 attach yet). **User action
+  pending: run `supabase/schema.sql` once to seed the `kpiScores` row, else remote save fails
+  (logs a clear warning; localStorage mirror still works).** U5 preload still open.

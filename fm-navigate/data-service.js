@@ -88,6 +88,66 @@
       return function () { try { c.removeChannel(ch); } catch (_) {} };
     },
 
+    /* ---- Generic collections ---------------------------------------
+       Every collection is its own `workspace` row keyed by `id`. The
+       jsonb payload lives in the same `tasks` column regardless of the
+       row id, so it holds whatever shape the collection needs (array
+       OR object). The editor RLS UPDATE policy already covers every
+       row, so writes need no change — but each new row must be SEEDED
+       once via SQL (no INSERT policy). See supabase/schema.sql.
+       'main' stays the tasks/deliverables blob (use loadTasks/saveTasks).
+       ---------------------------------------------------------------- */
+    loadCollection: function (id, fallback) {
+      var fb = fallback === undefined ? [] : fallback;
+      if (BACKEND !== 'supabase') {
+        try { var s = localStorage.getItem('fm_col_' + id); return Promise.resolve(s ? JSON.parse(s) : fb); }
+        catch (_) { return Promise.resolve(fb); }
+      }
+      var c = client();
+      if (!c) return Promise.resolve(fb);
+      return c.from('workspace').select('tasks,updated_at').eq('id', id).maybeSingle()
+        .then(function (res) {
+          if (res.error) { console.warn('[dataService] loadCollection ' + id, res.error.message); return fb; }
+          if (!res.data) return fb; // row not seeded yet
+          return res.data.tasks == null ? fb : res.data.tasks;
+        })
+        .catch(function () { return fb; });
+    },
+
+    saveCollection: function (id, data) {
+      try { localStorage.setItem('fm_col_' + id, JSON.stringify(data)); } catch (_) {}
+      if (BACKEND !== 'supabase') return Promise.resolve({ ok: true });
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      var at = new Date().toISOString();
+      return c.from('workspace')
+        .update({ tasks: data, updated_at: at, updated_by: CLIENT_ID })
+        .eq('id', id).select('id')
+        .then(function (r) {
+          if (r.error) return { ok: false, error: r.error.message };
+          // 0 rows updated = collection row not seeded (or RLS denied).
+          if (!r.data || !r.data.length) return { ok: false, error: 'collection "' + id + '" not seeded — run schema.sql' };
+          return { ok: true };
+        })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    subscribeCollection: function (id, cb) {
+      if (BACKEND !== 'supabase') return function () {};
+      var c = client();
+      if (!c) return function () {};
+      var ch = c.channel('workspace-' + id)
+        .on('postgres_changes',
+          { event: '*', schema: 'public', table: 'workspace', filter: 'id=eq.' + id },
+          function (payload) {
+            var row = payload.new || {};
+            if (row.updated_by && row.updated_by === CLIENT_ID) return; // ignore our own echo
+            cb(row.tasks);
+          })
+        .subscribe();
+      return function () { try { c.removeChannel(ch); } catch (_) {} };
+    },
+
     /* ---- Auth + per-user PRIVATE resources (Supabase Auth + RLS) ----
        These power the private vault: rows in `private_resources` are
        readable/writable only by their owner (RLS: auth.uid() = user_id).
