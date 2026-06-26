@@ -39,9 +39,9 @@
   // source is the collection a later auto-score engine would read (informational now).
   var DEFS = [
     // A — Delivery & Technical (5)
-    { code: 'A1', category: 'A', name: 'Sprint Delivery Rate',        target: '≥ 90% of sprint tasks completed on time',          type: 'auto',   source: 'sprints' },
+    { code: 'A1', category: 'A', name: 'Sprint Delivery Rate',        target: '≥ 90% of sprint tasks completed on time',          type: 'auto',   source: 'sprints', multi: true,  unit: 'Sprint' },
     { code: 'A2', category: 'A', name: 'Developer Accountability',    target: 'Weekly attendance logs; bi-weekly in-office',      type: 'auto',   source: 'attendance' },
-    { code: 'A3', category: 'A', name: 'Development Plan Accuracy',   target: 'No more than 10% deviation from plan',             type: 'auto',   source: 'sprints' },
+    { code: 'A3', category: 'A', name: 'Development Plan Accuracy',   target: 'No more than 10% deviation from plan',             type: 'auto',   source: 'sprints', multi: true,  unit: 'Sprint' },
     { code: 'A4', category: 'A', name: 'Issue Resolution',           target: 'All critical issues resolved within SLA',          type: 'auto',   source: 'issues' },
     { code: 'A5', category: 'A', name: 'Team Performance Reporting',  target: 'Weekly dashboard submitted',                       type: 'manual', source: null },
     // B — Communication & Reporting (4)

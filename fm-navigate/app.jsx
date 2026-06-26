@@ -96,14 +96,11 @@ function App() {
     }
   }, [kpiScores]);
 
-  // Edit one KPI cell for one month (editor only).
-  const patchKpi = useCallbackA((month, code, patch) => {
+  // Replace one KPI's record for one month (editor only). The KPI screen
+  // builds the full record (single-score or multi-entry), we just store it.
+  const setKpi = useCallbackA((month, code, record) => {
     if (!canEdit) return;
-    setKpiScores(prev => {
-      const m = { ...(prev[month] || {}) };
-      m[code] = { ...(m[code] || {}), ...patch };
-      return { ...prev, [month]: m };
-    });
+    setKpiScores(prev => ({ ...prev, [month]: { ...(prev[month] || {}), [code]: record } }));
   }, [canEdit]);
 
   // Resolve the current Supabase session, then keep it in sync.
@@ -546,7 +543,7 @@ function App() {
 
         {route === 'kpi' && (
           <div className="scroll-area">
-            <window.KpiScorecard scores={kpiScores} month={kpiMonth} setMonth={setKpiMonth} onPatch={patchKpi} canEdit={canEdit} />
+            <window.KpiScorecard scores={kpiScores} month={kpiMonth} setMonth={setKpiMonth} onSetKpi={setKpi} canEdit={canEdit} />
           </div>
         )}
 

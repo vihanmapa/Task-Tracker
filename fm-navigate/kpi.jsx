@@ -6,14 +6,19 @@
    averages and an overall score. Mirrors the management workbook
    "FM Navigate – Monthly KPI Self-Scoring Scorecard".
 
-   Data shape (kpiScores collection):
-     { 'YYYY-MM': { 'A1': { score: 0..5|null, notes, links:[url] }, ... } }
+   Most KPIs are scored once a month. KPIs flagged `multi` (A1, A3)
+   are scored once per sprint: they hold N ENTRIES, and the KPI's
+   collective score = the AVERAGE of those entries.
+
+   Data shape (kpiScores collection), per KPI per month:
+     single : { score: 0..5|null, notes, links:[url] }
+     multi  : { entries: [ { id, label, score, notes, links:[] } ] }
 
    Props:
      scores     the kpiScores object (whole)
      month      selected 'YYYY-MM'
      setMonth   (key) => void
-     onPatch    (month, code, patch) => void   (editor only)
+     onSetKpi   (month, code, record) => void   (editor only; full record)
      canEdit    bool
    ============================================================ */
 const { useState: useStateK, useMemo: useMemoK } = React;
@@ -34,6 +39,37 @@ function avgTone(avg) {
   if (avg >= 2.5) return 'yellow';
   if (avg >= 1.5) return 'orange';
   return 'red';
+}
+
+// format a 0–5 number: integers plain, otherwise one decimal
+function fmtScore(n) {
+  if (n == null) return '—';
+  return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+function newEntryId() { return 'e' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
+
+// Normalise a stored record into the list of scored entries.
+// Single-score records collapse to one entry; legacy records migrate.
+function toEntries(rec) {
+  if (!rec) return [];
+  if (Array.isArray(rec.entries)) return rec.entries;
+  if (rec.score != null && rec.score !== '') return [{ id: 'e0', label: '', score: rec.score, notes: rec.notes || '', links: rec.links || [] }];
+  if (rec.notes || (rec.links && rec.links.length)) return [{ id: 'e0', label: '', score: null, notes: rec.notes || '', links: rec.links || [] }];
+  return [];
+}
+
+// Collective KPI score = mean of entries that have a numeric score.
+function collective(entries) {
+  const xs = entries.filter(e => e.score != null && e.score !== '').map(e => Number(e.score));
+  if (!xs.length) return null;
+  return xs.reduce((a, b) => a + b, 0) / xs.length;
+}
+
+// The single 0–5 number a KPI contributes to the rollups.
+function kpiScoreOf(def, rec) {
+  if (def.multi) return collective(toEntries(rec));
+  return rec && rec.score != null && rec.score !== '' ? Number(rec.score) : null;
 }
 
 // Build the selectable month list: Mar 2026 → 2 months ahead of today,
@@ -74,19 +110,20 @@ function KpiBars({ cats }) {
   );
 }
 
-function ScoreSelect({ value, onChange, disabled }) {
+// 0–5 dropdown that colours itself by band; renders a static pill when disabled.
+function ScoreSelect({ value, onChange, disabled, size }) {
   const band = window.kpiScoreBand(value);
   const t = KPI_TONE[band ? band.tone : 'gray'];
   if (disabled) {
     return (
-      <span className="kpi-score-pill" style={{ color: t.fg, background: t.bg }}>
+      <span className={'kpi-score-pill' + (size === 'sm' ? ' sm' : '')} style={{ color: t.fg, background: t.bg }}>
         {value == null || value === '' ? '—' : value}
       </span>
     );
   }
   return (
     <select
-      className="kpi-score-input"
+      className={'kpi-score-input' + (size === 'sm' ? ' sm' : '')}
       style={{ color: t.fg, background: t.bg, borderColor: t.bar }}
       value={value == null ? '' : String(value)}
       onChange={e => onChange(e.target.value === '' ? null : Number(e.target.value))}
@@ -97,11 +134,120 @@ function ScoreSelect({ value, onChange, disabled }) {
   );
 }
 
-function KpiRow({ def, rec, canEdit, onPatch }) {
-  const [open, setOpen] = useStateK(false);
-  const band = window.kpiScoreBand(rec.score);
+function BandTag({ score }) {
+  const band = window.kpiScoreBand(score == null ? null : Math.round(score));
   const t = KPI_TONE[band ? band.tone : 'gray'];
-  const links = rec.links || [];
+  return band
+    ? <span className="kpi-band" style={{ color: t.fg, background: t.bg }}>{band.label}</span>
+    : <span className="kpi-band kpi-band-empty">Not scored</span>;
+}
+
+// Inline editable list of evidence link URLs.
+function EvidenceLinks({ links, canEdit, onChange }) {
+  const I = window.I;
+  return (
+    <div className="kpi-ev-links">
+      {links.map((url, i) => (
+        <div className="kpi-ev-item" key={i}>
+          <a href={url} target="_blank" rel="noopener noreferrer" className="kpi-ev-link">{url}</a>
+          {canEdit && (
+            <button className="kpi-ev-x" title="Remove"
+              onClick={() => onChange(links.filter((_, j) => j !== i))}><I.x size={13} /></button>
+          )}
+        </div>
+      ))}
+      {canEdit && (
+        <form className="kpi-ev-add" onSubmit={e => {
+          e.preventDefault();
+          const inp = e.target.elements.u;
+          const v = (inp.value || '').trim();
+          if (!v) return;
+          onChange([...links, v]); inp.value = '';
+        }}>
+          <input name="u" className="kpi-ev-input" placeholder="Paste evidence link (URL)…" />
+          <button className="btn sm" type="submit">Add</button>
+        </form>
+      )}
+    </div>
+  );
+}
+
+// ---- one KPI row ----
+function KpiRow({ def, rec, canEdit, onSet }) {
+  const I = window.I;
+  const [open, setOpen] = useStateK(false);
+  const entries = useMemoK(() => toEntries(rec), [rec]);
+
+  if (def.multi) {
+    // collective = average of sprint entries
+    const avg = collective(entries);
+    const setEntries = (next) => onSet({ entries: next });
+    const patchEntry = (id, patch) => setEntries(entries.map(e => e.id === id ? { ...e, ...patch } : e));
+    const addEntry = () => setEntries([...entries, { id: newEntryId(), label: '', score: null, notes: '', links: [] }]);
+    const removeEntry = (id) => setEntries(entries.filter(e => e.id !== id));
+
+    return (
+      <>
+        <tr className="kpi-row kpi-row-multi" onClick={() => setOpen(o => !o)}>
+          <td className="kpi-c-code">{def.code}</td>
+          <td className="kpi-c-name">
+            <div className="kpi-name-main">{def.name} <span className="kpi-multi-tag">{def.unit || 'Entry'}s · avg</span></div>
+            <div className="kpi-name-target">{def.target}</div>
+          </td>
+          <td className="kpi-c-score">
+            <span className="kpi-score-pill" style={{
+              color: KPI_TONE[avgTone(avg)].fg, background: KPI_TONE[avgTone(avg)].bg }}>{fmtScore(avg)}</span>
+          </td>
+          <td className="kpi-c-band"><BandTag score={avg} /></td>
+          <td className="kpi-c-notes">
+            <span className="kpi-notes-read">
+              {entries.length ? `${entries.length} ${(def.unit || 'entry').toLowerCase()}${entries.length > 1 ? 's' : ''}` : 'No entries'}
+              <span className="kpi-expand-hint"> · {open ? 'hide' : 'edit'}</span>
+            </span>
+          </td>
+          <td className="kpi-c-ev"><span className={'kpi-chev' + (open ? ' open' : '')}><I.dots size={16} /></span></td>
+        </tr>
+        {open && (
+          <tr className="kpi-ev-row">
+            <td />
+            <td colSpan={5}>
+              <div className="kpi-entries">
+                <div className="kpi-ev-title">{def.unit || 'Entry'} scores — collective average {fmtScore(avg)}{avg != null && '/5'}</div>
+                {entries.length === 0 && <div className="kpi-ev-empty">No {(def.unit || 'entry').toLowerCase()} scores yet.</div>}
+                {entries.map((e, i) => (
+                  <div className="kpi-entry" key={e.id}>
+                    <div className="kpi-entry-head">
+                      {canEdit
+                        ? <input className="kpi-entry-label" value={e.label || ''}
+                            placeholder={`${def.unit || 'Entry'} ${i + 1} (e.g. Sprint 58)`}
+                            onChange={ev => patchEntry(e.id, { label: ev.target.value })} />
+                        : <span className="kpi-entry-label-read">{e.label || `${def.unit || 'Entry'} ${i + 1}`}</span>}
+                      <ScoreSelect value={e.score} disabled={!canEdit} size="sm"
+                        onChange={v => patchEntry(e.id, { score: v })} />
+                      <BandTag score={e.score} />
+                      {canEdit && <button className="kpi-entry-rm" title="Remove" onClick={() => removeEntry(e.id)}><I.trash size={15} /></button>}
+                    </div>
+                    {canEdit
+                      ? <input className="kpi-notes-input" value={e.notes || ''} placeholder="Notes…"
+                          onChange={ev => patchEntry(e.id, { notes: ev.target.value })} />
+                      : (e.notes ? <div className="kpi-notes-read">{e.notes}</div> : null)}
+                    <EvidenceLinks links={e.links || []} canEdit={canEdit}
+                      onChange={links => patchEntry(e.id, { links })} />
+                  </div>
+                ))}
+                {canEdit && <button className="btn sm kpi-add-entry" onClick={addEntry}>+ Add {(def.unit || 'entry').toLowerCase()}</button>}
+              </div>
+            </td>
+          </tr>
+        )}
+      </>
+    );
+  }
+
+  // ---- single-score KPI (unchanged behaviour) ----
+  const r = rec || {};
+  const links = r.links || [];
+  const setLinks = (next) => onSet({ ...r, links: next });
   return (
     <>
       <tr className="kpi-row">
@@ -111,22 +257,18 @@ function KpiRow({ def, rec, canEdit, onPatch }) {
           <div className="kpi-name-target">{def.target}</div>
         </td>
         <td className="kpi-c-score">
-          <ScoreSelect value={rec.score} disabled={!canEdit} onChange={v => onPatch({ score: v })} />
+          <ScoreSelect value={r.score} disabled={!canEdit} onChange={v => onSet({ ...r, score: v })} />
         </td>
-        <td className="kpi-c-band">
-          {band
-            ? <span className="kpi-band" style={{ color: t.fg, background: t.bg }}>{band.label}</span>
-            : <span className="kpi-band kpi-band-empty">Not scored</span>}
-        </td>
+        <td className="kpi-c-band"><BandTag score={r.score} /></td>
         <td className="kpi-c-notes">
           {canEdit
-            ? <input className="kpi-notes-input" value={rec.notes || ''} placeholder="Notes…"
-                onChange={e => onPatch({ notes: e.target.value })} />
-            : <span className="kpi-notes-read">{rec.notes || '—'}</span>}
+            ? <input className="kpi-notes-input" value={r.notes || ''} placeholder="Notes…"
+                onChange={e => onSet({ ...r, notes: e.target.value })} />
+            : <span className="kpi-notes-read">{r.notes || '—'}</span>}
         </td>
         <td className="kpi-c-ev">
           <button className="kpi-ev-btn" onClick={() => setOpen(o => !o)}>
-            <span className="kpi-link-ico">{window.I.link}</span>
+            <span className="kpi-link-ico"><I.link size={14} /></span>
             {links.length > 0 && <span className="kpi-ev-count">{links.length}</span>}
           </button>
         </td>
@@ -138,28 +280,7 @@ function KpiRow({ def, rec, canEdit, onPatch }) {
             <div className="kpi-ev-panel">
               <div className="kpi-ev-title">Evidence — {def.type === 'auto' ? 'auto-scorable' : 'manual'}</div>
               {links.length === 0 && <div className="kpi-ev-empty">No evidence links yet.</div>}
-              {links.map((url, i) => (
-                <div className="kpi-ev-item" key={i}>
-                  <a href={url} target="_blank" rel="noopener noreferrer" className="kpi-ev-link">{url}</a>
-                  {canEdit && (
-                    <button className="kpi-ev-x" title="Remove"
-                      onClick={() => onPatch({ links: links.filter((_, j) => j !== i) })}>{window.I.x}</button>
-                  )}
-                </div>
-              ))}
-              {canEdit && (
-                <form className="kpi-ev-add" onSubmit={e => {
-                  e.preventDefault();
-                  const inp = e.target.elements.u;
-                  const v = (inp.value || '').trim();
-                  if (!v) return;
-                  onPatch({ links: [...links, v] });
-                  inp.value = '';
-                }}>
-                  <input name="u" className="kpi-ev-input" placeholder="Paste evidence link (URL)…" />
-                  <button className="btn sm" type="submit">Add</button>
-                </form>
-              )}
+              <EvidenceLinks links={links} canEdit={canEdit} onChange={setLinks} />
             </div>
           </td>
         </tr>
@@ -168,7 +289,7 @@ function KpiRow({ def, rec, canEdit, onPatch }) {
   );
 }
 
-function KpiScorecard({ scores = {}, month, setMonth, onPatch, canEdit = false }) {
+function KpiScorecard({ scores = {}, month, setMonth, onSetKpi, canEdit = false }) {
   const monthList = useMemoK(() => buildMonthList(scores), [scores]);
   const monthData = scores[month] || {};
 
@@ -179,11 +300,10 @@ function KpiScorecard({ scores = {}, month, setMonth, onPatch, canEdit = false }
     window.KPI_DEFS.forEach(def => {
       const cat = cats[def.category];
       cat.total += 1;
-      const rec = monthData[def.code];
-      const s = rec && rec.score;
-      if (s != null && s !== '') {
-        cat.sum += Number(s); cat.scored += 1;
-        sum += Number(s); scored += 1;
+      const s = kpiScoreOf(def, monthData[def.code]);
+      if (s != null) {
+        cat.sum += s; cat.scored += 1;
+        sum += s; scored += 1;
       }
     });
     window.KPI_CATEGORY_ORDER.forEach(code => {
@@ -251,8 +371,8 @@ function KpiScorecard({ scores = {}, month, setMonth, onPatch, canEdit = false }
               </thead>
               <tbody>
                 {window.KPI_DEFS.filter(d => d.category === code).map(def => (
-                  <KpiRow key={def.code} def={def} rec={monthData[def.code] || {}}
-                    canEdit={canEdit} onPatch={patch => onPatch(month, def.code, patch)} />
+                  <KpiRow key={def.code} def={def} rec={monthData[def.code]}
+                    canEdit={canEdit} onSet={record => onSetKpi(month, def.code, record)} />
                 ))}
               </tbody>
             </table>
