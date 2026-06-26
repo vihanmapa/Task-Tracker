@@ -1,24 +1,153 @@
 /* ============================================================
    FM Navigate — Tasks (List + Kanban) + Task Detail
    ============================================================ */
-const { useState: useStateT, useMemo: useMemoT, useRef: useRefT } = React;
+const { useState: useStateT, useMemo: useMemoT, useRef: useRefT, useEffect: useEffectT } = React;
 
 /* ---------------- Tasks screen ---------------- */
+// Persisted toolbar prefs — last filters/group/showCompleted survive reloads (#7).
+const TPREF_KEY = 'fm_tasks_prefs';
+const loadTPrefs = () => { try { return JSON.parse(localStorage.getItem(TPREF_KEY)) || {}; } catch (_) { return {}; } };
+const saveTPrefs = (p) => { try { localStorage.setItem(TPREF_KEY, JSON.stringify(p)); } catch (_) {} };
+
+// Column registry — daily columns always visible (task), the rest toggled in View Settings.
+// Each: { label, w (grid track), sort? (SORT_KEYS key), cell(t, ctx) }.
+const _fmtD = (iso) => iso ? window.fmtDate(iso) : '—';
+const _ell = (s, n = 60) => <span className="trow-sub ell" title={s || ''}>{s || '—'}</span>;
+// Each column: { label, w, group, sort?, locked?, cell(t, ctx) }.
+// locked columns can't be hidden — every layout stays usable.
+const TASK_COLUMNS = {
+  status:      { label: 'Status', w: '130px', group: 'Core', sort: 'status', locked: true, cell: (t) => <window.StatusPill status={t.status} /> },
+  priority:    { label: 'Priority', w: '90px', group: 'Core', sort: 'priority', locked: true, cell: (t) => <window.PriorityTag priority={t.priority} /> },
+  due:         { label: 'Due', w: '120px', group: 'Core', sort: 'due', locked: true, cell: (t) => <window.DueTag iso={t.dueDate} /> },
+  owner:       { label: 'Owner', w: '70px', group: 'Core', sort: 'owner', cell: (t) => <window.Avatar user={t.ownerId} size={24} /> },
+  deliverable: { label: 'Deliverable', w: '220px', group: 'Project', cell: (t, ctx) => {
+                   const d = ctx.dlvById[t.deliverableId];
+                   return _ell(d ? d.title : '—'); } },
+  category:    { label: 'Category', w: '120px', group: 'Project', sort: 'category', cell: (t) => <window.CatChip category={t.category} /> },
+  progress:    { label: 'Progress', w: '120px', group: 'Project', sort: 'progress', cell: (t) => (
+                   <div className="row gap8 center" style={{ maxWidth: 120 }}>
+                     <div className="grow"><window.Progress value={t.progress || 0} height={4} /></div>
+                     <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-3)', flexShrink: 0 }}>{t.progress || 0}%</span>
+                   </div>) },
+  created:     { label: 'Created', w: '100px', group: 'Dates', sort: 'created', cell: (t) => <span className="trow-sub mono">{_fmtD(t.createdAt)}</span> },
+  modified:    { label: 'Modified', w: '100px', group: 'Dates', sort: 'updated', cell: (t) => <span className="trow-sub mono">{_fmtD(t.updatedAt || t.createdAt)}</span> },
+  completed:   { label: 'Completed', w: '100px', group: 'Dates', cell: (t) => <span className="trow-sub mono">{_fmtD(t.completedAt)}</span> },
+  risk:        { label: 'Risk', w: '170px', group: 'Planning', cell: (t) => _ell(t.risk) },
+  effort:      { label: 'Effort', w: '72px', group: 'Planning', cell: (t) => <span className="trow-sub">{t.effort || '—'}</span> },
+  deps:        { label: 'Dependencies', w: '90px', group: 'Planning', cell: (t) => {
+                   const n = (t.dependencies || []).length + (t.depTaskIds || []).length;
+                   return <span className="trow-sub mono">{n || '—'}</span>; } },
+  success:     { label: 'Success criteria', w: '190px', group: 'Planning', cell: (t) => _ell(t.successCriteria) },
+};
+const ALL_COLS = Object.keys(TASK_COLUMNS);
+const COL_GROUPS = ['Core', 'Project', 'Dates', 'Planning'];
+const LOCKED_COLS = ALL_COLS.filter(k => TASK_COLUMNS[k].locked);
+// Lean default: Task + Status/Priority/Due (locked) + Deliverable. Created/Modified/etc. opt-in.
+const DEFAULT_COLS = ['status', 'priority', 'due', 'deliverable'];
+// Ensure locked columns always present and lead the order.
+const withLocked = (arr) => {
+  const kept = arr.filter(k => ALL_COLS.includes(k));
+  const lead = LOCKED_COLS.filter(k => !kept.includes(k));
+  return [...lead, ...kept].filter((k, i, a) => a.indexOf(k) === i);
+};
+const SORT_LABELS = { priority: 'Priority', due: 'Due date', created: 'Created date', updated: 'Last modified', title: 'Task name', progress: 'Progress', status: 'Status', category: 'Category', owner: 'Owner' };
+
+/* ---------------- Summary bar (instant health check) ---------------- */
+function SummaryBar({ tasks, onPick, activeStatus }) {
+  const stats = useMemoT(() => {
+    let active = 0, overdue = 0, today = 0, blocked = 0, waiting = 0, completed = 0;
+    tasks.forEach(t => {
+      const done = t.status === 'Completed', cx = t.status === 'Cancelled';
+      if (done) { completed++; return; }
+      if (cx) return;
+      active++;
+      if (t.status === 'Blocked') blocked++;
+      if (t.status === 'Waiting') waiting++;
+      if (t.dueDate) { const d = window.daysBetween(new Date(), t.dueDate); if (d < 0) overdue++; else if (d === 0) today++; }
+    });
+    return { active, overdue, today, blocked, waiting, completed };
+  }, [tasks]);
+
+  // status chips filter the list; overdue/today are read-only health signals.
+  const Chip = ({ label, n, tone, status, info }) => (
+    <button className={`sum-chip ${tone || ''} ${status && activeStatus === status ? 'on' : ''}`}
+      onClick={info ? undefined : () => onPick(status || null)}
+      style={info ? { cursor: 'default' } : null}
+      title={info ? `${n} ${label.toLowerCase()}` : `Show ${label.toLowerCase()}`}>
+      <b>{n}</b> {label}
+    </button>
+  );
+
+  if (!tasks.length) return null;
+  return (
+    <div className="sum-bar">
+      <Chip label="Active" n={stats.active} status={null} />
+      <Chip label="Overdue" n={stats.overdue} tone={stats.overdue ? 'neg' : ''} info />
+      <Chip label="Due today" n={stats.today} tone={stats.today ? 'warn' : ''} info />
+      <Chip label="Blocked" n={stats.blocked} tone={stats.blocked ? 'neg' : ''} status="Blocked" />
+      <Chip label="Waiting" n={stats.waiting} tone={stats.waiting ? 'warn' : ''} status="Waiting" />
+      <Chip label="Completed" n={stats.completed} status="Completed" />
+    </div>
+  );
+}
+
 function TasksScreen({ tasks, deliverables = [], view, setView, onOpen, onOpenDeliverable, onCompose, onMove, onToggleDone, canEdit = true }) {
   const I = window.I;
+  const P0 = loadTPrefs();
+  const rememberF = P0.rememberFilters !== false;
+  const rememberS = P0.rememberSorting !== false;
   const [q, setQ] = useStateT('');
-  const [fStatus, setFStatus] = useStateT('All');
-  const [fPrio, setFPrio] = useStateT('All');
-  const [grouped, setGrouped] = useStateT(false);
+  // Filters restored only when "remember filters" was on.
+  const [fStatus, setFStatus] = useStateT(rememberF && P0.fStatus || 'All');
+  const [fPrio, setFPrio]     = useStateT(rememberF && P0.fPrio || 'All');
+  const [fCat, setFCat]       = useStateT(rememberF && P0.fCat || 'All');
+  const [fDlv, setFDlv]       = useStateT(rememberF && P0.fDlv || 'All');
+  const [fOwner, setFOwner]   = useStateT(rememberF && P0.fOwner || 'All');
+  const [groupBy, setGroupBy] = useStateT(P0.groupBy || 'none');
+  const [showDone, setShowDone] = useStateT(P0.showDone || false);
+  // Sorting (lifted from ListView so View Settings can set the default).
+  const [sortKey, setSortKey] = useStateT(rememberS && P0.sortKey || 'priority');
+  const [sortDir, setSortDir] = useStateT(rememberS && P0.sortDir || 'asc');
+  // Columns: ordered list of visible keys (drag-reorderable). Locked cols always present.
+  const [cols, setCols] = useStateT(() => {
+    const stored = Array.isArray(P0.cols) ? P0.cols.filter(k => ALL_COLS.includes(k)) : null;
+    return withLocked(stored && stored.length ? stored : DEFAULT_COLS.slice());
+  });
+  const [rememberFilters, setRememberFilters] = useStateT(rememberF);
+  const [rememberSorting, setRememberSorting] = useStateT(rememberS);
+  const [showSettings, setShowSettings] = useStateT(false);
+  const [showFilters, setShowFilters] = useStateT(false);
+
+  // Persist. Filters/sorting honoured only when their remember toggle is on.
+  useMemoT(() => {
+    saveTPrefs({
+      groupBy, showDone, cols, rememberFilters, rememberSorting,
+      ...(rememberFilters ? { fStatus, fPrio, fCat, fDlv, fOwner } : {}),
+      ...(rememberSorting ? { sortKey, sortDir } : {}),
+    });
+  }, [fStatus, fPrio, fCat, fDlv, fOwner, groupBy, showDone, sortKey, sortDir, cols, rememberFilters, rememberSorting]);
+
+  const setSort = (key) => {
+    if (key === sortKey) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    else { setSortKey(key); setSortDir(SORT_KEYS[key][1]); }
+  };
 
   const filtered = useMemoT(() => {
     return tasks.filter(t => {
       if (q && !(`${t.title} ${t.description} ${t.category}`.toLowerCase().includes(q.toLowerCase()))) return false;
       if (fStatus !== 'All' && t.status !== fStatus) return false;
       if (fPrio !== 'All' && t.priority !== fPrio) return false;
+      if (fCat !== 'All' && t.category !== fCat) return false;
+      if (fDlv !== 'All' && (t.deliverableId || '_none') !== fDlv) return false;
+      if (fOwner !== 'All' && t.ownerId !== fOwner) return false;
+      // Hide completed by default unless explicitly shown or the status filter targets them.
+      if (!showDone && fStatus === 'All' && t.status === 'Completed') return false;
       return true;
     });
-  }, [tasks, q, fStatus, fPrio]);
+  }, [tasks, q, fStatus, fPrio, fCat, fDlv, fOwner, showDone]);
+
+  const activeFilters = [fStatus, fPrio, fDlv, fCat, fOwner].filter(v => v !== 'All').length;
+  const clearFilters = () => { setFStatus('All'); setFPrio('All'); setFDlv('All'); setFCat('All'); setFOwner('All'); };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}>
@@ -31,22 +160,65 @@ function TasksScreen({ tasks, deliverables = [], view, setView, onOpen, onOpenDe
           <I.search size={15} />
           <input placeholder="Search tasks…" value={q} onChange={e => setQ(e.target.value)} />
         </div>
-        <select className="select" style={{ width: 'auto' }} value={fStatus} onChange={e => setFStatus(e.target.value)}>
-          <option>All</option>{window.STATUSES.map(s => <option key={s}>{s}</option>)}
-        </select>
-        <select className="select" style={{ width: 'auto' }} value={fPrio} onChange={e => setFPrio(e.target.value)}>
-          <option value="All">All priorities</option>{window.PRIORITIES.map(p => <option key={p}>{p}</option>)}
-        </select>
-        {view === 'list' && (
-          <button className={`btn btn-sm ${grouped ? 'btn-primary' : ''}`} onClick={() => setGrouped(g => !g)}
-            title="Group tasks under their deliverable">
-            <I.flag size={14} /> Group by deliverable
+        {/* Filters — consolidated into one popover */}
+        <div className="pop-anchor">
+          <button className={`btn btn-sm ${activeFilters > 0 ? 'btn-primary' : ''}`} onClick={() => setShowFilters(s => !s)} title="Filter tasks">
+            <I.filter size={14} /> Filter{activeFilters > 0 && <span className="kcol-count mono" style={{ marginLeft: 4 }}>{activeFilters}</span>}
           </button>
+          {showFilters && (
+            <FilterPopover
+              deliverables={deliverables}
+              fStatus={fStatus} setFStatus={setFStatus} fPrio={fPrio} setFPrio={setFPrio}
+              fDlv={fDlv} setFDlv={setFDlv} fCat={fCat} setFCat={setFCat} fOwner={fOwner} setFOwner={setFOwner}
+              activeFilters={activeFilters} onClear={clearFilters} onClose={() => setShowFilters(false)} />
+          )}
+        </div>
+        {/* Sort (operational control — stays in toolbar) */}
+        {view === 'list' && (
+          <div className="row gap4 center">
+            <select className="select" style={{ width: 'auto' }} value={sortKey}
+              onChange={e => { setSortKey(e.target.value); setSortDir(SORT_KEYS[e.target.value][1]); }} title="Sort by">
+              {['priority', 'due', 'created', 'updated', 'title', 'progress'].map(k => <option key={k} value={k}>Sort: {SORT_LABELS[k]}</option>)}
+            </select>
+            <button className="btn btn-sm" onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')}
+              title={sortDir === 'asc' ? 'Ascending' : 'Descending'} style={{ padding: '0 8px' }}>
+              <I.arrowUp size={14} style={{ transform: sortDir === 'asc' ? 'none' : 'rotate(180deg)', transition: 'transform .12s' }} />
+            </button>
+          </div>
+        )}
+        {/* Group */}
+        {view === 'list' && (
+          <select className="select" style={{ width: 'auto' }} value={groupBy} onChange={e => setGroupBy(e.target.value)} title="Group tasks">
+            <option value="none">No grouping</option>
+            <option value="deliverable">Group: Deliverable</option>
+            <option value="status">Group: Status</option>
+            <option value="category">Group: Category</option>
+          </select>
         )}
         <span className="grow" />
-        <span className="muted mono" style={{ fontSize: 12 }}>{filtered.length} tasks</span>
+        <span className="muted mono" style={{ fontSize: 12 }}>
+          {activeFilters > 0 || q ? `${filtered.length} of ${tasks.length} tasks` : `${filtered.length} tasks`}
+        </span>
+        {view === 'list' && (
+          <button className="btn btn-sm" onClick={() => setShowSettings(true)} title="Columns, sorting & display">
+            <I.settings size={15} /> Columns
+          </button>
+        )}
         {canEdit && <button className="btn btn-primary btn-sm" onClick={onCompose}><I.spark size={14} /> New task</button>}
       </div>
+
+      <SummaryBar tasks={tasks} onPick={(s) => { clearFilters(); if (s) setFStatus(s); }} activeStatus={fStatus} />
+
+      {showSettings && (
+        <ViewSettings
+          cols={cols} setCols={setCols}
+          groupBy={groupBy} setGroupBy={setGroupBy}
+          showDone={showDone} setShowDone={setShowDone}
+          sortKey={sortKey} setSortKey={setSortKey} sortDir={sortDir} setSortDir={setSortDir}
+          rememberFilters={rememberFilters} setRememberFilters={setRememberFilters}
+          rememberSorting={rememberSorting} setRememberSorting={setRememberSorting}
+          onClose={() => setShowSettings(false)} />
+      )}
 
       {tasks.length === 0
         ? (
@@ -61,9 +233,168 @@ function TasksScreen({ tasks, deliverables = [], view, setView, onOpen, onOpenDe
           </div>
         )
         : view === 'list'
-          ? <ListView tasks={filtered} deliverables={deliverables} grouped={grouped} onOpen={onOpen} onOpenDeliverable={onOpenDeliverable} onToggleDone={onToggleDone} canEdit={canEdit} />
+          ? <ListView tasks={filtered} deliverables={deliverables} groupBy={groupBy} cols={cols}
+              sortKey={sortKey} sortDir={sortDir} onSort={setSort}
+              onOpen={onOpen} onOpenDeliverable={onOpenDeliverable} onToggleDone={onToggleDone} canEdit={canEdit} />
           : <KanbanView tasks={filtered} onOpen={onOpen} onMove={onMove} canEdit={canEdit} />}
     </div>
+  );
+}
+
+/* ---------------- Filter popover ---------------- */
+function FilterPopover({ deliverables, fStatus, setFStatus, fPrio, setFPrio, fDlv, setFDlv, fCat, setFCat, fOwner, setFOwner, activeFilters, onClear, onClose }) {
+  // Close on outside click / Escape.
+  useEffectT(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose();
+    const onDoc = (e) => { if (!e.target.closest('.pop-anchor')) onClose(); };
+    window.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onDoc);
+    return () => { window.removeEventListener('keydown', onKey); document.removeEventListener('mousedown', onDoc); };
+  }, [onClose]);
+
+  const Field = ({ label, children }) => (
+    <label className="col gap4" style={{ marginBottom: 12 }}>
+      <span className="field-label">{label}</span>{children}
+    </label>
+  );
+
+  return (
+    <div className="popover" style={{ width: 250 }}>
+      <Field label="Status">
+        <select className="select" value={fStatus} onChange={e => setFStatus(e.target.value)}>
+          <option>All</option>{window.STATUSES.map(s => <option key={s}>{s}</option>)}
+        </select>
+      </Field>
+      <Field label="Priority">
+        <select className="select" value={fPrio} onChange={e => setFPrio(e.target.value)}>
+          <option value="All">All priorities</option>{window.PRIORITIES.map(p => <option key={p}>{p}</option>)}
+        </select>
+      </Field>
+      <div className="vs-divider" />
+      <Field label="Deliverable">
+        <select className="select" value={fDlv} onChange={e => setFDlv(e.target.value)}>
+          <option value="All">All deliverables</option>
+          {deliverables.map(d => <option key={d.id} value={d.id}>{d.title}</option>)}
+          <option value="_none">Unassigned</option>
+        </select>
+      </Field>
+      <Field label="Category">
+        <select className="select" value={fCat} onChange={e => setFCat(e.target.value)}>
+          <option value="All">All categories</option>{window.CATEGORIES.map(c => <option key={c}>{c}</option>)}
+        </select>
+      </Field>
+      <Field label="Owner">
+        <select className="select" value={fOwner} onChange={e => setFOwner(e.target.value)}>
+          <option value="All">All owners</option>{Object.values(window.USERS).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+        </select>
+      </Field>
+      <div className="row" style={{ justifyContent: 'space-between', marginTop: 4 }}>
+        <button className="btn btn-sm" onClick={onClear} disabled={activeFilters === 0}>Clear all</button>
+        <button className="btn btn-primary btn-sm" onClick={onClose}>Done</button>
+      </div>
+    </div>
+  );
+}
+
+/* ---------------- View Settings panel ---------------- */
+function ViewSettings({ cols, setCols, groupBy, setGroupBy, showDone, setShowDone,
+  sortKey, setSortKey, sortDir, setSortDir, rememberFilters, setRememberFilters, rememberSorting, setRememberSorting, onClose }) {
+  const I = window.I;
+  const [dragKey, setDragKey] = useStateT(null);
+
+  const toggle = (k) => {
+    if (TASK_COLUMNS[k].locked) return; // locked columns can't be hidden
+    setCols(cs => cs.includes(k) ? cs.filter(x => x !== k) : withLocked([...cs, k]));
+  };
+  const onDrop = (targetKey) => {
+    if (!dragKey || dragKey === targetKey) { setDragKey(null); return; }
+    setCols(cs => {
+      const next = cs.filter(k => k !== dragKey);
+      const at = next.indexOf(targetKey);
+      next.splice(at, 0, dragKey);
+      return withLocked(next);
+    });
+    setDragKey(null);
+  };
+
+  const Section = ({ title, children }) => (
+    <div style={{ marginBottom: 20 }}>
+      <div className="field-label" style={{ marginBottom: 8 }}>{title}</div>
+      {children}
+    </div>
+  );
+
+  // One row per column; visible rows are draggable for reorder.
+  const ColRow = (k) => {
+    const c = TASK_COLUMNS[k];
+    const on = cols.includes(k);
+    return (
+      <div key={k} className="vs-col-row" draggable={on}
+        onDragStart={on ? () => setDragKey(k) : undefined}
+        onDragOver={e => e.preventDefault()}
+        onDrop={() => onDrop(k)}
+        style={{ opacity: dragKey === k ? 0.4 : on ? 1 : 0.6 }}>
+        {on ? <I.drag size={14} style={{ cursor: 'grab', color: 'var(--text-faint)' }} /> : <span style={{ width: 14 }} />}
+        <input type="checkbox" checked={on} disabled={c.locked} onChange={() => toggle(k)} />
+        <span style={{ flex: 1 }}>{c.label}</span>
+        {c.locked && <span className="muted" style={{ fontSize: 10.5 }}>always</span>}
+      </div>
+    );
+  };
+
+  return (
+    <window.Modal onClose={onClose} width={460}>
+      <div className="modal-head row center" style={{ justifyContent: 'space-between' }}>
+        <b>View settings</b>
+        <button className="icon-btn" onClick={onClose}><I.x size={16} /></button>
+      </div>
+      <div className="modal-body" style={{ maxHeight: '70vh', overflow: 'auto' }}>
+        <Section title="Columns — drag to reorder, toggle to show/hide">
+          {COL_GROUPS.map(g => {
+            const keys = ALL_COLS.filter(k => TASK_COLUMNS[k].group === g);
+            return (
+              <div key={g} style={{ marginBottom: 10 }}>
+                <div className="vs-group-label">{g}</div>
+                <div className="col gap4">{keys.map(ColRow)}</div>
+              </div>
+            );
+          })}
+          <div className="muted" style={{ fontSize: 11.5, marginTop: 2 }}>Task, Status, Priority and Due stay visible in every layout.</div>
+        </Section>
+
+        <Section title="Default sorting">
+          <div className="row gap8 center">
+            <select className="select" value={sortKey} onChange={e => { setSortKey(e.target.value); setSortDir(SORT_KEYS[e.target.value][1]); }}>
+              {['priority', 'due', 'created', 'updated', 'title', 'progress'].map(k => <option key={k} value={k}>{SORT_LABELS[k]}</option>)}
+            </select>
+            <select className="select" value={sortDir} onChange={e => setSortDir(e.target.value)}>
+              <option value="asc">Ascending</option>
+              <option value="desc">Descending</option>
+            </select>
+          </div>
+        </Section>
+
+        <Section title="Default grouping">
+          <select className="select" value={groupBy} onChange={e => setGroupBy(e.target.value)} style={{ width: '100%' }}>
+            <option value="none">None</option>
+            <option value="deliverable">Deliverable</option>
+            <option value="status">Status</option>
+            <option value="category">Category</option>
+          </select>
+        </Section>
+
+        <Section title="Display">
+          <label className="vs-check"><input type="checkbox" checked={showDone} onChange={e => setShowDone(e.target.checked)} /> Show completed tasks</label>
+          <label className="vs-check"><input type="checkbox" checked={rememberFilters} onChange={e => setRememberFilters(e.target.checked)} /> Remember my filters</label>
+          <label className="vs-check"><input type="checkbox" checked={rememberSorting} onChange={e => setRememberSorting(e.target.checked)} /> Remember my sorting</label>
+          <div className="muted" style={{ fontSize: 11.5, marginTop: 4 }}>Row density lives in Settings → Appearance.</div>
+        </Section>
+      </div>
+      <div className="modal-foot row" style={{ justifyContent: 'space-between' }}>
+        <button className="btn btn-sm" onClick={() => { setCols(withLocked(DEFAULT_COLS.slice())); setGroupBy('none'); setSortKey('priority'); setSortDir('asc'); }}>Restore recommended layout</button>
+        <button className="btn btn-primary btn-sm" onClick={onClose}>Done</button>
+      </div>
+    </window.Modal>
   );
 }
 
@@ -76,20 +407,30 @@ const SORT_KEYS = {
   status:   [(a, b) => STATUS_ORDER[a.status] - STATUS_ORDER[b.status], 'asc'],
   priority: [(a, b) => (PRIO_ORDER[a.priority] - PRIO_ORDER[b.priority]) || (new Date(a.dueDate || 8.64e15) - new Date(b.dueDate || 8.64e15)), 'asc'],
   due:      [(a, b) => new Date(a.dueDate || 8.64e15) - new Date(b.dueDate || 8.64e15), 'asc'],
+  created:  [(a, b) => new Date(a.createdAt || 0) - new Date(b.createdAt || 0), 'desc'],
+  updated:  [(a, b) => new Date(a.updatedAt || a.createdAt || 0) - new Date(b.updatedAt || b.createdAt || 0), 'desc'],
   category: [(a, b) => a.category.localeCompare(b.category), 'asc'],
   owner:    [(a, b) => ((window.USERS[a.ownerId]?.name || '').localeCompare(window.USERS[b.ownerId]?.name || '')), 'asc'],
   progress: [(a, b) => (a.progress || 0) - (b.progress || 0), 'desc'],
 };
 
-function ListView({ tasks, deliverables = [], grouped = false, onOpen, onOpenDeliverable, onToggleDone, canEdit = true }) {
+function ListView({ tasks, deliverables = [], groupBy = 'none', cols = DEFAULT_COLS,
+  sortKey = 'priority', sortDir = 'asc', onSort, onOpen, onOpenDeliverable, onToggleDone, canEdit = true }) {
+  const grouped = groupBy !== 'none';
   const I = window.I;
-  const [sortKey, setSortKey] = useStateT('priority');
-  const [sortDir, setSortDir] = useStateT('asc');
 
-  const setSort = (key) => {
-    if (key === sortKey) setSortDir(d => d === 'asc' ? 'desc' : 'asc');
-    else { setSortKey(key); setSortDir(SORT_KEYS[key][1]); }
-  };
+  // Only render registered columns; build the grid track string (checkbox + task + visible cols).
+  const visCols = cols.filter(k => TASK_COLUMNS[k]);
+  const dlvById = useMemoT(() => { const m = {}; deliverables.forEach(d => { m[d.id] = d; }); return m; }, [deliverables]);
+  const ctx = { dlvById };
+  const gridCols = `26px minmax(0,1fr) ${visCols.map(k => TASK_COLUMNS[k].w).join(' ')}`;
+  // Floor the flexible task column: when fixed columns exceed the viewport the row
+  // gets a min-width so the list scrolls horizontally instead of collapsing Task to 0.
+  const TASK_MIN = 240, GAP = 14, PADX = 28;
+  const fixedSum = visCols.reduce((s, k) => s + parseInt(TASK_COLUMNS[k].w, 10), 0);
+  const trackCount = 2 + visCols.length;
+  const rowMinW = PADX * 2 + 26 + TASK_MIN + fixedSum + GAP * (trackCount - 1);
+  const gridStyle = { gridTemplateColumns: gridCols, minWidth: rowMinW };
 
   const sortTasks = (arr) => [...arr].sort((a, b) => {
     const cmp = SORT_KEYS[sortKey][0](a, b);
@@ -98,7 +439,7 @@ function ListView({ tasks, deliverables = [], grouped = false, onOpen, onOpenDel
   const sorted = sortTasks(tasks);
 
   const Th = ({ k, children, style }) => (
-    <button className="tlist-th" onClick={() => setSort(k)} style={style}>
+    <button className="tlist-th" onClick={() => onSort && onSort(k)} style={style}>
       {children}
       <span className="tlist-sort" style={{ opacity: sortKey === k ? 1 : 0.25 }}>
         <I.chevD size={12} style={{ transform: sortKey === k && sortDir === 'asc' ? 'rotate(180deg)' : 'none', transition: 'transform .12s' }} />
@@ -110,7 +451,7 @@ function ListView({ tasks, deliverables = [], grouped = false, onOpen, onOpenDel
     const done = t.status === 'Completed';
     const cancelled = t.status === 'Cancelled';
     return (
-      <div key={t.id} className="trow" onClick={() => onOpen(t.id)}>
+      <div key={t.id} className="trow" onClick={() => onOpen(t.id)} style={gridStyle}>
         <button className={`check ${done ? 'done' : ''}`} disabled={!canEdit}
           style={canEdit ? null : { cursor: 'default', opacity: done ? 1 : 0.5 }}
           onClick={e => { e.stopPropagation(); if (canEdit) onToggleDone(t.id); }}
@@ -122,60 +463,68 @@ function ListView({ tasks, deliverables = [], grouped = false, onOpen, onOpenDel
             {t.title}
           </div>
           <div className="trow-sub mono">{t.id} · {t.successCriteria || t.description.slice(0, 70)}</div>
-          {t.progress > 0 && !done && !cancelled && (
+          {t.progress > 0 && !done && !cancelled && !visCols.includes('progress') && (
             <div className="row gap8 center mt4" style={{ maxWidth: 220 }}>
               <div className="grow"><window.Progress value={t.progress} height={4} /></div>
               <span className="mono" style={{ fontSize: 10.5, color: 'var(--text-3)', flexShrink: 0 }}>{t.progress}%</span>
             </div>
           )}
         </div>
-        <div><window.StatusPill status={t.status} /></div>
-        <div className="col" style={{ gap: 3 }}>
-          <window.PriorityTag priority={t.priority} />
-          <window.DueTag iso={t.dueDate} />
-        </div>
-        <div><window.CatChip category={t.category} /></div>
-        <div className="row gap6 center">
-          <window.Avatar user={t.ownerId} size={24} />
-        </div>
+        {visCols.map(k => <div key={k} style={{ minWidth: 0 }}>{TASK_COLUMNS[k].cell(t, ctx)}</div>)}
       </div>
     );
   };
 
-  // Build deliverable-grouped sections: each deliverable in data order, then Unassigned last.
+  // Build grouped sections per groupBy mode. Each: { key, title, deliverable?, rows }.
   const groups = useMemoT(() => {
     if (!grouped) return null;
-    const byId = {};
-    tasks.forEach(t => { const k = t.deliverableId || '_none'; (byId[k] = byId[k] || []).push(t); });
     const out = [];
-    deliverables.forEach(d => { if (byId[d.id]) out.push({ deliverable: d, rows: sortTasks(byId[d.id]) }); });
-    if (byId._none) out.push({ deliverable: null, rows: sortTasks(byId._none) });
+    if (groupBy === 'deliverable') {
+      const byId = {};
+      tasks.forEach(t => { const k = t.deliverableId || '_none'; (byId[k] = byId[k] || []).push(t); });
+      deliverables.forEach(d => { if (byId[d.id]) out.push({ key: d.id, title: d.title, deliverable: d, rows: sortTasks(byId[d.id]) }); });
+      if (byId._none) out.push({ key: '_none', title: 'Unassigned', deliverable: null, rows: sortTasks(byId._none) });
+    } else {
+      const order = groupBy === 'status' ? window.STATUSES : window.CATEGORIES;
+      const field = groupBy === 'status' ? 'status' : 'category';
+      const byKey = {};
+      tasks.forEach(t => { const k = t[field] || '—'; (byKey[k] = byKey[k] || []).push(t); });
+      order.forEach(k => { if (byKey[k]) out.push({ key: k, title: k, deliverable: null, rows: sortTasks(byKey[k]) }); });
+      Object.keys(byKey).forEach(k => { if (!order.includes(k)) out.push({ key: k, title: k, deliverable: null, rows: sortTasks(byKey[k]) }); });
+    }
     return out;
-  }, [grouped, tasks, deliverables, sortKey, sortDir]);
+  }, [grouped, groupBy, tasks, deliverables, sortKey, sortDir]);
 
   return (
-    <div className="scroll-area fade-in">
+    <div className="scroll-area scroll-x fade-in">
       <div className="tlist">
-        <div className="tlist-head">
+        <div className="tlist-head" style={gridStyle}>
           <span></span>
           <Th k="title">Task</Th>
-          <Th k="status">Status</Th>
-          <Th k="priority">Priority · Due</Th>
-          <Th k="category">Category</Th>
-          <Th k="owner">Owner</Th>
+          {visCols.map(k => {
+            const c = TASK_COLUMNS[k];
+            return c.sort
+              ? <Th key={k} k={c.sort}>{c.label}</Th>
+              : <span key={k} className="tlist-th" style={{ cursor: 'default' }}>{c.label}</span>;
+          })}
         </div>
         {grouped
           ? groups.map(g => {
               const d = g.deliverable;
               return (
-                <React.Fragment key={d ? d.id : '_none'}>
+                <React.Fragment key={g.key}>
                   <div className="tlist-group"
                     onClick={() => d && onOpenDeliverable && onOpenDeliverable(d.id)}
-                    style={{ cursor: d && onOpenDeliverable ? 'pointer' : 'default' }}>
-                    <I.flag size={13} />
-                    <span className="tlist-group-title">{d ? d.title : 'Unassigned'}</span>
-                    {d && d.category && <window.DlvCatBadge code={d.category} />}
-                    <span className="kcol-count mono">{g.rows.length}</span>
+                    style={{ cursor: d && onOpenDeliverable ? 'pointer' : 'default', minWidth: rowMinW }}>
+                    {groupBy === 'deliverable'
+                      ? <I.flag size={13} />
+                      : groupBy === 'status'
+                        ? <window.StatusPill status={g.title} />
+                        : <I.list size={13} />}
+                    {groupBy !== 'status' && <span className="tlist-group-title">{g.title}</span>}
+                    <span className="muted" style={{ fontSize: 11.5, fontWeight: 600 }}>
+                      {g.rows.length} {g.rows.length === 1 ? 'task' : 'tasks'}
+                    </span>
                   </div>
                   {g.rows.map(Row)}
                 </React.Fragment>
