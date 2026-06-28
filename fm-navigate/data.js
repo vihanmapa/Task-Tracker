@@ -64,9 +64,17 @@ const syncIds = (tasks, deliverables) => {
   _bumpHWM('T-', _id); _bumpHWM('D-', _did);
 };
 // Counters are synced first so any fresh id is guaranteed unique. The earlier
-// occurrence keeps the id; later duplicates get a new one. Returns
-// { tasks, deliverables, changed }.
-const repairData = (tasks, deliverables) => {
+// occurrence keeps the id; later duplicates get a new one. A duplicate id always
+// resolves to its surviving (first) occurrence, so references to a deduped id do
+// NOT dangle. What CAN dangle is a reference to an id that no longer exists at
+// all (e.g. a task removed by a delete or workspace clear). So after dedup we
+// also prune every cross-reference that points to a missing id:
+//   - weeks[].taskIds   -> existing tasks
+//   - task.depTaskIds   -> existing tasks
+//   - task.deliverableId-> existing deliverable (else null)
+// Note: task.dependencies is free-text (human labels), NOT ids — never remapped.
+// Returns { tasks, deliverables, weeks, changed }.
+const repairData = (tasks, deliverables, weeks) => {
   syncIds(tasks, deliverables);
   let changed = false;
   const seenD = new Set();
@@ -78,12 +86,32 @@ const repairData = (tasks, deliverables) => {
     return { ...d, id };
   });
   const seenT = new Set();
-  const fixedT = (tasks || []).map(t => {
+  const fixedT0 = (tasks || []).map(t => {
     if (!seenT.has(t.id)) { seenT.add(t.id); return t; }
     changed = true; const id = nid(); seenT.add(id);
     return { ...t, id };
   });
-  return { tasks: fixedT, deliverables: fixedD, changed };
+
+  // Reference integrity pass — drop pointers to ids that don't exist.
+  const taskIdSet = new Set(fixedT0.map(t => t.id));
+  const dlvIdSet = new Set(fixedD.map(d => d.id));
+  const fixedT = fixedT0.map(t => {
+    let next = t;
+    if (Array.isArray(t.depTaskIds)) {
+      const pruned = t.depTaskIds.filter(id => taskIdSet.has(id));
+      if (pruned.length !== t.depTaskIds.length) { changed = true; next = { ...next, depTaskIds: pruned }; }
+    }
+    if (t.deliverableId && !dlvIdSet.has(t.deliverableId)) { changed = true; next = { ...next, deliverableId: null }; }
+    return next;
+  });
+  const fixedW = (weeks || []).map(w => {
+    if (!Array.isArray(w.taskIds)) return w;
+    const pruned = w.taskIds.filter(id => taskIdSet.has(id));
+    if (pruned.length === w.taskIds.length) return w;
+    changed = true; return { ...w, taskIds: pruned };
+  });
+
+  return { tasks: fixedT, deliverables: fixedD, weeks: fixedW, changed };
 };
 
 const SEED_TASKS = [

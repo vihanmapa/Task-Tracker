@@ -168,8 +168,36 @@ function Markdown({ text, className }) {
   return <div className={cls} dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
+// Header save indicator — reflects the REAL result of the workspace write.
+// 'saved' only shows after Supabase confirmed a row was actually written
+// (see ds.saveWorkspace .select() check), so it is honest persistence, not a
+// fire-and-forget guess. 'error' surfaces silent RLS blocks the user would
+// otherwise never see.
+function SaveIndicator({ status }) {
+  const s = status || { state: 'idle' };
+  if (s.state === 'idle') return null;
+  if (s.state === 'saving') {
+    return <span className="save-ind save-ind-busy" title="Saving to Supabase"><I.refresh size={13} /> Saving…</span>;
+  }
+  if (s.state === 'saved') {
+    const t = new Date(s.at || Date.now()).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+    return <span className="save-ind save-ind-ok" title="Confirmed written to Supabase"><I.check size={13} /> Saved {t}</span>;
+  }
+  // Short label per failure reason; full detail in the tooltip.
+  const REASON_LABEL = {
+    RLS_BLOCKED: 'No write access',
+    ROW_NOT_FOUND: 'Not seeded',
+    NO_CLIENT: 'Offline',
+    UPDATE_ERROR: 'Save failed',
+    EXCEPTION: 'Save failed',
+  };
+  const label = REASON_LABEL[s.reason] || 'Save failed';
+  return <span className="save-ind save-ind-err" title={s.error || 'Save failed'}><I.alert size={13} /> {label}</span>;
+}
+
 Object.assign(window, {
   STATUS_META, PRIO_META, EFFORT_LABEL,
   startOfWeek, endOfWeek, daysBetween, relDue, fmtDate, fmtDateFull, fmtRelTime,
   Avatar, StatusPill, PriorityTag, DueTag, CatChip, Progress, Ring, Spark, Modal, Markdown,
+  SaveIndicator,
 });

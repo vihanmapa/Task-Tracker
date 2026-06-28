@@ -20,4 +20,11 @@ window.APP_CONFIG = {
   // UI gate; the database also locks writes to this user's id via RLS
   // (see docs/PRIVATE-VAULT-SETUP.md). Match the email of your Supabase user.
   EDITOR_EMAIL: 'vihancmapa@gmail.com',
+
+  // The editor's Supabase auth UID — the SAME value used in the RLS policy
+  // (auth.uid() = EDITOR_UID). When set, the UI gates editing on uid instead
+  // of email so client and database agree on who can write. Leave '' to fall
+  // back to the email check. Find it: Supabase dashboard → Authentication →
+  // Users → (your user) → User UID.
+  EDITOR_UID: '',
 };

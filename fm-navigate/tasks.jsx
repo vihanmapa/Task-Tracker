@@ -925,7 +925,7 @@ function TaskEditPanel({ task, allTasks = [], onSave, onCancel }) {
 }
 
 /* ---------------- Task detail ---------------- */
-function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onCreateLinked, onAddResource, onDeleteResource, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
+function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onAssignWeek, onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onCreateLinked, onAddResource, onDeleteResource, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
   const I = window.I;
   const [comment, setComment] = useStateT('');
   const [editing, setEditing] = useStateT(false);
@@ -1184,6 +1184,19 @@ function TaskDetail({ task, deliverables = [], allTasks = [], onClose, onUpdate,
                   : (dlv
                       ? <window.DeliverableChip deliverable={dlv} onClick={() => onOpenDeliverable && onOpenDeliverable(dlv.id)} />
                       : <span className="meta-v">—</span>)}
+              </div>
+              <div className="meta-row"><span className="meta-k">Week</span>
+                {(() => {
+                  const wkSorted = [...(weeks || [])].sort((a, b) => (a.id < b.id ? 1 : -1));
+                  const cur = wkSorted.find(w => (w.taskIds || []).includes(task.id));
+                  const lbl = (w) => `Week ${w.weekNumber} (${window.fmtDate(w.startDate)})${w.status === 'closed' ? ' · done' : ''}`;
+                  return canEdit
+                    ? <select className="select meta-edit" value={cur ? cur.id : ''} onChange={e => onAssignWeek && onAssignWeek(task.id, e.target.value)}>
+                        <option value="">— Not scheduled —</option>
+                        {wkSorted.map(w => <option key={w.id} value={w.id}>{lbl(w)}</option>)}
+                      </select>
+                    : <span className="meta-v">{cur ? lbl(cur) : '—'}</span>;
+                })()}
               </div>
               <div className="meta-row"><span className="meta-k">Status</span>
                 {canEdit
