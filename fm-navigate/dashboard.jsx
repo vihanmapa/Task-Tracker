@@ -1,7 +1,7 @@
 /* ============================================================
    FM Navigate — Founder Dashboard (hero screen)
    ============================================================ */
-const { useState: useStateD, useMemo: useMemoD, useEffect: useEffectD } = React;
+const { useState: useStateDash, useMemo: useMemoDash, useEffect: useEffectDash } = React;
 
 function KpiTile({ label, value, foot, footTone, accent, icon, spark, onClick }) {
   return (
@@ -23,7 +23,7 @@ function Dashboard({ tasks, deliverables = [], onOpen, onOpenDeliverable, onComp
   const wkStart = window.startOfWeek(window.TODAY), wkEnd = window.endOfWeek(window.TODAY);
   const inWeek = (iso) => iso && new Date(iso) >= wkStart && new Date(iso) <= wkEnd;
 
-  const m = useMemoD(() => {
+  const m = useMemoDash(() => {
     const active = tasks.filter(t => !['Completed', 'Cancelled'].includes(t.status));
     const blocked = tasks.filter(t => t.status === 'Blocked');
     const waiting = tasks.filter(t => t.status === 'Waiting');
@@ -64,7 +64,7 @@ function Dashboard({ tasks, deliverables = [], onOpen, onOpenDeliverable, onComp
   }, [tasks]);
 
   // deliverable insights (top-level milestones, subtree rollups)
-  const dlv = useMemoD(() => {
+  const dlv = useMemoDash(() => {
     if (!H || !deliverables.length) return { roots: [], avg: 0, atRisk: 0, delivered: 0 };
     const roots = H.childrenOf(null, deliverables).map(d => {
       const r = H.rollup(d.id, tasks, deliverables);
@@ -82,7 +82,7 @@ function Dashboard({ tasks, deliverables = [], onOpen, onOpenDeliverable, onComp
   }, [deliverables, tasks]);
 
   // AI status line
-  const statusLine = useMemoD(() => {
+  const statusLine = useMemoDash(() => {
     const n = m.attention.filter(a => a.sev >= 2).length;
     if (tasks.length === 0)
       return <span><b>No tasks yet.</b> Create your first task to start tracking execution{canEdit ? '' : ' — switch to Vihan (PM) to add tasks'}.</span>;

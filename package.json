@@ -1,0 +1,13 @@
+{
+  "name": "fm-navigate",
+  "private": true,
+  "version": "1.0.0",
+  "description": "FM Navigate Execution Hub — static app, precompiled for GitHub Pages",
+  "scripts": {
+    "build": "node build.mjs",
+    "serve": "python3 dist/serve.py 4173"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0"
+  }
+}
