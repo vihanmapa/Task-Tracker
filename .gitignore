@@ -11,6 +11,10 @@
 __pycache__/
 *.pyc
 
-# Node (none used at runtime, but keep clean)
+# Node (build-time only: esbuild)
 node_modules/
 npm-debug.log*
+package-lock.json
+
+# Build output (produced by GitHub Action, deployed to Pages)
+dist/

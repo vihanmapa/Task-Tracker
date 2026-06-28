@@ -30,6 +30,26 @@ const NAV = [
   { key: 'settings',     label: 'Settings',  icon: 'settings' },
 ];
 
+// ---- hash routing ----
+// Hash-based so it works on GitHub Pages static hosting and survives refresh.
+//   #/tasks            -> tasks list
+//   #/tasks/T-123      -> task detail
+//   #/deliverables/D-1 -> deliverable detail
+const ROUTE_KEYS = NAV.map(n => n.key);
+function hashToState() {
+  const raw = (window.location.hash || '').replace(/^#\/?/, '');
+  const [seg, id] = raw.split('/');
+  if (seg === 'tasks' && id) return { route: 'detail', selected: id, dlvSelected: null };
+  if (seg === 'deliverables' && id) return { route: 'dlvDetail', selected: null, dlvSelected: id };
+  if (ROUTE_KEYS.includes(seg)) return { route: seg, selected: null, dlvSelected: null };
+  return { route: 'dashboard', selected: null, dlvSelected: null };
+}
+function stateToHash(route, selected, dlvSelected) {
+  if (route === 'detail' && selected) return '#/tasks/' + selected;
+  if (route === 'dlvDetail' && dlvSelected) return '#/deliverables/' + dlvSelected;
+  return '#/' + route;
+}
+
 function App() {
   const I = window.I;
   const [tweaks, setTweak] = window.useTweaks(TWEAK_DEFAULTS);
@@ -153,12 +173,27 @@ function App() {
   }, [shared, authUser && authUser.id]);
 
   // ---- routing ----
-  const [route, setRoute] = useStateA('dashboard');
+  const [route, setRoute] = useStateA(() => hashToState().route);
   const [taskView, setTaskView] = useStateA('list');
-  const [selected, setSelected] = useStateA(null);
-  const [dlvSelected, setDlvSelected] = useStateA(null);
+  const [selected, setSelected] = useStateA(() => hashToState().selected);
+  const [dlvSelected, setDlvSelected] = useStateA(() => hashToState().dlvSelected);
   const [composer, setComposer] = useStateA(false);
   const [askQ, setAskQ] = useStateA(null);
+
+  // ---- url <-> state sync ----
+  // React to browser back/forward and manual hash edits.
+  useEffectA(() => {
+    const apply = () => { const s = hashToState(); setRoute(s.route); setSelected(s.selected); setDlvSelected(s.dlvSelected); };
+    window.addEventListener('hashchange', apply);
+    return () => window.removeEventListener('hashchange', apply);
+  }, []);
+  // Write state into the URL. Assigning location.hash pushes a history entry so
+  // back/forward navigates between screens; the hashchange handler above no-ops
+  // when state already matches, so this won't loop.
+  useEffectA(() => {
+    const want = stateToHash(route, selected, dlvSelected);
+    if (window.location.hash !== want) window.location.hash = want;
+  }, [route, selected, dlvSelected]);
 
   // ---- theme ----
   useEffectA(() => {

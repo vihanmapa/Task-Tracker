@@ -3,7 +3,8 @@
    Design tokens, type, light/dark, status + priority systems
    ============================================================ */
 
-@import url('https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+/* Fonts loaded via <link> in index.html head (parallel, with preconnect) —
+   NOT @import here, which would render-block on a serial fetch chain. */
 
 :root {
   /* type */
