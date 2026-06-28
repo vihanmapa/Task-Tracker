@@ -15,6 +15,16 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 
 
 class NoCacheHandler(SimpleHTTPRequestHandler):
+    def do_GET(self):
+        # SPA fallback: serve index.html for clean-route paths (no file
+        # extension) that don't map to a real file, so History-API deep links
+        # survive a refresh locally — mirrors the 404.html trick on Pages.
+        rel = self.path.split("?", 1)[0].split("#", 1)[0].lstrip("/")
+        fs = os.path.join(ROOT, rel)
+        if rel and not os.path.exists(fs) and "." not in os.path.basename(rel):
+            self.path = "/index.html"
+        return super().do_GET()
+
     def end_headers(self):
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Pragma", "no-cache")
