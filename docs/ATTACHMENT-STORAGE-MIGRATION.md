@@ -28,6 +28,21 @@ serialization cannot fix this — serialized 5.9 MB writes are still 5.9 MB.
 **Goal:** move binary attachments out of the document into Supabase Storage,
 leaving only a small reference in the JSON. Target document size ~43 KB.
 
+## Success metrics
+
+Define before writing code; validate against these rather than impressions.
+
+| Metric | Before | After (target) |
+|--------|--------|----------------|
+| Workspace JSON size | ~5.9 MB | < 100 KB |
+| Save latency | timeout / several seconds | < 500 ms (network/backend dependent) |
+| New attachment storage | inline base64 in JSON | Storage object + ref |
+| Existing attachments | base64 | still readable (dual-format reader) |
+| Existing user behavior | — | no visible change |
+
+Branch success criterion: *"Existing users see no behavioral change, but newly
+uploaded attachments no longer increase the workspace document size."*
+
 ## Target data shape
 
 Legacy (today):
