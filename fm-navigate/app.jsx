@@ -31,24 +31,29 @@ const NAV = [
   { key: 'settings',     label: 'Settings',  icon: 'settings' },
 ];
 
-// ---- hash routing ----
-// Hash-based so it works on GitHub Pages static hosting and survives refresh.
-//   #/tasks            -> tasks list
-//   #/tasks/T-123      -> task detail
-//   #/deliverables/D-1 -> deliverable detail
+// ---- path routing ----
+// Clean URLs via the History API (no '#'). On static GitHub Pages this needs
+// a 404.html fallback (see build.mjs) that redirects deep links back through
+// the app; locally serve.py serves index.html for unknown paths. BASE is the
+// directory the app is mounted at — "/Task-Tracker/" on Pages, "/" locally.
+//   <base>tasks            -> tasks list
+//   <base>tasks/T-123      -> task detail
+//   <base>deliverables/D-1 -> deliverable detail
 const ROUTE_KEYS = NAV.map(n => n.key);
-function hashToState() {
-  const raw = (window.location.hash || '').replace(/^#\/?/, '');
-  const [seg, id] = raw.split('/');
-  if (seg === 'tasks' && id) return { route: 'detail', selected: id, dlvSelected: null };
-  if (seg === 'deliverables' && id) return { route: 'dlvDetail', selected: null, dlvSelected: id };
+const APP_BASE = (window.__BASE__ || '/');
+function pathToState() {
+  let p = window.location.pathname;
+  if (p.indexOf(APP_BASE) === 0) p = p.slice(APP_BASE.length);
+  const [seg, id] = p.replace(/^\/+/, '').split('/');
+  if (seg === 'tasks' && id) return { route: 'detail', selected: decodeURIComponent(id), dlvSelected: null };
+  if (seg === 'deliverables' && id) return { route: 'dlvDetail', selected: null, dlvSelected: decodeURIComponent(id) };
   if (ROUTE_KEYS.includes(seg)) return { route: seg, selected: null, dlvSelected: null };
   return { route: 'dashboard', selected: null, dlvSelected: null };
 }
-function stateToHash(route, selected, dlvSelected) {
-  if (route === 'detail' && selected) return '#/tasks/' + selected;
-  if (route === 'dlvDetail' && dlvSelected) return '#/deliverables/' + dlvSelected;
-  return '#/' + route;
+function stateToPath(route, selected, dlvSelected) {
+  if (route === 'detail' && selected) return APP_BASE + 'tasks/' + encodeURIComponent(selected);
+  if (route === 'dlvDetail' && dlvSelected) return APP_BASE + 'deliverables/' + encodeURIComponent(dlvSelected);
+  return APP_BASE + route;
 }
 
 function App() {
@@ -232,26 +237,27 @@ function App() {
   }, [shared, authUser && authUser.id]);
 
   // ---- routing ----
-  const [route, setRoute] = useStateA(() => hashToState().route);
+  const [route, setRoute] = useStateA(() => pathToState().route);
   const [taskView, setTaskView] = useStateA('list');
-  const [selected, setSelected] = useStateA(() => hashToState().selected);
-  const [dlvSelected, setDlvSelected] = useStateA(() => hashToState().dlvSelected);
+  const [selected, setSelected] = useStateA(() => pathToState().selected);
+  const [dlvSelected, setDlvSelected] = useStateA(() => pathToState().dlvSelected);
   const [composer, setComposer] = useStateA(false);
   const [askQ, setAskQ] = useStateA(null);
 
   // ---- url <-> state sync ----
-  // React to browser back/forward and manual hash edits.
+  // React to browser back/forward (popstate fires on history navigation).
   useEffectA(() => {
-    const apply = () => { const s = hashToState(); setRoute(s.route); setSelected(s.selected); setDlvSelected(s.dlvSelected); };
-    window.addEventListener('hashchange', apply);
-    return () => window.removeEventListener('hashchange', apply);
+    const apply = () => { const s = pathToState(); setRoute(s.route); setSelected(s.selected); setDlvSelected(s.dlvSelected); };
+    window.addEventListener('popstate', apply);
+    return () => window.removeEventListener('popstate', apply);
   }, []);
-  // Write state into the URL. Assigning location.hash pushes a history entry so
-  // back/forward navigates between screens; the hashchange handler above no-ops
-  // when state already matches, so this won't loop.
+  // Write state into the URL. pushState adds a history entry so back/forward
+  // navigates between screens; popstate above handles the reverse direction.
+  // Guarded so re-renders that don't change the path don't stack duplicate
+  // history entries.
   useEffectA(() => {
-    const want = stateToHash(route, selected, dlvSelected);
-    if (window.location.hash !== want) window.location.hash = want;
+    const want = stateToPath(route, selected, dlvSelected);
+    if (window.location.pathname !== want) window.history.pushState(null, '', want);
   }, [route, selected, dlvSelected]);
 
   // ---- theme ----

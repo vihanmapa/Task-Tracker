@@ -85,6 +85,7 @@ async function build() {
   const v = Date.now().toString(36);
 
   await writeFile(join(OUT, 'index.html'), indexHtml(v), 'utf8');
+  await writeFile(join(OUT, '404.html'), fourOhFourHtml(), 'utf8');
   await copyFile(join(SRC, 'styles.css'), join(OUT, 'styles.css'));
   await copyFile(join(SRC, 'serve.py'), join(OUT, 'serve.py'));
 
@@ -116,6 +117,25 @@ async function assertNoDuplicateTopLevel() {
   }
 }
 
+// Runs before the app: sets the mount base and restores a clean URL after a
+// 404.html redirect (see fourOhFourHtml). Kept inline + tiny so it executes
+// before anything paints.
+const ROUTER_BOOTSTRAP = `  <script>
+    // Mount base: "/<repo>/" on GitHub Pages project sites, "/" otherwise.
+    window.__BASE__ = location.hostname.endsWith('github.io')
+      ? '/' + location.pathname.split('/')[1] + '/' : '/';
+    // 404.html redirects deep links to "<base>?/path"; turn that back into a
+    // clean URL before the app boots so routing sees the real path.
+    (function (l) {
+      if (l.search && l.search.charAt(1) === '/') {
+        var decoded = l.search.slice(1).split('&').map(function (s) {
+          return s.replace(/~and~/g, '&');
+        }).join('?');
+        history.replaceState(null, null, l.pathname.replace(/\\/$/, '') + '/' + decoded.replace(/^\\//, '') + l.hash);
+      }
+    })(window.location);
+  </script>`;
+
 function indexHtml(v) {
   return `<!DOCTYPE html>
 <html lang="en" data-theme="light" data-density="regular">
@@ -123,6 +143,7 @@ function indexHtml(v) {
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>FM Navigate — Execution Hub</title>
+${ROUTER_BOOTSTRAP}
   <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin />
   <link rel="preconnect" href="https://unpkg.com" crossorigin />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -144,6 +165,34 @@ function indexHtml(v) {
   <!-- precompiled app: all config + data layer + JSX, one file, no in-browser Babel -->
   <script src="app.bundle.js?v=${v}"></script>
 </body>
+</html>
+`;
+}
+
+// GitHub Pages serves this for any path it can't find (deep links / refresh
+// on a clean route). It rewrites the path into a "?/"-encoded query and
+// redirects to the app root, where ROUTER_BOOTSTRAP restores the real URL.
+// pathSegmentsToKeep = 1 keeps the project-page prefix ("/Task-Tracker/").
+function fourOhFourHtml() {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>FM Navigate</title>
+  <script>
+    (function (l) {
+      var pathSegmentsToKeep = 1;
+      l.replace(
+        l.protocol + '//' + l.hostname + (l.port ? ':' + l.port : '') +
+        l.pathname.split('/').slice(0, 1 + pathSegmentsToKeep).join('/') + '/?/' +
+        l.pathname.slice(1).split('/').slice(pathSegmentsToKeep).join('/').replace(/&/g, '~and~') +
+        (l.search ? '&' + l.search.slice(1).replace(/&/g, '~and~') : '') +
+        l.hash
+      );
+    })(window.location);
+  </script>
+</head>
+<body></body>
 </html>
 `;
 }
