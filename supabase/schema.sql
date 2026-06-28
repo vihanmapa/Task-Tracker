@@ -18,17 +18,23 @@ create table if not exists public.workspace (
   updated_by  text
 );
 
--- Seed the single 'main' row.
+-- Seed the single 'main' row. NOTE: row id stays 'main' deliberately. It now
+-- holds the ENTIRE workspace document — { version, metadata, data: { tasks,
+-- deliverables, weeks, kpiScores, … } } — in the `tasks` jsonb column. (A more
+-- descriptive id like 'workspace' would require creating a NEW row, but there
+-- is no INSERT policy, so the client can't create one without manual SQL —
+-- which is exactly what this architecture removes. So 'main' it stays.)
 insert into public.workspace (id, tasks)
 values ('main', '[]'::jsonb)
 on conflict (id) do nothing;
 
--- Multi-collection: each module gets its OWN workspace row, keyed by id.
--- The `tasks` jsonb column holds whatever JSON that collection needs (the
--- KPI scorecard stores an object, not an array). The editor UPDATE policy
--- below already covers every row, so writes need no change — but each row
--- must be SEEDED once here (there is no INSERT policy). Re-run this file
--- after adding a new collection id.
+-- NOTE (unified workspace document): the app now stores the ENTIRE workspace
+-- as ONE jsonb object on the 'main' row — { tasks, deliverables, weeks,
+-- kpiScores, ... }. Every feature is just a property, so NEW features never
+-- need a new row, a seed, or an RLS change. The legacy per-collection rows
+-- below are kept only so existing data migrates: loadWorkspace() imports the
+-- old 'kpiScores' row into the document on first load. They are no longer
+-- written to and are optional for a fresh database.
 insert into public.workspace (id, tasks) values
   ('kpiScores', '{}'::jsonb)
 on conflict (id) do nothing;

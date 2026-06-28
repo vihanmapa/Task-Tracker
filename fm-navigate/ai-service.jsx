@@ -244,6 +244,97 @@ function summarizeLocally(buckets) {
   return parts.join(' ');
 }
 
+/* ---------- weekly report builders (local, deterministic) ----------
+   A week REFERENCES tasks by id; reports are derived from live task
+   state at generation time, never from copied task data. */
+function _selTasks(week, tasks) {
+  return (week.taskIds || []).map(id => (tasks || []).find(t => t.id === id)).filter(Boolean);
+}
+function _dlvTitle(deliverables, id) {
+  const d = (deliverables || []).find(x => x.id === id);
+  return d ? d.title : id;
+}
+function _weekRange(week) {
+  const f = (iso) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return week.startDate && week.endDate ? `${f(week.startDate)} – ${f(week.endDate)}` : '';
+}
+function _objLines(week) {
+  return (week.objectives || []).map(o => (o || '').trim()).filter(Boolean);
+}
+function buildMondayReport(week, tasks, deliverables) {
+  const sel = _selTasks(week, tasks);
+  const L = [];
+  L.push(`# Monday Plan — Week ${week.weekNumber} (${_weekRange(week)})`, '');
+  // Manager-facing summary first.
+  L.push('## Objectives', '');
+  const objs = _objLines(week);
+  if (objs.length) objs.forEach(o => L.push(`- ${o}`));
+  else L.push('_No objectives set._');
+  L.push('');
+  const dids = [...new Set(sel.map(t => t.deliverableId).filter(Boolean))];
+  if (dids.length) {
+    L.push('## Key Deliverables', '');
+    dids.forEach(id => { const n = sel.filter(t => t.deliverableId === id).length; L.push(`- ${_dlvTitle(deliverables, id)} (${n} task${n > 1 ? 's' : ''})`); });
+    L.push('');
+  }
+  L.push(`## Planned Work (${sel.length})`, '');
+  if (sel.length) {
+    ['Critical', 'High', 'Medium', 'Low'].forEach(p => {
+      const g = sel.filter(t => t.priority === p);
+      if (!g.length) return;
+      L.push(`**${p}**`);
+      g.forEach(t => {
+        const due = t.dueDate ? ` · due ${new Date(t.dueDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}` : '';
+        L.push(`- ${t.title} — ${t.status}${due}`);
+      });
+      L.push('');
+    });
+  } else L.push('_No tasks selected yet._', '');
+  const risks = sel.filter(t => t.risk && t.risk.trim());
+  if (risks.length) { L.push('## Risks', ''); risks.forEach(t => L.push(`- **${t.title}:** ${t.risk.trim()}`)); L.push(''); }
+  // Detail (dependencies) lives at the bottom, out of the manager's way.
+  const deps = sel.filter(t => (t.dependencies || []).length);
+  if (deps.length) { L.push('## Details — Dependencies', ''); deps.forEach(t => L.push(`- ${t.title} → ${t.dependencies.join('; ')}`)); L.push(''); }
+  return L.join('\n').trim();
+}
+function buildFridaySummary(week, tasks, deliverables) {
+  const sel = _selTasks(week, tasks);
+  const completed = sel.filter(t => t.status === 'Completed');
+  const inProg = sel.filter(t => t.status === 'In Progress');
+  const blocked = sel.filter(t => t.status === 'Blocked' || t.status === 'Waiting' || t.status === 'MD Review');
+  const carry = sel.filter(t => !['Completed', 'Cancelled'].includes(t.status));
+  const L = [];
+  L.push(`# Friday Summary — Week ${week.weekNumber} (${_weekRange(week)})`, '');
+  // Lead with the executive view; task-level detail is grouped under Details.
+  L.push('## Executive Summary', '', summarizeLocally({ completed, inProgress: inProg, blocked, upcoming: [] }), '');
+  L.push('## Objectives', '');
+  const objs = _objLines(week);
+  if (objs.length) objs.forEach(o => L.push(`- ${o}`));
+  else L.push('_No objectives set._');
+  L.push('');
+  L.push('## Details', '');
+  L.push(`### Completed (${completed.length})`, '');
+  if (completed.length) completed.forEach(t => L.push(`- ${t.title}`)); else L.push('_None completed this week._');
+  L.push('');
+  if (inProg.length) { L.push(`### In Progress (${inProg.length})`, ''); inProg.forEach(t => L.push(`- ${t.title} — ${t.progress || 0}%`)); L.push(''); }
+  if (blocked.length) {
+    L.push(`### Blocked & Waiting (${blocked.length})`, '');
+    blocked.forEach(t => { const dep = (t.dependencies || [])[0]; L.push(`- ${t.title}${dep ? ` — waiting on ${dep}` : ''}`); });
+    L.push('');
+  }
+  const dids = [...new Set(sel.map(t => t.deliverableId).filter(Boolean))];
+  if (dids.length) {
+    L.push('### Deliverables Progressed', '');
+    dids.forEach(id => { const ts = sel.filter(t => t.deliverableId === id); const done = ts.filter(t => t.status === 'Completed').length; L.push(`- ${_dlvTitle(deliverables, id)} — ${done}/${ts.length} complete`); });
+    L.push('');
+  }
+  L.push(`### Carrying Forward (${carry.length})`, '');
+  if (carry.length) carry.forEach(t => L.push(`- ${t.title} — ${t.status}`)); else L.push('_Nothing to carry forward._');
+  L.push('');
+  if (week.notes && week.notes.trim()) L.push('### Notes', '', week.notes.trim(), '');
+  return L.join('\n').trim();
+}
+
 /* ---------- tabular (spreadsheet / TSV) paste support ----------
    A paste copied from a spreadsheet or table comes in tab-separated:
    one row per task, columns = fields. Each row → one task. */
@@ -586,6 +677,18 @@ const aiService = {
     if (AI_BACKEND === 'gemini') { /* return await remoteSummary(buckets) */ }
     await think(500);
     return summarizeLocally(buckets);
+  },
+
+  /* Auto-generated Monday plan / Friday summary for one week. Both derive
+     from the week's referenced tasks (live state) — no copied task data.
+     Returns markdown text the PM reviews and edits. */
+  async generateMondayReport(week, tasks, deliverables) {
+    await think(520);
+    return buildMondayReport(week, tasks, deliverables);
+  },
+  async generateFridaySummary(week, tasks, deliverables) {
+    await think(520);
+    return buildFridaySummary(week, tasks, deliverables);
   },
 };
 

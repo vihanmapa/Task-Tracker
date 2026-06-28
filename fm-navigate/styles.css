@@ -362,6 +362,18 @@ a { color: inherit; text-decoration: none; }
   color: var(--text-2);
 }
 
+.save-ind {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11.5px; font-weight: 500;
+  padding: 3px 8px; border-radius: var(--r-xs);
+  white-space: nowrap;
+}
+.save-ind-busy { color: var(--text-2); }
+.save-ind-busy svg { animation: save-spin 0.9s linear infinite; }
+.save-ind-ok  { color: var(--pos); }
+.save-ind-err { color: var(--neg); }
+@keyframes save-spin { to { transform: rotate(360deg); } }
+
 .avatar {
   border-radius: 99px;
   display: grid; place-items: center;

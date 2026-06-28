@@ -22,6 +22,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 
 const NAV = [
   { key: 'dashboard',    label: 'Dashboard', icon: 'grid' },
+  { key: 'week',         label: 'This Week', icon: 'calendar' },
   { key: 'kpi',          label: 'KPI Scorecard', icon: 'trend' },
   { key: 'deliverables', label: 'Deliverables', icon: 'target' },
   { key: 'tasks',        label: 'Tasks',     icon: 'list' },
@@ -75,51 +76,122 @@ function App() {
     try { const s = localStorage.getItem('fm_deliverables'); if (s) return JSON.parse(s); } catch (_) {}
     return [];
   });
-  // Split a mixed remote blob back into tasks vs deliverables.
-  const splitBlob = (arr) => ({
-    tasks: (arr || []).filter(r => r.kind !== 'deliverable'),
-    deliverables: (arr || []).filter(r => r.kind === 'deliverable'),
-  });
   // When applying a remote (load/realtime) change we must NOT echo it back.
+  // One ref guards the single workspace-document save effect below.
   const skipSaveRef = useRefA(true); // skip the very first effect run (hydration)
+  const metaRef = useRefA(null);     // workspace document metadata (createdAt, etc.)
 
-  // ---- KPI scorecard (own backend collection 'kpiScores') ----
+  // Save status for the header indicator: { state: 'idle'|'saving'|'saved'|'error', at?, error? }
+  // Driven by the real result of ds.saveWorkspace (which now reports honest
+  // persistence — empty write => error, not a false-positive success).
+  const [saveStatus, setSaveStatus] = useStateA({ state: 'idle' });
+
+  // ---- KPI scorecard (a property of the workspace document) ----
   // Shape: { 'YYYY-MM': { 'A1': { score, notes, links:[] }, ... } }
   const [kpiScores, setKpiScores] = useStateA(() => {
     try { const s = localStorage.getItem('fm_col_kpiScores'); if (s) return JSON.parse(s); } catch (_) {}
     return {};
   });
   const [kpiMonth, setKpiMonth] = useStateA(() => window.kpiMonthKey(new Date()));
-  const kpiSkipRef = useRefA(true);
+
+  // ---- weekly workspaces (a property of the workspace document) ----
+  // Each week REFERENCES tasks by id; everything else is derived from tasks.
+  const [weeks, setWeeks] = useStateA(() => {
+    try { const s = localStorage.getItem('fm_col_weeks'); if (s) return JSON.parse(s); } catch (_) {}
+    return [];
+  });
 
   // ---- auth (Supabase) — identity drives edit rights ----
   // undefined = still checking · null = signed out · object = signed in
   const [authUser, setAuthUser] = useStateA(shared ? undefined : null);
   const EDITOR_EMAIL = ((window.APP_CONFIG && window.APP_CONFIG.EDITOR_EMAIL) || '').toLowerCase();
+  const EDITOR_UID = ((window.APP_CONFIG && window.APP_CONFIG.EDITOR_UID) || '');
   const myEmail = ((authUser && authUser.email) || '').toLowerCase();
+  const myUid = (authUser && authUser.id) || '';
+  // Edit rights must use the SAME identity the RLS policy uses (auth.uid() =
+  // EDITOR_UID). When EDITOR_UID is configured we gate on uid, so the client's
+  // "can edit" matches what the database will actually allow — no more
+  // editable UI that silently fails to persist. If EDITOR_UID isn't set yet,
+  // fall back to the email check so we can't accidentally lock the editor out.
+  const isEditor = EDITOR_UID ? (myUid === EDITOR_UID) : (!!myEmail && myEmail === EDITOR_EMAIL);
   // The editor account = Vihan (PM). Any other signed-in account = read-only Founder view.
-  const currentUser = (!shared || myEmail === EDITOR_EMAIL) ? 'vihan' : 'richard';
-  const canEdit = !shared || (!!authUser && myEmail === EDITOR_EMAIL);
+  const currentUser = (!shared || isEditor) ? 'vihan' : 'richard';
+  const canEdit = !shared || isEditor;
 
-  // Persist: always mirror locally; push to Supabase only when the editor is signed in.
+  // Apply a loaded/realtime workspace document (v2: { metadata, data }) to state.
+  const applyDoc = useCallbackA((doc) => {
+    metaRef.current = doc.metadata || metaRef.current;
+    const d = doc.data || {};
+    setTasks(Array.isArray(d.tasks) ? d.tasks : []);
+    setDeliverables(Array.isArray(d.deliverables) ? d.deliverables : []);
+    setWeeks(Array.isArray(d.weeks) ? d.weeks : []);
+    setKpiScores(d.kpiScores && typeof d.kpiScores === 'object' ? d.kpiScores : {});
+  }, []);
+
+  // Persist the WHOLE workspace as one versioned document. Every feature is a
+  // key under `data`, so there is one save path, one row, no per-collection
+  // seeding. Mirrors locally always; pushes to Supabase only for the editor.
   useEffectA(() => {
-    try { localStorage.setItem('fm_tasks', JSON.stringify(tasks)); } catch (_) {}
-    try { localStorage.setItem('fm_deliverables', JSON.stringify(deliverables)); } catch (_) {}
+    try {
+      localStorage.setItem('fm_tasks', JSON.stringify(tasks));
+      localStorage.setItem('fm_deliverables', JSON.stringify(deliverables));
+      localStorage.setItem('fm_col_kpiScores', JSON.stringify(kpiScores));
+      localStorage.setItem('fm_col_weeks', JSON.stringify(weeks));
+    } catch (_) {}
     if (skipSaveRef.current) { skipSaveRef.current = false; return; }
     if (shared && canEdit) {
-      const blob = [...tasks, ...deliverables.map(d => ({ ...d, kind: 'deliverable' }))];
-      ds.saveTasks(blob).then(r => { if (!r.ok) console.warn('[app] remote save failed', r); });
+      setSaveStatus({ state: 'saving' });
+      ds.saveWorkspace({ metadata: metaRef.current, data: { tasks, deliverables, weeks, kpiScores } })
+        .then(r => {
+          if (r.ok) { setSaveStatus({ state: 'saved', at: Date.now() }); }
+          else { console.warn('[app] workspace save failed', r.reason, r.error); setSaveStatus({ state: 'error', reason: r.reason, error: r.error }); }
+        });
     }
-  }, [tasks, deliverables]);
+  }, [tasks, deliverables, weeks, kpiScores]);
 
-  // Persist KPI scores to their own collection (editor only); mirror locally.
-  useEffectA(() => {
-    try { localStorage.setItem('fm_col_kpiScores', JSON.stringify(kpiScores)); } catch (_) {}
-    if (kpiSkipRef.current) { kpiSkipRef.current = false; return; }
-    if (shared && canEdit) {
-      ds.saveCollection('kpiScores', kpiScores).then(r => { if (!r.ok) console.warn('[app] KPI save failed', r.error); });
-    }
-  }, [kpiScores]);
+  // Upsert one week by id (editor only).
+  const saveWeek = useCallbackA((week) => {
+    if (!canEdit) return;
+    setWeeks(prev => {
+      const i = prev.findIndex(w => w.id === week.id);
+      if (i < 0) return [...prev, week];
+      const n = [...prev]; n[i] = week; return n;
+    });
+  }, [canEdit]);
+
+  // Delete one week by id (editor only). Tasks are untouched — a week only
+  // references them, so removing the week just drops the plan, never the work.
+  const deleteWeek = useCallbackA((weekId) => {
+    if (!canEdit) return;
+    setWeeks(prev => prev.filter(w => w.id !== weekId));
+  }, [canEdit]);
+
+  // Assign a task to a week from the task itself (editor only). A task lives in
+  // at most one ACTIVE week, so adding to one removes it from any other active
+  // week. Closed weeks are historical records and are never mutated — a task
+  // that was worked in a past week stays recorded there even if re-planned
+  // later. weekId='' clears the active assignment.
+  const assignWeek = useCallbackA((taskId, weekId) => {
+    if (!canEdit) return;
+    const now = new Date().toISOString();
+    setWeeks(prev => prev.map(w => {
+      if (w.status === 'closed') return w; // immutable history
+      const has = (w.taskIds || []).includes(taskId);
+      if (w.id === weekId) return has ? w : { ...w, taskIds: [...(w.taskIds || []), taskId], updatedAt: now };
+      return has ? { ...w, taskIds: w.taskIds.filter(x => x !== taskId), updatedAt: now } : w;
+    }));
+  }, [canEdit]);
+
+  // Merge a partial patch into one week by id (editor only). Unlike replacing
+  // the whole object, this merges against the LATEST stored week, so an async
+  // writer (e.g. AI report generation) can't clobber edits the user made while
+  // the request was in flight.
+  const patchWeek = useCallbackA((weekId, partial) => {
+    if (!canEdit) return;
+    setWeeks(prev => prev.map(w => w.id === weekId
+      ? { ...w, ...partial, updatedAt: new Date().toISOString() }
+      : w));
+  }, [canEdit]);
 
   // Replace one KPI's record for one month (editor only). The KPI screen
   // builds the full record (single-score or multi-entry), we just store it.
@@ -146,35 +218,22 @@ function App() {
   const signOut = useCallbackA(() => { ds.signOut().then(() => setAuthUser(null)); }, []);
 
   // Initial remote load + realtime subscription — runs once signed in
-  // (reads now require an authenticated session).
+  // (reads require an authenticated session). One document, one subscription.
   useEffectA(() => {
     if (!shared || !authUser) return;
-    let unsub = () => {};
-    ds.loadTasks().then(remote => {
-      const s = splitBlob(remote);
-      const fixed = window.repairData(s.tasks, s.deliverables);
-      // If we renumbered a duplicate, let the save effect persist the cleaned blob.
-      skipSaveRef.current = !fixed.changed;
-      setTasks(fixed.tasks); setDeliverables(fixed.deliverables);
+    ds.loadWorkspace().then(doc => {
+      const fixed = window.repairData(doc.data.tasks, doc.data.deliverables, doc.data.weeks);
+      // Persist immediately if we upgraded the schema or cleaned duplicates;
+      // otherwise stay quiet so a plain load never rewrites the row.
+      skipSaveRef.current = !(doc.migrated || fixed.changed);
+      applyDoc({ ...doc, data: { ...doc.data, tasks: fixed.tasks, deliverables: fixed.deliverables, weeks: fixed.weeks } });
     });
-    unsub = ds.subscribe(incoming => {
-      const s = splitBlob(incoming);
-      const fixed = window.repairData(s.tasks, s.deliverables);
-      skipSaveRef.current = true; // realtime echo: dedupe locally, don't re-persist
-      setTasks(fixed.tasks); setDeliverables(fixed.deliverables);
+    const unsub = ds.subscribeWorkspace(incoming => {
+      const fixed = window.repairData(incoming.data.tasks, incoming.data.deliverables, incoming.data.weeks);
+      skipSaveRef.current = true; // realtime echo: apply locally, don't re-persist
+      applyDoc({ ...incoming, data: { ...incoming.data, tasks: fixed.tasks, deliverables: fixed.deliverables, weeks: fixed.weeks } });
     });
-
-    // KPI scores live in their own collection row.
-    ds.loadCollection('kpiScores', {}).then(remote => {
-      kpiSkipRef.current = true; // don't echo the freshly loaded data back
-      setKpiScores(remote && typeof remote === 'object' ? remote : {});
-    });
-    const unsubKpi = ds.subscribeCollection('kpiScores', incoming => {
-      kpiSkipRef.current = true;
-      setKpiScores(incoming && typeof incoming === 'object' ? incoming : {});
-    });
-
-    return () => { unsub(); unsubKpi(); };
+    return () => { unsub(); };
   }, [shared, authUser && authUser.id]);
 
   // ---- routing ----
@@ -495,8 +554,37 @@ function App() {
 
   const goAsk = useCallbackA((q) => { if (typeof q === 'string') setAskQ(q); setRoute('ask'); }, []);
 
-  const loadDemo = () => { if (!canEdit) return; if (confirm('Load the demo FM Navigate task set? This replaces your current tasks.')) { setTasks(window.SEED_TASKS); setDeliverables(window.SEED_DELIVERABLES); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
-  const clearAll = () => { if (!canEdit) return; if (confirm('Clear ALL tasks and start from a blank slate? This cannot be undone.')) { setTasks([]); setDeliverables([]); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
+  const loadDemo = () => { if (!canEdit) return; if (confirm('Load the demo FM Navigate task set? This replaces your current workspace.')) { setTasks(window.SEED_TASKS); setDeliverables(window.SEED_DELIVERABLES); setWeeks([]); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
+  // Full workspace reset: tasks, deliverables, weekly plans AND KPI scores.
+  // Weeks reference task ids, so leaving them behind would orphan; KPI scores
+  // are part of the same unified document, so a "blank slate" must clear them.
+  const clearAll = () => { if (!canEdit) return; if (confirm('Clear the ENTIRE workspace — tasks, deliverables, weekly plans and KPI scores — and start from a blank slate? This cannot be undone.')) { setTasks([]); setDeliverables([]); setWeeks([]); setKpiScores({}); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
+
+  // ---- backup: export / import the whole workspace document ----
+  const exportWorkspace = () => {
+    const json = ds.exportWorkspace();
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `fm-navigate-workspace-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  };
+  const importWorkspace = (file) => {
+    if (!canEdit) { alert('Read-only — sign in as the editor to import.'); return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (!confirm('Replace the ENTIRE workspace with this file? Current data will be overwritten.')) return;
+      ds.importWorkspace(reader.result).then(r => {
+        if (!r.ok) { alert('Import failed: ' + (r.error || 'unknown error')); return; }
+        // ds.importWorkspace already persisted the repaired doc, so skip the
+        // re-save the persistence effect would otherwise fire on applyDoc.
+        skipSaveRef.current = true;
+        applyDoc(r.doc);
+        setSelected(null); setDlvSelected(null); setRoute('dashboard');
+      });
+    };
+    reader.readAsText(file);
+  };
 
   // ---- counts for nav ----
   const counts = useMemoA(() => ({
@@ -507,7 +595,7 @@ function App() {
   const selectedTask = useMemoA(() => tasks.find(t => t.id === selected), [tasks, selected]);
   const selectedDeliverable = useMemoA(() => deliverables.find(d => d.id === dlvSelected), [deliverables, dlvSelected]);
 
-  const titleMap = { dashboard: 'Dashboard', kpi: 'KPI Scorecard', tasks: 'Tasks', deliverables: 'Deliverables', dlvDetail: 'Deliverable', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
+  const titleMap = { dashboard: 'Dashboard', week: 'This Week', kpi: 'KPI Scorecard', tasks: 'Tasks', deliverables: 'Deliverables', dlvDetail: 'Deliverable', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
 
   // ---- auth gate: login is required before anything renders ----
   if (shared && authUser === undefined) {
@@ -572,6 +660,7 @@ function App() {
           <span className="topbar-title">{titleMap[route]}</span>
           {route === 'detail' && <span className="topbar-crumb">· {selectedTask?.id}</span>}
           <span className="grow" />
+          {shared && canEdit && <window.SaveIndicator status={saveStatus} />}
           {canEdit
             ? <button className="btn btn-primary btn-sm" onClick={() => setComposer(true)}><I.spark size={14} /> New task</button>
             : <span className="chip" title="Founder has read-only access">Read-only view</span>}
@@ -611,12 +700,16 @@ function App() {
           <window.TaskDetail task={selectedTask} deliverables={deliverables} allTasks={tasks} onClose={() => { setRoute('tasks'); setSelected(null); }}
             onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditProgress={editProgress} onDeleteProgress={deleteProgress} onEditTask={editTask} onRevertEdit={revertEdit}
             onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onOpenTask={openTask} onUpdate={() => {}} onDeleteTask={deleteTask} canEdit={canEdit} currentUser={currentUser}
+            weeks={weeks} onAssignWeek={assignWeek}
             onCreateLinked={(t) => setComposer({ linkTo: { taskId: t.id, title: t.title, deliverableId: t.deliverableId } })}
             onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} />
         )}
+        {route === 'week' && (
+          <window.WeeklyWorkspace weeks={weeks} onSaveWeek={saveWeek} onPatchWeek={patchWeek} onDeleteWeek={deleteWeek} tasks={tasks} deliverables={deliverables} canEdit={canEdit} onOpenTask={openTask} />
+        )}
         {route === 'summary' && <window.WeeklySummary tasks={tasks} onOpen={openTask} />}
         {route === 'ask' && <window.AskAI tasks={tasks} initialQuestion={askQ} clearInitial={() => setAskQ(null)} />}
-        {route === 'settings' && <Settings tweaks={tweaks} setTweak={setTweak} onLoadDemo={loadDemo} onClearAll={clearAll} taskCount={tasks.length} />}
+        {route === 'settings' && <Settings tweaks={tweaks} setTweak={setTweak} onLoadDemo={loadDemo} onClearAll={clearAll} onExport={exportWorkspace} onImport={importWorkspace} canEdit={canEdit} taskCount={tasks.length} />}
       </div>
 
       {composer && <window.AIComposer onClose={() => setComposer(false)} onCreate={createTask} onCreateMany={createTasks} linkTo={composer && composer.linkTo} />}
@@ -638,8 +731,9 @@ function App() {
 }
 
 /* ---------------- Settings ---------------- */
-function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, taskCount = 0 }) {
+function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, onExport, onImport, canEdit = true, taskCount = 0 }) {
   const I = window.I;
+  const fileRef = React.useRef(null);
   const Row = ({ k, children }) => (
     <div className="meta-row" style={{ padding: '14px 0' }}><span className="meta-k" style={{ fontSize: 13 }}>{k}</span>{children}</div>
   );
@@ -688,6 +782,15 @@ function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, taskCount = 0 }) {
         <div className="card card-pad">
           <div className="section-eyebrow mb12">Data · {taskCount} task{taskCount === 1 ? '' : 's'}</div>
           <div className="row between center" style={{ paddingBottom: 12, borderBottom: '1px solid var(--border)' }}>
+            <div><div style={{ fontWeight: 600, fontSize: 13.5 }}>Backup workspace</div><div className="muted" style={{ fontSize: 12 }}>Export everything to a JSON file, or restore from one.</div></div>
+            <div className="row gap8">
+              <button className="btn btn-ghost" onClick={onExport}><I.arrowUp size={14} /> Export</button>
+              {canEdit && <button className="btn btn-ghost" onClick={() => fileRef.current && fileRef.current.click()}><I.inbox size={14} /> Import</button>}
+              <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: 'none' }}
+                onChange={e => { const f = e.target.files && e.target.files[0]; if (f) onImport(f); e.target.value = ''; }} />
+            </div>
+          </div>
+          <div className="row between center" style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
             <div><div style={{ fontWeight: 600, fontSize: 13.5 }}>Load demo data</div><div className="muted" style={{ fontSize: 12 }}>Replace current tasks with the sample FM Navigate set.</div></div>
             <button className="btn btn-ghost" onClick={onLoadDemo}><I.refresh size={14} /> Load demo</button>
           </div>
