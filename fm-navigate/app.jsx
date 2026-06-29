@@ -101,22 +101,11 @@ function App() {
     return [];
   });
 
-  // ---- auth (Supabase) — identity drives edit rights ----
-  // undefined = still checking · null = signed out · object = signed in
-  const [authUser, setAuthUser] = useStateA(shared ? undefined : null);
-  const EDITOR_EMAIL = ((window.APP_CONFIG && window.APP_CONFIG.EDITOR_EMAIL) || '').toLowerCase();
-  const EDITOR_UID = ((window.APP_CONFIG && window.APP_CONFIG.EDITOR_UID) || '');
-  const myEmail = ((authUser && authUser.email) || '').toLowerCase();
-  const myUid = (authUser && authUser.id) || '';
-  // Edit rights must use the SAME identity the RLS policy uses (auth.uid() =
-  // EDITOR_UID). When EDITOR_UID is configured we gate on uid, so the client's
-  // "can edit" matches what the database will actually allow — no more
-  // editable UI that silently fails to persist. If EDITOR_UID isn't set yet,
-  // fall back to the email check so we can't accidentally lock the editor out.
-  const isEditor = EDITOR_UID ? (myUid === EDITOR_UID) : (!!myEmail && myEmail === EDITOR_EMAIL);
-  // The editor account = Vihan (PM). Any other signed-in account = read-only Founder view.
-  const currentUser = (!shared || isEditor) ? 'vihan' : 'richard';
-  const canEdit = !shared || isEditor;
+  // ---- auth + permissions (centralised in AuthContext) ----
+  // App is just a consumer now: identity, role, can()/canEdit, currentUser and
+  // signOut all come from one place. The provider owns the Supabase session and
+  // the cached profile (see auth-context.jsx).
+  const { authUser, profile, can, canEdit, currentUser, roleLabel, signOut } = useAuth();
 
   // Apply a loaded/realtime workspace document (v2: { metadata, data }) to state.
   const applyDoc = useCallbackA((doc) => {
@@ -199,23 +188,6 @@ function App() {
     if (!canEdit) return;
     setKpiScores(prev => ({ ...prev, [month]: { ...(prev[month] || {}), [code]: record } }));
   }, [canEdit]);
-
-  // Resolve the current Supabase session, then keep it in sync.
-  useEffectA(() => {
-    if (!shared) return;
-    let alive = true;
-    // Fallback: if the backend is unreachable (e.g. PostgREST/auth 522), getUser()
-    // can hang on retries and leave the gate stuck on "Loading…" forever. Force the
-    // login screen after a few seconds so the app stays usable.
-    const timer = setTimeout(() => {
-      if (alive) setAuthUser(u => (u === undefined ? null : u));
-    }, 8000);
-    ds.getUser().then(u => { if (alive) { clearTimeout(timer); setAuthUser(u || null); } });
-    const off = ds.onAuth(u => { if (alive) { clearTimeout(timer); setAuthUser(u || null); } });
-    return () => { alive = false; clearTimeout(timer); off && off(); };
-  }, []);
-
-  const signOut = useCallbackA(() => { ds.signOut().then(() => setAuthUser(null)); }, []);
 
   // Initial remote load + realtime subscription — runs once signed in
   // (reads require an authenticated session). One document, one subscription.
@@ -606,7 +578,7 @@ function App() {
     );
   }
   if (shared && !authUser) {
-    return <LoginScreen onSignedIn={setAuthUser} />;
+    return <LoginScreen />;
   }
 
   return (
@@ -640,12 +612,12 @@ function App() {
         <div className="team-row" style={{ width: '100%', textAlign: 'left', border: '1px solid var(--accent)', background: 'var(--accent-soft)' }}>
           <window.Avatar user={currentUser} size={30} />
           <div className="grow" style={{ minWidth: 0 }}>
-            <div className="team-name">{window.USERS[currentUser].name}</div>
+            <div className="team-name">{shared ? ((profile && (profile.name || profile.email)) || (authUser && authUser.email) || '…') : window.USERS[currentUser].name}</div>
             <div className="team-role" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {shared && authUser ? authUser.email : window.USERS[currentUser].role}
             </div>
           </div>
-          <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }}>{canEdit ? 'PM' : 'Read-only'}</span>
+          <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }}>{roleLabel}</span>
         </div>
         {shared && authUser && (
           <button className="btn btn-subtle btn-sm" style={{ width: '100%', marginTop: 8 }} onClick={signOut}>
@@ -731,6 +703,84 @@ function App() {
 }
 
 /* ---------------- Settings ---------------- */
+/* ---------------- Users & roles (Settings) ----------------
+   Lists the team from `profiles`. An owner (can('users','write')) can change
+   each person's role and active/disabled status inline; everyone else with
+   read access sees it read-only. Role/status writes are enforced by RLS + the
+   privilege trigger — the UI just mirrors that. Inviting users is not here yet
+   (creating accounts needs the server-side admin API). */
+function UsersManager() {
+  const I = window.I;
+  const ds = window.dataService;
+  const { shared, can, roles, roleLabelOf } = useAuth();
+  const [rows, setRows] = useStateA(null);   // null = loading
+  const [savingId, setSavingId] = useStateA(null);
+  const [err, setErr] = useStateA('');
+
+  // User administration is OWNER-only (can('users','write')). Nobody else — not
+  // even a PM — sees this card; the DB enforces the same via RLS.
+  const canManage = can('users', 'write');
+
+  useEffectA(() => {
+    if (!shared || !canManage) return;
+    let alive = true;
+    ds.listProfiles().then(list => { if (alive) setRows(list); });
+    return () => { alive = false; };
+  }, [shared, canManage]);
+
+  // Local-only mode (no backend) or not an owner → don't render the card.
+  if (!shared || !canManage) return null;
+
+  const patch = (id, field, value) => {
+    const prev = rows;
+    setErr('');
+    setSavingId(id);
+    setRows(rows.map(r => r.id === id ? { ...r, [field]: value } : r)); // optimistic
+    ds.updateProfile(id, { [field]: value }).then(res => {
+      setSavingId(null);
+      if (!res.ok) { setRows(prev); setErr(res.error || 'Update failed.'); }
+    });
+  };
+
+  const initials = (p) => (p.name || p.email || '?').trim().split(/\s+/).slice(0, 2).map(s => s[0]).join('').toUpperCase();
+
+  return (
+    <div className="card card-pad mb16">
+      <div className="row between center mb12">
+        <div className="section-eyebrow" style={{ margin: 0 }}>Users & roles{rows ? ` · ${rows.length}` : ''}</div>
+      </div>
+
+      {rows === null && <div className="muted" style={{ fontSize: 13, padding: '8px 0' }}>Loading team…</div>}
+      {rows && rows.length === 0 && <div className="muted" style={{ fontSize: 13, padding: '8px 0' }}>No profiles yet. Users appear here after they first sign in.</div>}
+
+      {rows && rows.map(p => (
+        <div key={p.id} className="row gap10 center" style={{ padding: '10px 0', borderBottom: '1px solid var(--border)', opacity: p.status === 'disabled' ? 0.55 : 1 }}>
+          <div style={{ width: 32, height: 32, borderRadius: 99, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--accent-soft)', color: 'var(--accent)', fontSize: 12, fontWeight: 700 }}>{initials(p)}</div>
+          <div className="grow" style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: 13.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name || p.email || p.id}</div>
+            <div className="muted" style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.email}</div>
+          </div>
+          <select className="input" style={{ width: 'auto', fontSize: 12.5, padding: '5px 8px' }}
+            value={p.role} disabled={savingId === p.id}
+            onChange={e => patch(p.id, 'role', e.target.value)}>
+            {roles.map(r => <option key={r} value={r}>{roleLabelOf(r)}</option>)}
+          </select>
+          <button className="btn btn-ghost btn-sm" disabled={savingId === p.id}
+            onClick={() => patch(p.id, 'status', p.status === 'disabled' ? 'active' : 'disabled')}
+            title={p.status === 'disabled' ? 'Re-enable this user' : 'Disable this user'}>
+            {p.status === 'disabled' ? <><I.refresh size={13} /> Enable</> : <><I.x size={13} /> Disable</>}
+          </button>
+        </div>
+      ))}
+
+      {err && <div style={{ color: 'var(--st-blocked)', fontSize: 12.5, marginTop: 10 }}>{err}</div>}
+      <div className="muted" style={{ fontSize: 11.5, marginTop: 12, lineHeight: 1.5 }}>
+        To add someone: create their account in Supabase (Authentication → Users); they appear here on first sign-in, then set their role. Role changes take effect after the user re-authenticates.
+      </div>
+    </div>
+  );
+}
+
 function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, onExport, onImport, canEdit = true, taskCount = 0 }) {
   const I = window.I;
   const fileRef = React.useRef(null);
@@ -768,16 +818,7 @@ function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, onExport, onImport
           </Row>
         </div>
 
-        <div className="card card-pad mb16">
-          <div className="section-eyebrow mb12">Team & roles</div>
-          {[['richard','Founder — full visibility, dashboards, Ask AI'],['vihan','Product Manager — create, update & complete tasks'],['isuru','Eng Lead — referenced in dependencies']].map(([id, desc]) => (
-            <div key={id} className="row gap10 center" style={{ padding: '10px 0', borderBottom: '1px solid var(--border)' }}>
-              <window.Avatar user={id} size={32} />
-              <div className="grow"><div style={{ fontWeight: 600, fontSize: 13.5 }}>{window.USERS[id].name}</div><div className="muted" style={{ fontSize: 12 }}>{desc}</div></div>
-              <span className="chip">{window.USERS[id].role}</span>
-            </div>
-          ))}
-        </div>
+        <UsersManager />
 
         <div className="card card-pad">
           <div className="section-eyebrow mb12">Data · {taskCount} task{taskCount === 1 ? '' : 's'}</div>
@@ -808,9 +849,10 @@ function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, onExport, onImport
    Required gate: the whole app is hidden until a user signs in with their
    Supabase account. The editor account unlocks editing; any other account
    gets a read-only view. */
-function LoginScreen({ onSignedIn }) {
+function LoginScreen() {
   const I = window.I;
   const ds = window.dataService;
+  const { setAuthUser } = useAuth();
   const [email, setEmail] = useStateA('');
   const [pw, setPw] = useStateA('');
   const [busy, setBusy] = useStateA(false);
@@ -823,7 +865,7 @@ function LoginScreen({ onSignedIn }) {
     setBusy(true);
     const r = await ds.signIn(email.trim(), pw);
     setBusy(false);
-    if (r.ok) { setPw(''); onSignedIn && onSignedIn(r.user || null); }
+    if (r.ok) { setPw(''); setAuthUser(r.user || null); }
     else setErr(r.error || 'Sign-in failed.');
   };
 

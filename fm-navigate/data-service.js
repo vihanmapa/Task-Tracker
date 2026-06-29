@@ -406,6 +406,122 @@
       return function () { try { res.data.subscription.unsubscribe(); } catch (_) {} };
     },
 
+    /* ---- RBAC: profiles, comments, activity (Supabase + RLS) ----
+       The role on the profile is the editable copy; the JWT `user_role`
+       claim is the runtime source of truth the database enforces. The UI
+       reads the profile for name/avatar AND for the role that drives
+       permissions.js. See supabase/schema.sql + docs/RBAC-SETUP.md. ---- */
+
+    // The signed-in user's own profile { id, email, name, avatar_url, role, status }.
+    // Resolves null when signed out or the row isn't readable yet.
+    getMyProfile: function () {
+      var c = client();
+      if (!c) return Promise.resolve(null);
+      return c.auth.getUser().then(function (u) {
+        var uid = u && u.data && u.data.user && u.data.user.id;
+        if (!uid) return null;
+        return c.from('profiles').select('id,email,name,avatar_url,role,status').eq('id', uid).maybeSingle()
+          .then(function (r) { return r.error ? null : (r.data || null); });
+      }).catch(function () { return null; });
+    },
+
+    // The team directory (everyone signed in can read it).
+    listProfiles: function () {
+      var c = client();
+      if (!c) return Promise.resolve([]);
+      return c.from('profiles').select('id,email,name,avatar_url,role,status').order('created_at', { ascending: true })
+        .then(function (r) { return r.error ? [] : (r.data || []); })
+        .catch(function () { return []; });
+    },
+
+    // Update a profile's role/status (and name/avatar). The DB enforces who
+    // may do this: an owner can change anyone's role/status; the privilege
+    // trigger rejects role/status changes from non-owners. Returns the row
+    // actually written (empty => RLS/trigger blocked it).
+    updateProfile: function (id, patch) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      var allowed = {};
+      ['name', 'avatar_url', 'role', 'status'].forEach(function (k) {
+        if (patch && patch[k] !== undefined) allowed[k] = patch[k];
+      });
+      return c.from('profiles').update(allowed).eq('id', id).select()
+        .then(function (r) {
+          var rows = r.data || [];
+          if (r.error) return { ok: false, error: r.error.message };
+          if (!rows.length) return { ok: false, error: 'Not permitted (only an owner may change role or status).' };
+          return { ok: true, row: rows[0] };
+        })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    // List comments on one entity, oldest first.
+    listComments: function (entityType, entityId) {
+      var c = client();
+      if (!c) return Promise.resolve([]);
+      return c.from('comments').select('*')
+        .eq('entity_type', entityType).eq('entity_id', String(entityId))
+        .order('created_at', { ascending: true })
+        .then(function (r) { return r.error ? [] : (r.data || []); })
+        .catch(function () { return []; });
+    },
+
+    // Add a comment as the current user. RLS rejects pure viewers.
+    addComment: function (entityType, entityId, body) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      return c.auth.getUser().then(function (u) {
+        var uid = u && u.data && u.data.user && u.data.user.id;
+        if (!uid) return { ok: false, error: 'Not signed in.' };
+        return c.from('comments').insert({
+          entity_type: entityType, entity_id: String(entityId), user_id: uid, body: body,
+        }).select().then(function (r) { return { ok: !r.error, error: r.error && r.error.message, row: r.data && r.data[0] }; });
+      }).catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    deleteComment: function (id) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false });
+      return c.from('comments').delete().eq('id', id)
+        .then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    // Subscribe to live comment changes for one entity. cb() fires on any change.
+    subscribeComments: function (entityType, entityId, cb) {
+      var c = client();
+      if (!c) return function () {};
+      var ch = c.channel('comments-' + entityType + '-' + entityId)
+        .on('postgres_changes',
+          { event: '*', schema: 'public', table: 'comments', filter: 'entity_id=eq.' + String(entityId) },
+          function () { cb(); })
+        .subscribe();
+      return function () { try { c.removeChannel(ch); } catch (_) {} };
+    },
+
+    // Append one audit-trail entry (best-effort; never blocks the UI).
+    logActivity: function (action, entityType, entityId, meta) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false });
+      return c.auth.getUser().then(function (u) {
+        var uid = u && u.data && u.data.user && u.data.user.id;
+        if (!uid) return { ok: false };
+        return c.from('activity_log').insert({
+          user_id: uid, action: action, entity_type: entityType || null,
+          entity_id: entityId != null ? String(entityId) : null, meta: meta || null,
+        }).then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; });
+      }).catch(function () { return { ok: false }; });
+    },
+
+    // Recent audit-trail entries (newest first).
+    listActivity: function (limit) {
+      var c = client();
+      if (!c) return Promise.resolve([]);
+      return c.from('activity_log').select('*').order('created_at', { ascending: false }).limit(limit || 100)
+        .then(function (r) { return r.error ? [] : (r.data || []); })
+        .catch(function () { return []; });
+    },
+
     // list the signed-in user's private resources for one parent
     // (a task or a deliverable). parentType: 'task' | 'deliverable'.
     listResources: function (parentType, parentId) {
