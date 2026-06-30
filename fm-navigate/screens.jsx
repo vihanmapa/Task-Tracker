@@ -132,8 +132,11 @@ function renderMd(text) {
 
 function AskAI({ tasks, initialQuestion, clearInitial }) {
   const I = window.I;
+  const { currentUser } = window.useAuth();
+  const me = window.USERS[currentUser];
+  const firstName = ((me && me.name) || '').trim().split(/\s+/)[0] || 'there';
   const [messages, setMessages] = useStateS([
-    { role: 'ai', text: "Hi Richard — I'm your execution assistant. Ask me anything about what's in motion, what's blocked, or what's due. I answer only from your live task data." },
+    { role: 'ai', text: `Hi ${firstName} — I'm your execution assistant. Ask me anything about what's in motion, what's blocked, or what's due. I answer only from your live task data.` },
   ]);
   const [input, setInput] = useStateS('');
   const [busy, setBusy] = useStateS(false);
@@ -171,7 +174,7 @@ function AskAI({ tasks, initialQuestion, clearInitial }) {
             <div key={i} className={`msg ${m.role}`}>
               {m.role === 'ai'
                 ? <span style={{ width: 30, height: 30, borderRadius: 8, background: 'var(--accent)', color: 'var(--accent-fg)', display: 'grid', placeItems: 'center', flexShrink: 0 }}><I.spark size={16} /></span>
-                : <window.Avatar user="richard" size={30} />}
+                : <window.Avatar user={currentUser} size={30} />}
               <div className="msg-bubble">{m.role === 'ai' ? renderMd(m.text) : m.text}</div>
             </div>
           ))}

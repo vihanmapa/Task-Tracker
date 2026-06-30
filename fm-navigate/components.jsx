@@ -55,9 +55,24 @@ function fmtRelTime(iso) {
 }
 
 /* ---------- primitives ---------- */
+// Fallback for a USERS key we don't know about (e.g. another user's profile-id
+// stamped on a realtime entry before their profile is registered locally). We
+// still render a neutral avatar rather than nothing so history never disappears.
+function avatarFallback(key) {
+  const s = String(key || '');
+  const letters = (s.replace(/[^a-zA-Z]/g, '').slice(0, 2) || s.slice(0, 2) || '?');
+  return { name: s || 'Unknown', role: 'Member', color: 'oklch(0.55 0.02 250)', initials: letters.toUpperCase() };
+}
+
 function Avatar({ user, size = 26 }) {
-  const u = typeof user === 'string' ? window.USERS[user] : user;
+  const u = typeof user === 'string' ? (window.USERS[user] || avatarFallback(user)) : user;
   if (!u) return null;
+  if (u.avatar_url) {
+    return (
+      <img className="avatar" src={u.avatar_url} alt={u.name} title={`${u.name} · ${u.role}`}
+        style={{ width: size, height: size, objectFit: 'cover' }} />
+    );
+  }
   return (
     <div className="avatar" title={`${u.name} · ${u.role}`}
       style={{ width: size, height: size, background: u.color, fontSize: size * 0.4 }}>

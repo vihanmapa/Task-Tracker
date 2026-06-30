@@ -19,6 +19,50 @@ const { createContext, useContext } = React;
 
 const AuthContext = createContext(null);
 
+/* ---------- identity helpers (profile → USERS entry) ----------
+   Attribution is keyed off the REAL signed-in person, not their role. We
+   register the profile into window.USERS under a stable key so every place
+   that renders a USERS key (avatars, activity, comments) resolves to the
+   actual user. profile.id is preferred; email is a temporary fallback for a
+   profile that somehow lacks an id. */
+function identityKey(profile) {
+  if (!profile) return null;
+  if (profile.id) return profile.id;
+  if (profile.email) return 'email:' + String(profile.email).toLowerCase();
+  return null;
+}
+
+function identityInitials(name, email) {
+  const src = String(name || email || '').trim();
+  if (!src) return '?';
+  const parts = src.split(/[\s@._-]+/).filter(Boolean);
+  if (parts.length >= 2) return (parts[0][0] + parts[1][0]).toUpperCase();
+  return src.slice(0, 2).toUpperCase();
+}
+
+// Deterministic hue from the key so a user keeps the same avatar colour.
+function identityColor(key) {
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) % 360;
+  return `oklch(0.55 0.15 ${h})`;
+}
+
+// Register (or refresh) the signed-in profile in the shared USERS map. Safe to
+// call repeatedly; it just overwrites the same key with the latest profile.
+function registerIdentity(profile) {
+  const key = identityKey(profile);
+  if (!key) return null;
+  window.USERS[key] = {
+    id: key,
+    name: profile.name || profile.email || 'You',
+    role: (window.RBAC.ROLE_LABELS && window.RBAC.ROLE_LABELS[profile.role]) || 'Member',
+    color: identityColor(key),
+    initials: identityInitials(profile.name, profile.email),
+    avatar_url: profile.avatar_url || null,
+  };
+  return key;
+}
+
 function AuthProvider({ children }) {
   const ds = window.dataService;
   const shared = ds && ds.backend === 'supabase';
@@ -50,6 +94,15 @@ function AuthProvider({ children }) {
     return () => { alive = false; };
   }, [shared, authUser && authUser.id]);
 
+  // Register the signed-in profile in window.USERS so avatars/attribution
+  // resolve to the real person. Done as a side effect (not in render) and
+  // re-run whenever the identity-bearing fields change.
+  useEffect(() => {
+    if (!shared || !profile) return;
+    registerIdentity(profile);
+  }, [shared, profile && profile.id, profile && profile.name,
+      profile && profile.avatar_url, profile && profile.role]);
+
   const signOut = useCallback(() => ds.signOut().then(() => { setAuthUser(null); setProfile(null); }), []);
 
   const value = useMemo(() => {
@@ -61,12 +114,17 @@ function AuthProvider({ children }) {
     // `workspace` resource (owner + product_manager). canEdit stays the single
     // gate the mutation callsites read; finer per-resource rules live in can().
     const canEdit = !shared || can('workspace', 'write');
-    // Attribution shim: activity/comments still store a USERS key. Map role back
-    // to the known accounts until attribution moves to profile ids (Group B).
-    const currentUser = (!shared || role === 'product_manager') ? 'vihan'
+    // Attribution is the REAL signed-in person: a stable profile key registered
+    // in window.USERS (see registerIdentity). The role→person map below is kept
+    // ONLY as a compatibility fallback — for local-only mode and for the brief
+    // window after sign-in before the profile has loaded. Historical activity
+    // records that still carry legacy ids (richard/vihan/isuru) keep resolving
+    // because those entries remain in USERS.
+    const legacyUser = (!shared || role === 'product_manager') ? 'vihan'
       : role === 'owner' ? 'richard'
       : role === 'tech_lead' ? 'isuru'
       : canEdit ? 'vihan' : 'richard';
+    const currentUser = (shared && profile && identityKey(profile)) || legacyUser;
     return {
       shared,
       authUser,
