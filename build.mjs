@@ -120,10 +120,21 @@ async function assertNoDuplicateTopLevel() {
 // Runs before the app: sets the mount base and restores a clean URL after a
 // 404.html redirect (see fourOhFourHtml). Kept inline + tiny so it executes
 // before anything paints.
+//
+// The document.write(<base>) MUST happen before history.replaceState: every
+// tag after this script (styles.css, app.bundle.js) has a relative href/src,
+// which the browser resolves against the CURRENT document URL at parse time.
+// Once replaceState rewrites that URL to a deep link like "/tasks/T-123",
+// resolution drops the wrong number of path segments for any route with more
+// than one segment ("/tasks/T-123" -> "tasks/app.bundle.js", 404) — single-
+// segment routes ("/dashboard") happened to survive by coincidence, masking
+// this for a long time. A <base> tag fixes resolution regardless of what the
+// URL bar says afterward.
 const ROUTER_BOOTSTRAP = `  <script>
     // Mount base: "/<repo>/" on GitHub Pages project sites, "/" otherwise.
     window.__BASE__ = location.hostname.endsWith('github.io')
       ? '/' + location.pathname.split('/')[1] + '/' : '/';
+    document.write('<base href="' + window.__BASE__ + '">');
     // 404.html redirects deep links to "<base>?/path"; turn that back into a
     // clean URL before the app boots so routing sees the real path.
     (function (l) {
