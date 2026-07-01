@@ -49,6 +49,7 @@ const I = {
   flag:     (p) => <Ico {...p}><path d="M5 21V4M5 4h11l-2 4 2 4H5"/></Ico>,
   trend:    (p) => <Ico {...p}><path d="M3 17l6-6 4 4 7-7M21 8v4h-4"/></Ico>,
   inbox:    (p) => <Ico {...p}><path d="M4 13l2-8h12l2 8M4 13v6h16v-6M4 13h5l1 2h4l1-2h5"/></Ico>,
+  menu:     (p) => <Ico {...p} d="M4 6h16M4 12h16M4 18h16"/>,
 };
 
 window.I = I;

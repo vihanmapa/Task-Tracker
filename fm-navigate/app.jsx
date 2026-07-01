@@ -235,6 +235,42 @@ function App() {
   const [dlvSelected, setDlvSelected] = useStateA(() => pathToState().dlvSelected);
   const [composer, setComposer] = useStateA(false);
   const [askQ, setAskQ] = useStateA(null);
+  const [mobileNavOpen, setMobileNavOpen] = useStateA(false);
+  const sidebarRef = useRefA(null);
+  const hamburgerRef = useRefA(null);
+
+  // ---- mobile nav drawer: close on Escape, trap Tab focus inside while open ----
+  useEffectA(() => {
+    if (!mobileNavOpen) return;
+    const onKey = (e) => {
+      if (e.key === 'Escape') { setMobileNavOpen(false); return; }
+      if (e.key !== 'Tab' || !sidebarRef.current) return;
+      const focusables = sidebarRef.current.querySelectorAll('button, a, input, [tabindex]:not([tabindex="-1"])');
+      if (!focusables.length) return;
+      const first = focusables[0], last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mobileNavOpen]);
+  // Move focus into the drawer on open, back to the hamburger on close.
+  // Skips the initial mount so the hamburger doesn't steal focus on page load.
+  const navSkipFocusRef = useRefA(true);
+  useEffectA(() => {
+    if (navSkipFocusRef.current) { navSkipFocusRef.current = false; return; }
+    if (mobileNavOpen) {
+      const closeBtn = sidebarRef.current && sidebarRef.current.querySelector('.sidebar-close');
+      if (closeBtn) closeBtn.focus();
+    } else if (hamburgerRef.current) {
+      hamburgerRef.current.focus();
+    }
+  }, [mobileNavOpen]);
+  useEffectA(() => { setMobileNavOpen(false); }, [route]);
+  useEffectA(() => {
+    document.body.style.overflow = mobileNavOpen ? 'hidden' : '';
+    return () => { document.body.style.overflow = ''; };
+  }, [mobileNavOpen]);
 
   // ---- url <-> state sync ----
   // React to browser back/forward (popstate fires on history navigation).
@@ -552,6 +588,46 @@ function App() {
   // are part of the same unified document, so a "blank slate" must clear them.
   const clearAll = () => { if (!canEdit) return; if (confirm('Clear the ENTIRE workspace — tasks, deliverables, weekly plans and KPI scores — and start from a blank slate? This cannot be undone.')) { setTasks([]); setDeliverables([]); setWeeks([]); setKpiScores({}); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
 
+  // ---- one-time attachment migration (base64 -> Storage) ----
+  // Progress-log evidence used to be inline base64 in the workspace document,
+  // ballooning it to ~11MB and causing save timeouts — see
+  // [[fm-navigate-save-timeout-2026-07-01]]. This walks every legacy `data:`
+  // file, uploads it, and rewrites the record to a Storage `path`. The final
+  // setTasks feeds the normal debounced/retried save effect above — no
+  // separate save call needed. Idempotent: count is 0 and the button hides
+  // itself once nothing legacy remains.
+  const legacyAttachmentCount = useMemoA(() => tasks.reduce((n, t) =>
+    n + (t.progressLog || []).reduce((n2, pl) => n2 + (pl.files || []).filter(f => f.data).length, 0), 0), [tasks]);
+  const [migrateStatus, setMigrateStatus] = useStateA(null); // { running, total, completed, freedBytes } | null
+  const migrateAttachments = useCallbackA(async () => {
+    if (!canEdit || migrateStatus?.running) return;
+    const jobs = [];
+    tasks.forEach(t => (t.progressLog || []).forEach(pl => (pl.files || []).forEach((f, i) => {
+      if (f.data) jobs.push({ taskId: t.id, entryId: pl.id, index: i, file: f });
+    })));
+    if (!jobs.length) return;
+    setMigrateStatus({ running: true, total: jobs.length, completed: 0, freedBytes: 0 });
+    const newPathByFile = new Map();
+    let freedBytes = 0;
+    for (const job of jobs) {
+      try {
+        const blob = await (await fetch(job.file.data)).blob();
+        freedBytes += blob.size;
+        const r = await ds.uploadAttachment(blob, { taskId: job.taskId, entryId: job.entryId, index: job.index, name: job.file.name });
+        if (r.ok) newPathByFile.set(job.file, r.path);
+      } catch (_) { /* leave this one as-is; safe to re-run */ }
+      setMigrateStatus(s => ({ ...s, completed: s.completed + 1 }));
+    }
+    setTasks(ts => ts.map(t => ({
+      ...t,
+      progressLog: (t.progressLog || []).map(pl => ({
+        ...pl,
+        files: (pl.files || []).map(f => newPathByFile.has(f) ? { name: f.name, type: f.type, path: newPathByFile.get(f) } : f),
+      })),
+    })));
+    setMigrateStatus({ running: false, total: jobs.length, completed: jobs.length, freedBytes });
+  }, [canEdit, tasks, migrateStatus]);
+
   // ---- backup: export / import the whole workspace document ----
   const exportWorkspace = () => {
     const json = ds.exportWorkspace();
@@ -603,14 +679,21 @@ function App() {
 
   return (
     <div className="app">
+      {/* ---- mobile drawer backdrop ---- */}
+      <div className={`sidebar-backdrop ${mobileNavOpen ? 'show' : ''}`} onClick={() => setMobileNavOpen(false)} aria-hidden="true" />
+
       {/* ---- sidebar ---- */}
-      <aside className="sidebar">
+      <aside id="mobile-sidebar" ref={sidebarRef} className={`sidebar ${mobileNavOpen ? 'open' : ''}`} aria-hidden={!mobileNavOpen && window.innerWidth <= 760}>
         <div className="brand">
           <div className="brand-mark"><I.target size={18} /></div>
           <div>
             <div className="brand-name">FM Navigate</div>
             <div className="brand-sub">EXECUTION HUB</div>
           </div>
+          <span className="grow" />
+          <button className="icon-btn sidebar-close" onClick={() => setMobileNavOpen(false)} title="Close menu" aria-label="Close navigation">
+            <I.x size={18} />
+          </button>
         </div>
 
         {NAV.map(n => {
@@ -625,6 +708,16 @@ function App() {
             </button>
           );
         })}
+
+        <div className="sidebar-mobile-actions">
+          {canEdit
+            ? <button className="btn btn-primary btn-sm" onClick={() => { setComposer(true); setMobileNavOpen(false); }}><I.spark size={14} /> New task</button>
+            : <span className="chip" title="Founder has read-only access">Read-only view</span>}
+          <button className="icon-btn" onClick={() => setTweak('dark', !tweaks.dark)} title="Toggle theme">
+            {tweaks.dark ? <I.sun size={18} /> : <I.moon size={18} />} <span>Theme</span>
+          </button>
+          <button className="icon-btn" title="Notifications"><I.bell size={18} /> <span>Notifications</span></button>
+        </div>
 
         <div className="sidebar-spacer" />
 
@@ -649,17 +742,23 @@ function App() {
       {/* ---- main ---- */}
       <div className="main">
         <header className="topbar">
+          <button ref={hamburgerRef} className="icon-btn hamburger-btn" onClick={() => setMobileNavOpen(true)} title="Open menu"
+                  aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="mobile-sidebar">
+            <I.menu size={20} />
+          </button>
           <span className="topbar-title">{titleMap[route]}</span>
           {route === 'detail' && <span className="topbar-crumb">· {selectedTask?.id}</span>}
           <span className="grow" />
-          {shared && canEdit && <window.SaveIndicator status={saveStatus} />}
-          {canEdit
-            ? <button className="btn btn-primary btn-sm" onClick={() => setComposer(true)}><I.spark size={14} /> New task</button>
-            : <span className="chip" title="Founder has read-only access">Read-only view</span>}
-          <button className="icon-btn" onClick={() => setTweak('dark', !tweaks.dark)} title="Toggle theme">
-            {tweaks.dark ? <I.sun size={18} /> : <I.moon size={18} />}
-          </button>
-          <button className="icon-btn" title="Notifications"><I.bell size={18} /></button>
+          <span className="topbar-actions">
+            {shared && canEdit && <window.SaveIndicator status={saveStatus} />}
+            {canEdit
+              ? <button className="btn btn-primary btn-sm" onClick={() => setComposer(true)}><I.spark size={14} /> New task</button>
+              : <span className="chip" title="Founder has read-only access">Read-only view</span>}
+            <button className="icon-btn" onClick={() => setTweak('dark', !tweaks.dark)} title="Toggle theme">
+              {tweaks.dark ? <I.sun size={18} /> : <I.moon size={18} />}
+            </button>
+            <button className="icon-btn" title="Notifications"><I.bell size={18} /></button>
+          </span>
           <window.Avatar user={currentUser} size={32} />
         </header>
 
@@ -701,7 +800,8 @@ function App() {
         )}
         {route === 'summary' && <window.WeeklySummary tasks={tasks} onOpen={openTask} />}
         {route === 'ask' && <window.AskAI tasks={tasks} initialQuestion={askQ} clearInitial={() => setAskQ(null)} />}
-        {route === 'settings' && <Settings tweaks={tweaks} setTweak={setTweak} onLoadDemo={loadDemo} onClearAll={clearAll} onExport={exportWorkspace} onImport={importWorkspace} canEdit={canEdit} taskCount={tasks.length} />}
+        {route === 'settings' && <Settings tweaks={tweaks} setTweak={setTweak} onLoadDemo={loadDemo} onClearAll={clearAll} onExport={exportWorkspace} onImport={importWorkspace} canEdit={canEdit} taskCount={tasks.length}
+          legacyAttachmentCount={legacyAttachmentCount} migrateStatus={migrateStatus} onMigrateAttachments={migrateAttachments} />}
       </div>
 
       {composer && <window.AIComposer onClose={() => setComposer(false)} onCreate={createTask} onCreateMany={createTasks} linkTo={composer && composer.linkTo} />}
@@ -801,7 +901,7 @@ function UsersManager() {
   );
 }
 
-function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, onExport, onImport, canEdit = true, taskCount = 0 }) {
+function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, onExport, onImport, canEdit = true, taskCount = 0, legacyAttachmentCount = 0, migrateStatus, onMigrateAttachments }) {
   const I = window.I;
   const fileRef = React.useRef(null);
   const Row = ({ k, children }) => (
@@ -860,6 +960,28 @@ function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, onExport, onImport
             <button className="btn btn-ghost" onClick={onClearAll} style={{ color: 'var(--st-blocked)', borderColor: 'var(--st-blocked)' }}><I.x size={14} /> Clear all</button>
           </div>
         </div>
+
+        {canEdit && legacyAttachmentCount > 0 && (
+          <div className="card card-pad mt16">
+            <div className="section-eyebrow mb12">Maintenance</div>
+            <div className="row between center">
+              <div>
+                <div style={{ fontWeight: 600, fontSize: 13.5 }}>Migrate attachments to Storage</div>
+                <div className="muted" style={{ fontSize: 12 }}>
+                  {legacyAttachmentCount} progress-log file{legacyAttachmentCount === 1 ? '' : 's'} still stored inline — this bloats every save and can cause timeouts. Moves them to Supabase Storage; one-time, safe to re-run.
+                </div>
+              </div>
+              <button className="btn btn-ghost" onClick={onMigrateAttachments} disabled={migrateStatus?.running}>
+                <I.refresh size={14} /> {migrateStatus?.running ? `Migrating ${migrateStatus.completed} of ${migrateStatus.total}…` : 'Migrate now'}
+              </button>
+            </div>
+            {migrateStatus && !migrateStatus.running && migrateStatus.total > 0 && (
+              <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+                Done — moved {migrateStatus.total} file{migrateStatus.total === 1 ? '' : 's'}, freed ~{(migrateStatus.freedBytes / 1024 / 1024).toFixed(1)}MB from the workspace document.
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
