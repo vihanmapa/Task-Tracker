@@ -18,3 +18,4 @@ package-lock.json
 
 # Build output (produced by GitHub Action, deployed to Pages)
 dist/
+supabase/backups/

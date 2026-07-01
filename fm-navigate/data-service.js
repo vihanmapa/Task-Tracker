@@ -618,6 +618,34 @@
         .then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; })
         .catch(function (e) { return { ok: false, error: String(e) }; });
     },
+
+    // ---- progress-log attachments (Supabase Storage) --------------------
+    // Attachments used to live as base64 inline in workspace.tasks, ballooning
+    // that single jsonb row to ~11MB and causing statement_timeout (57014) on
+    // every save — see [[fm-navigate-save-timeout-2026-07-01]]. Now only a
+    // storage `path` is stored on the task record; `file` is a browser
+    // File/Blob (or a Blob decoded from a legacy base64 entry during the
+    // one-time migration).
+    uploadAttachment: function (file, opts) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      var safeName = String((opts && opts.name) || (file && file.name) || 'file').replace(/[^a-zA-Z0-9._-]/g, '_');
+      var idx = (opts && opts.index != null) ? opts.index : 0;
+      var path = [opts.taskId, opts.entryId, idx + '-' + safeName].join('/');
+      return c.storage.from('task-attachments').upload(path, file, { upsert: true })
+        .then(function (r) { return { ok: !r.error, path: path, error: r.error && r.error.message }; })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    // Signed URLs expire (1hr) — always resolve fresh at render time, never
+    // persist the URL itself, only the `path`.
+    getAttachmentUrl: function (path) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      return c.storage.from('task-attachments').createSignedUrl(path, 3600)
+        .then(function (r) { return { ok: !r.error, url: r.data && r.data.signedUrl, error: r.error && r.error.message }; })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
   };
 
   window.dataService = dataService;

@@ -212,6 +212,38 @@ create policy "workspace write (role)"
   with check (public.jwt_role() in ('owner', 'product_manager'));
 
 -- ============================================================
+-- 3b. Storage — task-attachments (progress-log evidence: images/files)
+-- Private bucket (not public); mirrors the workspace read/write split above so
+-- attachments follow the same auth model instead of a lower bar. Previously
+-- these were base64 inline in workspace.tasks, ballooning that single jsonb
+-- row to ~11MB and causing statement_timeout (57014) on every save — see
+-- [[fm-navigate-save-timeout-2026-07-01]].
+-- ============================================================
+insert into storage.buckets (id, name, public)
+values ('task-attachments', 'task-attachments', false)
+on conflict (id) do nothing;
+
+drop policy if exists "task-attachments read (authenticated)" on storage.objects;
+create policy "task-attachments read (authenticated)"
+  on storage.objects for select to authenticated
+  using (bucket_id = 'task-attachments');
+
+drop policy if exists "task-attachments write (role)" on storage.objects;
+create policy "task-attachments write (role)"
+  on storage.objects for insert to authenticated
+  with check (bucket_id = 'task-attachments' and public.jwt_role() in ('owner', 'product_manager'));
+
+drop policy if exists "task-attachments update (role)" on storage.objects;
+create policy "task-attachments update (role)"
+  on storage.objects for update to authenticated
+  using (bucket_id = 'task-attachments' and public.jwt_role() in ('owner', 'product_manager'));
+
+drop policy if exists "task-attachments delete (role)" on storage.objects;
+create policy "task-attachments delete (role)"
+  on storage.objects for delete to authenticated
+  using (bucket_id = 'task-attachments' and public.jwt_role() in ('owner', 'product_manager'));
+
+-- ============================================================
 -- 4. Comments  (generic — attach to any entity)
 -- ============================================================
 create table if not exists public.comments (

@@ -609,8 +609,53 @@ function KanbanView({ tasks, onOpen, onMove, canEdit = true }) {
 }
 
 /* ---------------- Progress log ----------------
-   Log a % complete + a note + evidence (a link or an attached document). */
-const MAX_FILE_BYTES = 1.5 * 1024 * 1024; // 1.5MB — kept small for localStorage
+   Log a % complete + a note + evidence (a link or an attached document).
+   Attachments live in Supabase Storage (see [[fm-navigate-save-timeout-2026-07-01]]
+   — inline base64 previously ballooned the workspace document to ~11MB and
+   caused save timeouts). A file object is { name, type, path } once uploaded;
+   `path` resolves to a fresh signed URL (1hr) at render time via useSignedUrl —
+   never persist the URL itself, only the path. `data` (base64) is kept as a
+   read fallback only, for any legacy entries not yet run through the one-time
+   migration. */
+const MAX_FILE_BYTES = 1.5 * 1024 * 1024; // 1.5MB — per-file cap before upload
+const _signedUrlCache = {}; // path -> { url, expiresAt }
+
+function useSignedUrl(path) {
+  const [url, setUrl] = useStateT(() => {
+    const c = path && _signedUrlCache[path];
+    return (c && c.expiresAt > Date.now()) ? c.url : null;
+  });
+  useEffectT(() => {
+    if (!path) { setUrl(null); return; }
+    const cached = _signedUrlCache[path];
+    if (cached && cached.expiresAt > Date.now()) { setUrl(cached.url); return; }
+    let cancelled = false;
+    window.dataService.getAttachmentUrl(path).then(r => {
+      if (cancelled || !r.ok) return;
+      _signedUrlCache[path] = { url: r.url, expiresAt: Date.now() + 55 * 60 * 1000 };
+      setUrl(r.url);
+    });
+    return () => { cancelled = true; };
+  }, [path]);
+  return url;
+}
+
+// Resolves data (legacy inline base64) || a freshly-signed Storage URL. `size`
+// renders an image thumbnail; omit it to render a download/file chip instead.
+function AttachmentView({ f, size, onOpen }) {
+  const I = window.I;
+  const url = useSignedUrl(f.path);
+  const src = f.data || url;
+  const isImg = (f.type || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.name || '');
+  if (isImg) {
+    if (!src) return <div style={{ width: size, height: size, borderRadius: 'var(--r-sm)', border: '1px solid var(--border)', background: 'var(--bg-sunken)' }} />;
+    return <img src={src} alt={f.name} onClick={onOpen ? () => onOpen(src) : undefined}
+      style={{ width: size, height: size, objectFit: 'cover', borderRadius: 'var(--r-sm)', border: '1px solid var(--border)', cursor: onOpen ? 'zoom-in' : 'default' }} />;
+  }
+  return src
+    ? <a className="chip" href={src} download={f.name} target="_blank" rel="noopener noreferrer"><I.edit size={11} /> {f.name}</a>
+    : <span className="chip"><I.edit size={11} /> {f.name}</span>;
+}
 
 function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, currentUser }) {
   const I = window.I;
@@ -651,16 +696,32 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
   const addLink = () => setLinks(ls => [...ls, '']);
   const rmLink = (i) => setLinks(ls => ls.length === 1 ? [''] : ls.filter((_, j) => j !== i));
 
+  // Uploads straight to Storage (no base64) — a placeholder shows immediately
+  // via a local blob: URL while the upload is in flight, then swaps to the
+  // real `path` once it settles. See useSignedUrl/AttachmentView above.
   const addFiles = (fileList) => {
-    [...fileList].forEach(f => {
+    [...fileList].forEach((f, i) => {
       if (f.size > MAX_FILE_BYTES) { setErr(`"${f.name}" is too large (max ${(MAX_FILE_BYTES / 1024 / 1024).toFixed(1)}MB). Use a link instead.`); return; }
-      const reader = new FileReader();
-      reader.onload = () => setFiles(fs => [...fs, { name: f.name || 'pasted-image.png', data: reader.result, type: f.type || '' }]);
-      reader.readAsDataURL(f);
+      const name = f.name || 'pasted-image.png';
+      const placeholder = { name, type: f.type || '', data: URL.createObjectURL(f), uploading: true };
+      setFiles(fs => [...fs, placeholder]);
+      const key = 'u' + Date.now() + Math.random().toString(36).slice(2, 7) + i;
+      window.dataService.uploadAttachment(f, { taskId: task.id, entryId: key, index: i, name })
+        .then(r => {
+          try { URL.revokeObjectURL(placeholder.data); } catch (_) {}
+          if (!r.ok) setErr(`"${name}" failed to upload${r.error ? ': ' + r.error : ''}.`);
+          setFiles(fs => fs.map(x => x !== placeholder ? x
+            : r.ok ? { name, type: f.type || '', path: r.path }
+                   : { name, type: f.type || '', error: r.error || 'Upload failed' }));
+        });
     });
     setErr('');
   };
-  const rmFile = (i) => setFiles(fs => fs.filter((_, j) => j !== i));
+  const rmFile = (i) => setFiles(fs => {
+    const f = fs[i];
+    if (f && f.uploading) { try { URL.revokeObjectURL(f.data); } catch (_) {} }
+    return fs.filter((_, j) => j !== i);
+  });
   // Cmd/Ctrl+V a screenshot anywhere in the form → attach it
   const onPaste = (e) => {
     const imgs = [...(e.clipboardData?.items || [])].filter(it => it.type.startsWith('image/')).map(it => it.getAsFile()).filter(Boolean);
@@ -677,12 +738,18 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
     else if (pct >= 100) setPct(95); // reopening from completed
   };
 
+  const anyUploading = files.some(f => f.uploading);
+
   const submit = () => {
+    if (anyUploading) { setErr('Still uploading — wait a moment and try again.'); return; }
     const cleanLinks = links.map(l => l.trim()).filter(Boolean);
-    if (!note.trim() && !cleanLinks.length && !files.length) { setErr('Add a note, a link, or evidence before saving.'); return; }
+    // only persist path-backed (or, for legacy entries being re-saved unchanged, data-backed) files —
+    // never a transient blob: preview URL
+    const cleanFiles = files.filter(f => f.path || f.data).map(f => f.path ? { name: f.name, type: f.type, path: f.path } : f);
+    if (!note.trim() && !cleanLinks.length && !cleanFiles.length) { setErr('Add a note, a link, or evidence before saving.'); return; }
     // back-dated entries land at local noon; today keeps the precise current time
     const at = (date && date < today) ? new Date(date + 'T12:00:00').toISOString() : new Date().toISOString();
-    const payload = { status, percent: effPct, note: note.trim(), links: cleanLinks, files, at };
+    const payload = { status, percent: effPct, note: note.trim(), links: cleanLinks, files: cleanFiles, at };
     if (editingId) onEdit(task.id, editingId, payload);
     else onLog(task.id, payload);
     setNote(''); setLinks(['']); setFiles([]); setErr(''); setOpen(false); setEditingId(null);
@@ -741,11 +808,12 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
             <div className="row gap8 mt8" style={{ flexWrap: 'wrap' }}>
               {files.map((f, i) => (
                 isImg(f)
-                  ? <div key={i} style={{ position: 'relative' }}>
-                      <img src={f.data} alt={f.name} onClick={() => setPreview({ src: f.data, name: f.name })} style={{ width: 60, height: 60, objectFit: 'cover', borderRadius: 'var(--r-sm)', border: '1px solid var(--border)', cursor: 'zoom-in' }} />
+                  ? <div key={i} style={{ position: 'relative', opacity: f.uploading ? 0.5 : 1 }}>
+                      <AttachmentView f={f} size={60} onOpen={src => setPreview({ src, name: f.name })} />
                       <button className="icon-btn" onClick={() => rmFile(i)} style={{ position: 'absolute', top: -7, right: -7, width: 20, height: 20, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 99 }}><I.x size={12} /></button>
+                      {f.uploading && <span className="faint" style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 9 }}>Uploading…</span>}
                     </div>
-                  : <span key={i} className="chip"><I.edit size={11} /> {f.name} <button className="icon-btn" style={{ width: 18, height: 18 }} onClick={() => rmFile(i)}><I.x size={12} /></button></span>
+                  : <span key={i} className="chip" style={{ opacity: f.uploading ? 0.5 : 1 }}><I.edit size={11} /> {f.name}{f.uploading ? ' · uploading…' : f.error ? ' · failed' : ''} <button className="icon-btn" style={{ width: 18, height: 18 }} onClick={() => rmFile(i)}><I.x size={12} /></button></span>
               ))}
             </div>
           )}
@@ -755,7 +823,7 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
               <input ref={fileRef} type="file" multiple accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.txt,.csv" style={{ display: 'none' }} onChange={e => { addFiles(e.target.files); if (fileRef.current) fileRef.current.value = ''; }} />
               <span className="faint" style={{ fontSize: 11 }}>or paste a screenshot (⌘V)</span>
             </div>
-            <button className="btn btn-primary btn-sm" onClick={submit}><I.check size={13} /> {editingId ? 'Save changes' : 'Save update'}</button>
+            <button className="btn btn-primary btn-sm" onClick={submit} disabled={anyUploading} title={anyUploading ? 'Waiting for uploads to finish' : undefined}><I.check size={13} /> {anyUploading ? 'Uploading…' : (editingId ? 'Save changes' : 'Save update')}</button>
           </div>
           {err && <div style={{ color: 'var(--st-blocked)', fontSize: 12, marginTop: 8 }}>{err}</div>}
         </div>
@@ -791,15 +859,10 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
                       return (
                         <div className="row gap8 center mt4" style={{ flexWrap: 'wrap' }}>
                           {ls.map((l, i) => <a key={'l' + i} className="chip" href={l} target="_blank" rel="noopener noreferrer"><I.link size={11} /> {host(l)}</a>)}
-                          {fs.map((f, i) => (
-                            isImg(f) && f.data
-                              ? <button key={'f' + i} type="button" onClick={() => setPreview({ src: f.data, name: f.name })} title={f.name} style={{ padding: 0, border: 'none', background: 'none', cursor: 'zoom-in' }}>
-                                  <img src={f.data} alt={f.name} style={{ width: 52, height: 52, objectFit: 'cover', borderRadius: 'var(--r-sm)', border: '1px solid var(--border)', display: 'block' }} />
-                                </button>
-                              : (f.data
-                                ? <a key={'f' + i} className="chip" href={f.data} download={f.name} target="_blank" rel="noopener noreferrer"><I.edit size={11} /> {f.name}</a>
-                                : <span key={'f' + i} className="chip"><I.edit size={11} /> {f.name}</span>)
-                          ))}
+                          {fs.map((f, i) => isImg(f)
+                            ? <div key={'f' + i} style={{ display: 'inline-block' }}><AttachmentView f={f} size={52} onOpen={src => setPreview({ src, name: f.name })} /></div>
+                            : <AttachmentView key={'f' + i} f={f} />
+                          )}
                         </div>
                       );
                     })()}
