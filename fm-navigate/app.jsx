@@ -120,6 +120,29 @@ function App() {
   // Persist the WHOLE workspace as one versioned document. Every feature is a
   // key under `data`, so there is one save path, one row, no per-collection
   // seeding. Mirrors locally always; pushes to Supabase only for the editor.
+  //
+  // Saves are debounced and single-flighted: rapid edits (typing, drag-reorder)
+  // collapse into one save, and a save already in flight is never joined by a
+  // second one — if state changes again mid-save, the latest snapshot is sent
+  // right after the current save settles (see runSaveRef below).
+  const latestDocRef = useRefA(null);
+  const savingRef = useRefA(false);
+  const resaveNeededRef = useRefA(false);
+  const debounceRef = useRefA(null);
+  const runSaveRef = useRefA(null);
+  runSaveRef.current = () => {
+    if (savingRef.current) { resaveNeededRef.current = true; return; }
+    savingRef.current = true;
+    setSaveStatus({ state: 'saving' });
+    ds.saveWorkspace(latestDocRef.current, attempt => setSaveStatus({ state: 'saving', retry: attempt }))
+      .then(r => {
+        savingRef.current = false;
+        if (r.ok) { setSaveStatus({ state: 'saved', at: Date.now() }); }
+        else { console.warn('[app] workspace save failed', r.reason, r.error); setSaveStatus({ state: 'error', reason: r.reason, error: r.error }); }
+        if (resaveNeededRef.current) { resaveNeededRef.current = false; runSaveRef.current(); }
+      });
+  };
+
   useEffectA(() => {
     try {
       localStorage.setItem('fm_tasks', JSON.stringify(tasks));
@@ -129,12 +152,9 @@ function App() {
     } catch (_) {}
     if (skipSaveRef.current) { skipSaveRef.current = false; return; }
     if (shared && canEdit) {
-      setSaveStatus({ state: 'saving' });
-      ds.saveWorkspace({ metadata: metaRef.current, data: { tasks, deliverables, weeks, kpiScores } })
-        .then(r => {
-          if (r.ok) { setSaveStatus({ state: 'saved', at: Date.now() }); }
-          else { console.warn('[app] workspace save failed', r.reason, r.error); setSaveStatus({ state: 'error', reason: r.reason, error: r.error }); }
-        });
+      latestDocRef.current = { metadata: metaRef.current, data: { tasks, deliverables, weeks, kpiScores } };
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+      debounceRef.current = setTimeout(() => runSaveRef.current(), 400);
     }
   }, [tasks, deliverables, weeks, kpiScores]);
 

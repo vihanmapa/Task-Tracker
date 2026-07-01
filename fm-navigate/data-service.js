@@ -25,6 +25,7 @@
   var CLIENT_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
   var _client = null;
   var _lastUpdatedAt = null;
+  function delay(ms) { return new Promise(function (res) { setTimeout(res, ms); }); }
 
   /* The whole workspace is ONE versioned, extensible document stored in the
      'main' row's jsonb column:
@@ -212,7 +213,12 @@
     },
 
     // Accepts { version, metadata, data }. Stamps version + updatedAt.
-    saveWorkspace: function (doc) {
+    // Retries transient failures (statement timeout, connection drop) with
+    // backoff, since those are exactly the kind of error that often succeeds
+    // a moment later — see [[fm-navigate-save-timeout-2026-07-01]].
+    // onRetry(attemptNumber), if given, fires right before each retry so the
+    // caller can show "Retrying… (attempt N)" instead of a silent re-send.
+    saveWorkspace: function (doc, onRetry) {
       var now = new Date().toISOString();
       var out = {
         version: SCHEMA_VERSION,
@@ -220,51 +226,95 @@
         data: ensureData(doc.data),
       };
       try { localStorage.setItem('fm_workspace', JSON.stringify(out)); } catch (_) {}
-      // Result shape (every branch): { ok, persisted, rowsAffected, reason, at, error }
-      // - ok stays for callers that only need a boolean
-      // - reason is a stable machine code for debugging/telemetry
       if (BACKEND !== 'supabase') {
         return Promise.resolve({ ok: true, persisted: false, rowsAffected: 0, reason: 'LOCAL_ONLY', at: now });
       }
       var c = client();
       if (!c) return Promise.resolve({ ok: false, persisted: false, rowsAffected: 0, reason: 'NO_CLIENT', error: 'no client' });
-      // .select() is REQUIRED for honest success reporting: a bare update
-      // returns error:null even when ZERO rows matched (e.g. RLS silently
-      // filtered the row because auth.uid() != EDITOR_UID). With .select()
-      // PostgREST returns the rows actually written — an empty array means
-      // nothing persisted, which we surface as a failure instead of a
-      // false-positive ok:true.
-      return c.from('workspace')
-        .update({ tasks: out, updated_at: now, updated_by: CLIENT_ID })
-        .eq('id', 'main')
-        .select('id')
-        .then(function (r) {
-          if (r.error) return { ok: false, persisted: false, rowsAffected: 0, reason: 'UPDATE_ERROR', error: r.error.message };
-          var rows = r.data || [];
-          if (rows.length) {
-            _lastUpdatedAt = now;
-            return { ok: true, persisted: true, rowsAffected: rows.length, reason: 'OK', at: now };
-          }
-          // Zero rows written. Distinguish the two causes with a follow-up read
-          // (read policy is `using(true)`, so an existing row IS visible): if the
-          // 'main' row exists, the update was RLS-blocked (uid != EDITOR_UID);
-          // if it doesn't exist, the row is missing (needs seeding).
-          return c.from('workspace').select('id').eq('id', 'main').maybeSingle()
-            .then(function (chk) {
-              var exists = !chk.error && chk.data;
+
+      var RETRY_DELAYS = [1000, 3000]; // ms; one attempt + up to two retries
+      var startedAt = Date.now();
+      // Short per-call id so retries of the SAME save (and their eventual
+      // Postgres-log counterpart, correlated by timestamp) group together in
+      // the console instead of reading as unrelated one-off lines.
+      var reqId = Date.now().toString(36).slice(-6) + Math.random().toString(36).slice(2, 5);
+
+      function attempt(retryCount) {
+        // .select() is REQUIRED for honest success reporting: a bare update
+        // returns error:null even when ZERO rows matched (e.g. RLS silently
+        // filtered the row because auth.uid() != EDITOR_UID). With .select()
+        // PostgREST returns the rows actually written — an empty array means
+        // nothing persisted, which we surface as a failure instead of a
+        // false-positive ok:true.
+        return c.from('workspace')
+          .update({ tasks: out, updated_at: now, updated_by: CLIENT_ID })
+          .eq('id', 'main')
+          .select('id')
+          .then(function (r) {
+            if (r.error) {
+              // Postgres error code 57014 = statement_timeout. Connection-level
+              // failures (network drop, pooler reset) carry no .code. Both are
+              // transient infra symptoms worth retrying; anything else (bad
+              // request, permission denied by grant, etc.) is not.
+              var code = r.error.code;
+              var transient = code === '57014' || !code;
+              if (transient && retryCount < RETRY_DELAYS.length) {
+                if (onRetry) onRetry(retryCount + 1);
+                console.info('[dataService] saveWorkspace retry', { reqId: reqId, attempt: retryCount + 1, code: code, httpStatus: r.status });
+                return delay(RETRY_DELAYS[retryCount]).then(function () { return attempt(retryCount + 1); });
+              }
               return {
                 ok: false, persisted: false, rowsAffected: 0,
-                reason: exists ? 'RLS_BLOCKED' : 'ROW_NOT_FOUND',
-                error: exists
-                  ? 'update blocked by RLS (signed-in uid != editor uid)'
-                  : 'main row not found (database not seeded)',
+                reason: code === '57014' ? 'TIMEOUT' : 'UPDATE_ERROR',
+                error: r.error.message, code: code, httpStatus: r.status, retries: retryCount,
               };
-            })
-            .catch(function () {
-              return { ok: false, persisted: false, rowsAffected: 0, reason: 'RLS_BLOCKED_OR_ROW_MISSING', error: 'no rows written' };
-            });
-        })
-        .catch(function (e) { return { ok: false, persisted: false, rowsAffected: 0, reason: 'EXCEPTION', error: String(e) }; });
+            }
+            var rows = r.data || [];
+            if (rows.length) {
+              _lastUpdatedAt = now;
+              return { ok: true, persisted: true, rowsAffected: rows.length, reason: 'OK', at: now, retries: retryCount };
+            }
+            // Zero rows written. Distinguish the two causes with a follow-up read
+            // (read policy is `using(true)`, so an existing row IS visible): if the
+            // 'main' row exists, the update was RLS-blocked (uid != EDITOR_UID);
+            // if it doesn't exist, the row is missing (needs seeding). Not transient
+            // — retrying an RLS block or a missing row changes nothing.
+            return c.from('workspace').select('id').eq('id', 'main').maybeSingle()
+              .then(function (chk) {
+                var exists = !chk.error && chk.data;
+                return {
+                  ok: false, persisted: false, rowsAffected: 0,
+                  reason: exists ? 'RLS_BLOCKED' : 'ROW_NOT_FOUND',
+                  error: exists
+                    ? 'update blocked by RLS (signed-in uid != editor uid)'
+                    : 'main row not found (database not seeded)',
+                  retries: retryCount,
+                };
+              })
+              .catch(function () {
+                return { ok: false, persisted: false, rowsAffected: 0, reason: 'RLS_BLOCKED_OR_ROW_MISSING', error: 'no rows written', retries: retryCount };
+              });
+          })
+          .catch(function (e) {
+            if (retryCount < RETRY_DELAYS.length) {
+              if (onRetry) onRetry(retryCount + 1);
+              console.info('[dataService] saveWorkspace retry', { reqId: reqId, attempt: retryCount + 1, exception: String(e) });
+              return delay(RETRY_DELAYS[retryCount]).then(function () { return attempt(retryCount + 1); });
+            }
+            return { ok: false, persisted: false, rowsAffected: 0, reason: 'EXCEPTION', error: String(e), retries: retryCount };
+          });
+      }
+
+      return attempt(0).then(function (r) {
+        // Telemetry: reqId ties this line to any '...retry' lines above and to
+        // the Supabase Postgres log by timestamp. Console today; swap for a
+        // real sink later without touching call sites.
+        console.info('[dataService] saveWorkspace', {
+          reqId: reqId, ok: r.ok, reason: r.reason, code: r.code, httpStatus: r.httpStatus,
+          retries: r.retries || 0, durationMs: Date.now() - startedAt,
+        });
+        return r;
+      });
     },
 
     subscribeWorkspace: function (cb) {

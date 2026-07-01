@@ -192,22 +192,38 @@ function SaveIndicator({ status }) {
   const s = status || { state: 'idle' };
   if (s.state === 'idle') return null;
   if (s.state === 'saving') {
+    if (s.retry) {
+      return <span className="save-ind save-ind-busy" title="First attempt timed out — automatically retrying"><I.refresh size={13} /> Retrying… (attempt {s.retry + 1} of 3)</span>;
+    }
     return <span className="save-ind save-ind-busy" title="Saving to Supabase"><I.refresh size={13} /> Saving…</span>;
   }
   if (s.state === 'saved') {
     const t = new Date(s.at || Date.now()).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
     return <span className="save-ind save-ind-ok" title="Confirmed written to Supabase"><I.check size={13} /> Saved {t}</span>;
   }
-  // Short label per failure reason; full detail in the tooltip.
+  // Short label per failure reason; full detail in the tooltip. By the time we
+  // land here saveWorkspace has already retried transient errors (see
+  // ds.saveWorkspace), so this is a real, final failure — not a blip.
   const REASON_LABEL = {
     RLS_BLOCKED: 'No write access',
     ROW_NOT_FOUND: 'Not seeded',
     NO_CLIENT: 'Offline',
-    UPDATE_ERROR: 'Save failed',
-    EXCEPTION: 'Save failed',
+    TIMEOUT: 'Sync timed out',
+    UPDATE_ERROR: 'Sync failed',
+    EXCEPTION: 'Sync failed',
   };
-  const label = REASON_LABEL[s.reason] || 'Save failed';
-  return <span className="save-ind save-ind-err" title={s.error || 'Save failed'}><I.alert size={13} /> {label}</span>;
+  const REASON_DETAIL = {
+    RLS_BLOCKED: 'Your account has no write access to the shared workspace.',
+    ROW_NOT_FOUND: 'The shared workspace row is missing (database not seeded).',
+    NO_CLIENT: 'No Supabase connection — check your network.',
+    TIMEOUT: 'The database timed out after retrying. Your changes are saved on this device but not synced yet — try again shortly.',
+    UPDATE_ERROR: 'Your changes are saved on this device but not synced yet — try again shortly.',
+    EXCEPTION: 'Your changes are saved on this device but not synced yet — try again shortly.',
+  };
+  const label = REASON_LABEL[s.reason] || 'Sync failed';
+  const detail = REASON_DETAIL[s.reason] || 'Your changes are saved on this device but not synced yet.';
+  const title = s.error ? detail + ' (' + s.error + ')' : detail;
+  return <span className="save-ind save-ind-err" title={title}><I.alert size={13} /> {label}</span>;
 }
 
 Object.assign(window, {
