@@ -211,6 +211,7 @@ function SaveIndicator({ status }) {
     TIMEOUT: 'Sync timed out',
     UPDATE_ERROR: 'Sync failed',
     EXCEPTION: 'Sync failed',
+    LOAD_FAILED: 'Load failed',
   };
   const REASON_DETAIL = {
     RLS_BLOCKED: 'Your account has no write access to the shared workspace.',
@@ -219,6 +220,7 @@ function SaveIndicator({ status }) {
     TIMEOUT: 'The database timed out after retrying. Your changes are saved on this device but not synced yet — try again shortly.',
     UPDATE_ERROR: 'Your changes are saved on this device but not synced yet — try again shortly.',
     EXCEPTION: 'Your changes are saved on this device but not synced yet — try again shortly.',
+    LOAD_FAILED: 'Could not load the shared workspace from the database. Nothing was overwritten — reload to retry.',
   };
   const label = REASON_LABEL[s.reason] || 'Sync failed';
   const detail = REASON_DETAIL[s.reason] || 'Your changes are saved on this device but not synced yet.';

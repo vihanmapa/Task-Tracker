@@ -195,10 +195,20 @@
         return Promise.resolve({ version: SCHEMA_VERSION, metadata: _localDoc().metadata, data: _localDoc().data, migrated: false });
       }
       var c = client();
-      if (!c) return Promise.resolve(_withFlag(migrateWorkspace(null)));
+      // loadFailed:true is load-time only, never persisted — it tells the
+      // caller "this is NOT real data, do not apply it or let it drive a
+      // save." Distinct from `migrated`, which migrateWorkspace(null) always
+      // reports true for (a fresh v1->v2 doc), so before this fix a transient
+      // read failure looked identical to "just migrated, persist now" and the
+      // app would autosave a blank document over real data on the very next
+      // tick. See [[fm-navigate-workspace-wipe-2026-07-01]].
+      if (!c) return Promise.resolve(Object.assign(_withFlag(migrateWorkspace(null)), { loadFailed: true }));
       return c.from('workspace').select('tasks,updated_at').eq('id', 'main').single()
         .then(function (res) {
-          if (res.error) { console.warn('[dataService] loadWorkspace', res.error.message); return _withFlag(migrateWorkspace(null)); }
+          if (res.error) {
+            console.warn('[dataService] loadWorkspace', res.error.message);
+            return Object.assign(_withFlag(migrateWorkspace(null)), { loadFailed: true });
+          }
           _lastUpdatedAt = res.data ? res.data.updated_at : null;
           var m = migrateWorkspace(res.data && res.data.tasks);
           // One-time legacy import: pull the old standalone kpiScores row into the

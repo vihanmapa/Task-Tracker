@@ -214,6 +214,16 @@ function App() {
   useEffectA(() => {
     if (!shared || !authUser) return;
     ds.loadWorkspace().then(doc => {
+      // A failed read must NEVER be treated as real (empty) data — applying it
+      // would flip skipSaveRef and the very next tick would autosave a blank
+      // document over whatever's actually on the server. Leave existing state
+      // untouched and surface it; the user can reload to retry.
+      // See [[fm-navigate-workspace-wipe-2026-07-01]].
+      if (doc.loadFailed) {
+        console.warn('[app] workspace load failed — not applying (would risk overwriting real data)');
+        setSaveStatus({ state: 'error', reason: 'LOAD_FAILED', error: 'Could not load the shared workspace. Reload to retry — nothing was overwritten.' });
+        return;
+      }
       const fixed = window.repairData(doc.data.tasks, doc.data.deliverables, doc.data.weeks);
       // Persist immediately if we upgraded the schema or cleaned duplicates;
       // otherwise stay quiet so a plain load never rewrites the row.
