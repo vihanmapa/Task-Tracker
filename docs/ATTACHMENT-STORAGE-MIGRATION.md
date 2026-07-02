@@ -1,6 +1,15 @@
 # Attachment Storage Migration — Design
 
-Status: **proposed** (design only, not implemented)
+Status: **implemented and deployed** (2026-07-02). Workspace document dropped
+from ~11 MB (grew from the 5.9 MB measured below) to ~20 KB. Bucket shipped as
+`task-attachments` (this doc proposed `workspace-attachments` — renamed during
+implementation, no functional difference). Dual-format reader (`f.data || url`
+in `ProgressLog`, `fm-navigate/tasks.jsx`) and the one-time editor-triggered
+migration button both match the design below. `sha256` integrity metadata was
+not implemented (skipped as unnecessary for the actual dataset size — 11
+files, verified manually instead). See memory `fm-navigate-attachment-storage-migration`
+for the live numbers and incident notes.
+
 Author: investigation 2026-06-28
 
 ## Problem & evidence
