@@ -364,7 +364,7 @@ function App() {
       deliverableId: data.deliverableId || null,
       ownerId: currentUser, progress: data.status === 'Completed' ? 100 : data.status === 'In Progress' ? 10 : 0,
       createdAt: now, updatedAt: now, completedAt: null,
-      comments: [], progressLog: [], activity: [{ type: 'created', userId: currentUser, at: now }],
+      comments: [], progressLog: [], checklist: [], activity: [{ type: 'created', userId: currentUser, at: now }],
     };
   }, [currentUser]);
 
@@ -596,6 +596,46 @@ function App() {
     else setDeliverables(ds2 => ds2.map(d => d.id === parentId ? { ...d, resources: (d.resources || []).map(apply) } : d));
   }, [canEdit]);
 
+  // ---- checklist items on a task (Trello-style sub-items) ----
+  const clid = () => 'cl' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const addChecklistItem = useCallbackA((taskId, title) => {
+    if (!canEdit || !title.trim()) return;
+    const item = { id: clid(), title: title.trim(), done: false };
+    setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: [...(t.checklist || []), item], updatedAt: new Date().toISOString() } : t));
+  }, [canEdit]);
+  const toggleChecklistItem = useCallbackA((taskId, itemId) => {
+    if (!canEdit) return;
+    setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: (t.checklist || []).map(c => c.id === itemId ? { ...c, done: !c.done } : c), updatedAt: new Date().toISOString() } : t));
+  }, [canEdit]);
+  const editChecklistItem = useCallbackA((taskId, itemId, title) => {
+    if (!canEdit || !title.trim()) return;
+    setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: (t.checklist || []).map(c => c.id === itemId ? { ...c, title: title.trim() } : c), updatedAt: new Date().toISOString() } : t));
+  }, [canEdit]);
+  const deleteChecklistItem = useCallbackA((taskId, itemId) => {
+    if (!canEdit) return;
+    setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: (t.checklist || []).filter(c => c.id !== itemId), updatedAt: new Date().toISOString() } : t));
+  }, [canEdit]);
+  const mapChecklistItem = (taskId, itemId, fn) =>
+    setTasks(ts => ts.map(t => t.id === taskId
+      ? { ...t, checklist: (t.checklist || []).map(c => c.id === itemId ? fn(c) : c), updatedAt: new Date().toISOString() }
+      : t));
+  const addChecklistLink = useCallbackA((taskId, itemId, url) => {
+    if (!canEdit || !url.trim()) return;
+    mapChecklistItem(taskId, itemId, c => ({ ...c, links: [...(c.links || []), url.trim()] }));
+  }, [canEdit]);
+  const deleteChecklistLink = useCallbackA((taskId, itemId, idx) => {
+    if (!canEdit) return;
+    mapChecklistItem(taskId, itemId, c => ({ ...c, links: (c.links || []).filter((_, i) => i !== idx) }));
+  }, [canEdit]);
+  const addChecklistFile = useCallbackA((taskId, itemId, file) => {
+    if (!canEdit) return;
+    mapChecklistItem(taskId, itemId, c => ({ ...c, files: [...(c.files || []), file] }));
+  }, [canEdit]);
+  const deleteChecklistFile = useCallbackA((taskId, itemId, idx) => {
+    if (!canEdit) return;
+    mapChecklistItem(taskId, itemId, c => ({ ...c, files: (c.files || []).filter((_, i) => i !== idx) }));
+  }, [canEdit]);
+
   const goAsk = useCallbackA((q) => { if (typeof q === 'string') setAskQ(q); setRoute('ask'); }, []);
 
   const loadDemo = () => { if (!canEdit) return; if (confirm('Load the demo FM Navigate task set? This replaces your current workspace.')) { setTasks(window.SEED_TASKS); setDeliverables(window.SEED_DELIVERABLES); setWeeks([]); setSelected(null); setDlvSelected(null); setRoute('dashboard'); } };
@@ -809,7 +849,9 @@ function App() {
             onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onOpenTask={openTask} onUpdate={() => {}} onDeleteTask={deleteTask} canEdit={canEdit} currentUser={currentUser}
             weeks={weeks} onAssignWeek={assignWeek}
             onCreateLinked={(t) => setComposer({ linkTo: { taskId: t.id, title: t.title, deliverableId: t.deliverableId } })}
-            onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} onEditResource={editEntityResource} />
+            onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} onEditResource={editEntityResource}
+            onAddChecklistItem={addChecklistItem} onToggleChecklistItem={toggleChecklistItem} onEditChecklistItem={editChecklistItem} onDeleteChecklistItem={deleteChecklistItem}
+            onAddChecklistLink={addChecklistLink} onDeleteChecklistLink={deleteChecklistLink} onAddChecklistFile={addChecklistFile} onDeleteChecklistFile={deleteChecklistFile} />
         )}
         {route === 'week' && (
           <window.WeeklyWorkspace weeks={weeks} onSaveWeek={saveWeek} onPatchWeek={patchWeek} onDeleteWeek={deleteWeek} tasks={tasks} deliverables={deliverables} canEdit={canEdit} onOpenTask={openTask} />

@@ -988,7 +988,152 @@ function TaskEditPanel({ task, allTasks = [], onSave, onCancel }) {
 }
 
 /* ---------------- Task detail ---------------- */
-function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onAssignWeek, onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onCreateLinked, onAddResource, onDeleteResource, onEditResource, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
+// per-item links + file attachments (real Storage uploads, same bucket/flow as progress-log evidence)
+function ChecklistItemAttachments({ task, item, canEdit, onAddLink, onDeleteLink, onAddFile, onDeleteFile }) {
+  const I = window.I;
+  const [linkDraft, setLinkDraft] = useStateT('');
+  const [err, setErr] = useStateT('');
+  const fileRef = useRefT(null);
+  const links = item.links || [];
+  const files = item.files || [];
+
+  const submitLink = () => {
+    if (!linkDraft.trim()) return;
+    onAddLink(task.id, item.id, linkDraft);
+    setLinkDraft('');
+  };
+
+  const addFiles = (fileList) => {
+    [...fileList].forEach((f, i) => {
+      if (f.size > MAX_FILE_BYTES) { setErr(`"${f.name}" is too large (max ${(MAX_FILE_BYTES / 1024 / 1024).toFixed(1)}MB). Use a link instead.`); return; }
+      const name = f.name || 'file';
+      const key = 'u' + Date.now() + Math.random().toString(36).slice(2, 7) + i;
+      window.dataService.uploadAttachment(f, { taskId: task.id, entryId: item.id + '-' + key, index: i, name })
+        .then(r => {
+          if (!r.ok) { setErr(`"${name}" failed to upload${r.error ? ': ' + r.error : ''}.`); return; }
+          onAddFile(task.id, item.id, { name, type: f.type || '', path: r.path });
+        });
+    });
+    setErr('');
+  };
+
+  const host = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch (_) { return 'Link'; } };
+  const isImg = (f) => (f.type || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.name || '');
+
+  return (
+    <div className="col gap8" style={{ padding: '2px 0 10px 30px' }}>
+      {(links.length > 0 || files.length > 0) && (
+        <div className="row gap8" style={{ flexWrap: 'wrap' }}>
+          {links.map((l, i) => (
+            <span key={'l' + i} className="row gap4 center">
+              <a className="chip" href={l} target="_blank" rel="noopener noreferrer"><I.link size={11} /> {host(l)}</a>
+              {canEdit && <button className="icon-btn" style={{ width: 16, height: 16 }} onClick={() => onDeleteLink(task.id, item.id, i)}><I.x size={10} /></button>}
+            </span>
+          ))}
+          {files.map((f, i) => (
+            <span key={'f' + i} className="row gap4 center">
+              <AttachmentView f={f} size={isImg(f) ? 44 : undefined} />
+              {canEdit && <button className="icon-btn" style={{ width: 16, height: 16 }} onClick={() => onDeleteFile(task.id, item.id, i)}><I.x size={10} /></button>}
+            </span>
+          ))}
+        </div>
+      )}
+      {canEdit && (
+        <div className="row gap8 center" style={{ flexWrap: 'wrap' }}>
+          <input className="input" placeholder="https://…" value={linkDraft} onChange={e => setLinkDraft(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') submitLink(); }}
+            style={{ flex: 1, minWidth: 140, fontSize: 12.5, padding: '4px 8px' }} />
+          <button className="btn btn-subtle btn-sm" onClick={submitLink}><I.plus size={12} /> Add link</button>
+          <button className="btn btn-subtle btn-sm" onClick={() => fileRef.current?.click()}><I.plus size={12} /> Attach file</button>
+          <input ref={fileRef} type="file" multiple accept="image/*,application/pdf,.doc,.docx,.xls,.xlsx,.txt,.csv" style={{ display: 'none' }}
+            onChange={e => { addFiles(e.target.files); if (fileRef.current) fileRef.current.value = ''; }} />
+        </div>
+      )}
+      {err && <div style={{ color: 'var(--st-blocked)', fontSize: 11.5 }}>{err}</div>}
+    </div>
+  );
+}
+
+function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDeleteLink, onAddFile, onDeleteFile, canEdit }) {
+  const I = window.I;
+  const [draft, setDraft] = useStateT('');
+  const [adding, setAdding] = useStateT(false);
+  const [editingId, setEditingId] = useStateT(null);
+  const [editVal, setEditVal] = useStateT('');
+  const [expandedId, setExpandedId] = useStateT(null);
+  const items = task.checklist || [];
+  const doneCount = items.filter(c => c.done).length;
+  const pct = items.length ? Math.round((doneCount / items.length) * 100) : 0;
+
+  const submitAdd = () => {
+    if (!draft.trim()) { setAdding(false); return; }
+    onAdd(task.id, draft);
+    setDraft('');
+  };
+  const startEdit = (it) => { setEditingId(it.id); setEditVal(it.title); };
+  const submitEdit = () => {
+    if (editVal.trim()) onEdit(task.id, editingId, editVal);
+    setEditingId(null);
+  };
+
+  return (
+    <div className="mt24">
+      <div className="section-eyebrow mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        <I.check size={13} /> Checklist {items.length > 0 && <span className="faint" style={{ fontWeight: 400, textTransform: 'none' }}>· {doneCount}/{items.length}</span>}
+      </div>
+      {items.length > 0 && (
+        <div style={{ height: 6, borderRadius: 99, background: 'var(--border)', overflow: 'hidden', marginBottom: 10 }}>
+          <div style={{ height: '100%', width: `${pct}%`, background: pct === 100 ? 'var(--st-completed)' : 'var(--accent)', transition: 'width .2s' }} />
+        </div>
+      )}
+      {items.map(it => {
+        const attCount = (it.links || []).length + (it.files || []).length;
+        return (
+        <div key={it.id}>
+          <div className="row gap8 center" style={{ padding: '5px 0' }}>
+            <input type="checkbox" checked={!!it.done} disabled={!canEdit} onChange={() => onToggle(task.id, it.id)} />
+            {editingId === it.id ? (
+              <input className="input" autoFocus value={editVal} onChange={e => setEditVal(e.target.value)}
+                onBlur={submitEdit}
+                onKeyDown={e => { if (e.key === 'Enter') submitEdit(); if (e.key === 'Escape') setEditingId(null); }}
+                style={{ flex: 1, fontSize: 13, padding: '3px 8px' }} />
+            ) : (
+              <span onClick={() => canEdit && startEdit(it)}
+                style={{ flex: 1, fontSize: 13.5, cursor: canEdit ? 'text' : 'default', textDecoration: it.done ? 'line-through' : 'none', color: it.done ? 'var(--muted)' : 'var(--text)' }}>
+                {it.title}
+              </span>
+            )}
+            <button className="btn btn-subtle btn-sm" title="Links & attachments" onClick={() => setExpandedId(id => id === it.id ? null : it.id)} style={{ padding: '2px 6px' }}>
+              <I.link size={12} /> {attCount > 0 && attCount}
+            </button>
+            {canEdit && (
+              <button className="btn btn-subtle btn-sm" onClick={() => onDelete(task.id, it.id)} style={{ padding: '2px 6px' }}><I.x size={12} /></button>
+            )}
+          </div>
+          {expandedId === it.id && (
+            <ChecklistItemAttachments task={task} item={it} canEdit={canEdit}
+              onAddLink={onAddLink} onDeleteLink={onDeleteLink} onAddFile={onAddFile} onDeleteFile={onDeleteFile} />
+          )}
+        </div>
+        );
+      })}
+      {!items.length && !adding && <div className="muted" style={{ fontSize: 12.5 }}>No checklist items yet.</div>}
+      {canEdit && (adding ? (
+        <div className="row gap8 center mt8">
+          <input className="input" autoFocus placeholder="Add an item…" value={draft} onChange={e => setDraft(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') submitAdd(); if (e.key === 'Escape') { setAdding(false); setDraft(''); } }}
+            style={{ flex: 1, fontSize: 13, padding: '5px 10px' }} />
+          <button className="btn btn-primary btn-sm" onClick={submitAdd}>Add</button>
+          <button className="btn btn-subtle btn-sm" onClick={() => { setAdding(false); setDraft(''); }}>Cancel</button>
+        </div>
+      ) : (
+        <button className="btn btn-subtle btn-sm mt8" onClick={() => setAdding(true)}><I.plus size={13} /> Add item</button>
+      ))}
+    </div>
+  );
+}
+
+function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onAssignWeek, onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onCreateLinked, onAddResource, onDeleteResource, onEditResource, onAddChecklistItem, onToggleChecklistItem, onEditChecklistItem, onDeleteChecklistItem, onAddChecklistLink, onDeleteChecklistLink, onAddChecklistFile, onDeleteChecklistFile, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
   const I = window.I;
   const [comment, setComment] = useStateT('');
   const [editing, setEditing] = useStateT(false);
@@ -1181,6 +1326,11 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onAssi
 
             {/* progress log */}
             <ProgressLog task={task} onLog={onLogProgress} onEdit={onEditProgress} onDelete={onDeleteProgress} onCreateLinked={onCreateLinked && (() => onCreateLinked(task))} canEdit={canEdit} currentUser={currentUser} />
+
+            {/* checklist — Trello-style sub-items */}
+            <Checklist task={task} canEdit={canEdit}
+              onAdd={onAddChecklistItem} onToggle={onToggleChecklistItem} onEdit={onEditChecklistItem} onDelete={onDeleteChecklistItem}
+              onAddLink={onAddChecklistLink} onDeleteLink={onDeleteChecklistLink} onAddFile={onAddChecklistFile} onDeleteFile={onDeleteChecklistFile} />
 
             {/* resources — shared + private (per-item lock toggle) */}
             <div className="mt24">

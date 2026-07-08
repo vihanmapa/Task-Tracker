@@ -34,6 +34,23 @@ function AIComposer({ onClose, onCreate, onCreateMany, linkTo }) {
   // live count of how many tasks the current text would produce
   const detected = desc.trim() ? window.aiService.countTasks(desc) : 0;
 
+  const manual = () => {
+    setSource('manual');
+    setFields({
+      title: desc.trim().split(/[.\n]/)[0].slice(0, 70),
+      description: desc.trim(),
+      priority: 'Medium',
+      category: window.CATEGORIES[0],
+      dueDate: null,
+      status: 'Not Started',
+      dependencies: [],
+      successCriteria: '',
+      risk: '',
+      effort: 'M',
+    });
+    setPhase('review');
+  };
+
   const run = async () => {
     if (!desc.trim()) return;
     setPhase('parsing');
@@ -120,9 +137,12 @@ function AIComposer({ onClose, onCreate, onCreateMany, linkTo }) {
                     ? <><b style={{ color: 'var(--accent)' }}>{detected} tasks detected</b> — each saved with its own description.</>
                     : 'The original description is always saved with the task.'}
                 </span>
-                <button className="btn btn-primary" disabled={!desc.trim()} onClick={run} style={{ opacity: desc.trim() ? 1 : 0.5 }}>
-                  <I.wand size={15} /> {detected >= 2 ? `Generate ${detected} tasks` : 'Generate with AI'}
-                </button>
+                <div className="row gap8">
+                  <button className="btn btn-subtle" onClick={manual}><I.edit size={13} /> Enter manually</button>
+                  <button className="btn btn-primary" disabled={!desc.trim()} onClick={run} style={{ opacity: desc.trim() ? 1 : 0.5 }}>
+                    <I.wand size={15} /> {detected >= 2 ? `Generate ${detected} tasks` : 'Generate with AI'}
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -146,8 +166,10 @@ function AIComposer({ onClose, onCreate, onCreateMany, linkTo }) {
         {phase === 'review' && fields && (
           <div className="fade-in">
             <div className="row between center mb12" style={{ paddingBottom: 12, borderBottom: '1px solid var(--border)' }}>
-              <span className="ai-tag"><I.spark size={12} /> {source === 'ai' ? 'AI-extracted — review & edit' : 'Auto-extracted — review & edit'}</span>
-              <button className="btn btn-subtle btn-sm" onClick={() => setPhase('input')}><I.refresh size={13} /> Re-parse</button>
+              <span className="ai-tag"><I.spark size={12} /> {source === 'manual' ? 'Manual entry' : source === 'ai' ? 'AI-extracted — review & edit' : 'Auto-extracted — review & edit'}</span>
+              <button className="btn btn-subtle btn-sm" onClick={() => setPhase('input')}>
+                {source === 'manual' ? <><I.chevL size={13} /> Back</> : <><I.refresh size={13} /> Re-parse</>}
+              </button>
             </div>
 
             <div className="field mb16 ai-filled">
