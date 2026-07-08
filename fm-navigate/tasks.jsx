@@ -18,7 +18,7 @@ const _ell = (s, n = 60) => <span className="trow-sub ell" title={s || ''}>{s ||
 const TASK_COLUMNS = {
   status:      { label: 'Status', w: '130px', group: 'Core', sort: 'status', locked: true, cell: (t) => <window.StatusPill status={t.status} /> },
   priority:    { label: 'Priority', w: '90px', group: 'Core', sort: 'priority', locked: true, cell: (t) => <window.PriorityTag priority={t.priority} /> },
-  due:         { label: 'Due', w: '120px', group: 'Core', sort: 'due', locked: true, cell: (t) => <window.DueTag iso={t.dueDate} /> },
+  due:         { label: 'Due', w: '120px', group: 'Core', sort: 'due', locked: true, cell: (t) => <window.DueTag iso={t.dueDate} status={t.status} /> },
   owner:       { label: 'Owner', w: '70px', group: 'Core', sort: 'owner', cell: (t) => <window.Avatar user={t.ownerId} size={24} /> },
   deliverable: { label: 'Deliverable', w: '220px', group: 'Project', cell: (t, ctx) => {
                    const d = ctx.dlvById[t.deliverableId];
@@ -594,7 +594,7 @@ function KanbanView({ tasks, onOpen, onMove, canEdit = true }) {
                     </div>
                   )}
                   <div className="kcard-foot">
-                    <window.DueTag iso={t.dueDate} />
+                    <window.DueTag iso={t.dueDate} status={t.status} />
                     <window.Avatar user={t.ownerId} size={22} />
                   </div>
                 </div>
@@ -1286,7 +1286,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onAssi
                 {canEdit
                   ? <input type="date" className="select meta-edit" value={toDateInput(task.dueDate)}
                       onChange={e => onEditTask && onEditTask(task.id, { dueDate: e.target.value ? new Date(e.target.value + 'T17:00:00').toISOString() : null })} />
-                  : <span className="meta-v"><window.DueTag iso={task.dueDate} /></span>}
+                  : <span className="meta-v"><window.DueTag iso={task.dueDate} status={task.status} /></span>}
               </div>
               <div className="meta-row"><span className="meta-k">Effort</span>
                 {canEdit

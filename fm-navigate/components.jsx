@@ -101,7 +101,8 @@ function PriorityTag({ priority, bar = true }) {
   );
 }
 
-function DueTag({ iso, icon = true }) {
+function DueTag({ iso, icon = true, status }) {
+  if (status === 'Completed') return null;
   const r = relDue(iso);
   const color = r.tone === 'over' ? 'var(--neg)' : r.tone === 'soon' ? 'var(--st-waiting)' : 'var(--text-3)';
   return (

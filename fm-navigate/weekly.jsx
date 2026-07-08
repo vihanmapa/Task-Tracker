@@ -77,7 +77,7 @@ function TaskPicker({ tasks, selectedIds, excludeIds, onToggle, onClose }) {
                   <div className="att-meta">
                     <window.PriorityTag priority={t.priority} />
                     <span className="faint">·</span><window.StatusPill status={t.status} />
-                    {t.dueDate && <><span className="faint">·</span><window.DueTag iso={t.dueDate} /></>}
+                    {t.dueDate && <><span className="faint">·</span><window.DueTag iso={t.dueDate} status={t.status} /></>}
                   </div>
                 </div>
               </button>
@@ -123,7 +123,7 @@ function CompleteWeek({ week, incomplete, onComplete, onClose }) {
                 </span>
                 <div className="grow" style={{ minWidth: 0 }}>
                   <div style={{ fontWeight: 600, fontSize: 13.5 }}>{t.title}</div>
-                  <div className="att-meta"><window.StatusPill status={t.status} />{t.dueDate && <><span className="faint">·</span><window.DueTag iso={t.dueDate} /></>}</div>
+                  <div className="att-meta"><window.StatusPill status={t.status} />{t.dueDate && <><span className="faint">·</span><window.DueTag iso={t.dueDate} status={t.status} /></>}</div>
                 </div>
               </button>
             );
@@ -477,7 +477,7 @@ function WeeklyWorkspace({ weeks, onSaveWeek, onPatchWeek, onDeleteWeek, tasks, 
               <div key={t.id} className="ws-item" onClick={() => onOpenTask(t.id)} style={{ cursor: 'pointer', background: 'var(--surface)', borderRadius: 8, marginBottom: 4 }}>
                 <span className="dot" style={{ background: (window.STATUS_META[t.status] || {}).c || 'var(--accent)', marginTop: 6 }} />
                 <div className="grow"><div style={{ fontWeight: 600, fontSize: 13.5 }}>{t.title}</div>
-                  <div className="att-meta"><window.PriorityTag priority={t.priority} />{t.dueDate && <><span className="faint">·</span><window.DueTag iso={t.dueDate} /></>}</div>
+                  <div className="att-meta"><window.PriorityTag priority={t.priority} />{t.dueDate && <><span className="faint">·</span><window.DueTag iso={t.dueDate} status={t.status} /></>}</div>
                 </div><I.chevR size={16} className="faint" />
               </div>))
             : <div className="muted" style={{ fontSize: 13 }}>Nothing outstanding — pick tasks below to plan your week.</div>}
@@ -524,7 +524,7 @@ function WeeklyWorkspace({ weeks, onSaveWeek, onPatchWeek, onDeleteWeek, tasks, 
                   <div className="att-meta">
                     <window.StatusPill status={t.status} /><span className="faint">·</span>
                     <window.PriorityTag priority={t.priority} />
-                    {t.dueDate && <><span className="faint">·</span><window.DueTag iso={t.dueDate} /></>}
+                    {t.dueDate && <><span className="faint">·</span><window.DueTag iso={t.dueDate} status={t.status} /></>}
                   </div>
                 </div>
                 {canEdit && <button className="icon-btn" title="Remove from week" onClick={() => toggleTask(t.id)}><I.x size={15} /></button>}

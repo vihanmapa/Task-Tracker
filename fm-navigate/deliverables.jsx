@@ -797,7 +797,7 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, currentU
                 <window.StatusPill status={t.status} />
                 <span className="grow" style={{ fontSize: 13.5, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</span>
                 <span style={{ fontSize: 12, color: 'var(--muted)', flexShrink: 0 }}>{t.progress || 0}%</span>
-                <window.DueTag iso={t.dueDate} />
+                <window.DueTag iso={t.dueDate} status={t.status} />
               </button>
               {canEdit && <button className="icon-btn" title="Remove from deliverable" onClick={() => onAssign(t.id, null)}><I.x size={15} /></button>}
             </div>
