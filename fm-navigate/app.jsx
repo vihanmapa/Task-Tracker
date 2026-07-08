@@ -175,22 +175,6 @@ function App() {
     setWeeks(prev => prev.filter(w => w.id !== weekId));
   }, [canEdit]);
 
-  // Assign a task to a week from the task itself (editor only). A task lives in
-  // at most one ACTIVE week, so adding to one removes it from any other active
-  // week. Closed weeks are historical records and are never mutated — a task
-  // that was worked in a past week stays recorded there even if re-planned
-  // later. weekId='' clears the active assignment.
-  const assignWeek = useCallbackA((taskId, weekId) => {
-    if (!canEdit) return;
-    const now = new Date().toISOString();
-    setWeeks(prev => prev.map(w => {
-      if (w.status === 'closed') return w; // immutable history
-      const has = (w.taskIds || []).includes(taskId);
-      if (w.id === weekId) return has ? w : { ...w, taskIds: [...(w.taskIds || []), taskId], updatedAt: now };
-      return has ? { ...w, taskIds: w.taskIds.filter(x => x !== taskId), updatedAt: now } : w;
-    }));
-  }, [canEdit]);
-
   // Merge a partial patch into one week by id (editor only). Unlike replacing
   // the whole object, this merges against the LATEST stored week, so an async
   // writer (e.g. AI report generation) can't clobber edits the user made while
@@ -847,7 +831,7 @@ function App() {
           <window.TaskDetail task={selectedTask} deliverables={deliverables} allTasks={tasks} onClose={() => { setRoute('tasks'); setSelected(null); }}
             onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditProgress={editProgress} onDeleteProgress={deleteProgress} onEditTask={editTask} onRevertEdit={revertEdit}
             onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onOpenTask={openTask} onUpdate={() => {}} onDeleteTask={deleteTask} canEdit={canEdit} currentUser={currentUser}
-            weeks={weeks} onAssignWeek={assignWeek}
+            weeks={weeks}
             onCreateLinked={(t) => setComposer({ linkTo: { taskId: t.id, title: t.title, deliverableId: t.deliverableId } })}
             onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} onEditResource={editEntityResource}
             onAddChecklistItem={addChecklistItem} onToggleChecklistItem={toggleChecklistItem} onEditChecklistItem={editChecklistItem} onDeleteChecklistItem={deleteChecklistItem}

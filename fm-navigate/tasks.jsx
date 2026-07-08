@@ -1133,7 +1133,7 @@ function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDelet
   );
 }
 
-function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onAssignWeek, onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onCreateLinked, onAddResource, onDeleteResource, onEditResource, onAddChecklistItem, onToggleChecklistItem, onEditChecklistItem, onDeleteChecklistItem, onAddChecklistLink, onDeleteChecklistLink, onAddChecklistFile, onDeleteChecklistFile, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
+function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onCreateLinked, onAddResource, onDeleteResource, onEditResource, onAddChecklistItem, onToggleChecklistItem, onEditChecklistItem, onDeleteChecklistItem, onAddChecklistLink, onDeleteChecklistLink, onAddChecklistFile, onDeleteChecklistFile, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
   const I = window.I;
   const [comment, setComment] = useStateT('');
   const [editing, setEditing] = useStateT(false);
@@ -1399,17 +1399,32 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onAssi
                       ? <window.DeliverableChip deliverable={dlv} onClick={() => onOpenDeliverable && onOpenDeliverable(dlv.id)} />
                       : <span className="meta-v">—</span>)}
               </div>
-              <div className="meta-row"><span className="meta-k">Week</span>
+              {/* Weeks are DERIVED, never assigned here. Planned = the week's
+                  own taskIds (edited on the This Week page); Activity = dated
+                  progress logs / status changes / completion falling in the
+                  week's range. A task has no week field — see weekly.jsx. */}
+              <div className="meta-row"><span className="meta-k">Appears in</span>
                 {(() => {
-                  const wkSorted = [...(weeks || [])].sort((a, b) => (a.id < b.id ? 1 : -1));
-                  const cur = wkSorted.find(w => (w.taskIds || []).includes(task.id));
-                  const lbl = (w) => `Week ${w.weekNumber} (${window.fmtDate(w.startDate)})${w.status === 'closed' ? ' · done' : ''}`;
-                  return canEdit
-                    ? <select className="select meta-edit" value={cur ? cur.id : ''} onChange={e => onAssignWeek && onAssignWeek(task.id, e.target.value)}>
-                        <option value="">— Not scheduled —</option>
-                        {wkSorted.map(w => <option key={w.id} value={w.id}>{lbl(w)}</option>)}
-                      </select>
-                    : <span className="meta-v">{cur ? lbl(cur) : '—'}</span>;
+                  const within = (iso, w) => iso && new Date(iso) >= new Date(w.startDate) && new Date(iso) <= new Date(w.endDate);
+                  const rows = [...(weeks || [])].sort((a, b) => (a.id < b.id ? 1 : -1)).map(w => {
+                    const planned = (w.taskIds || []).includes(task.id);
+                    const activity = (task.progressLog || []).some(l => within(l.at, w))
+                      || within(task.completedAt, w)
+                      || (task.activity || []).some(a => (a.type === 'status' || a.type === 'completed') && within(a.at, w));
+                    return { w, planned, activity };
+                  }).filter(r => r.planned || r.activity);
+                  if (!rows.length) return <span className="meta-v" title="Commit this task to a week from the This Week page">—</span>;
+                  return (
+                    <span style={{ display: 'flex', flexWrap: 'wrap', gap: 4, justifyContent: 'flex-end', flex: '0 1 210px' }}>
+                      {rows.slice(0, 4).map(({ w, planned, activity }) => (
+                        <span key={w.id} className="chip" style={{ fontSize: 11 }}
+                          title={`Week ${w.weekNumber} · ${window.fmtDate(w.startDate)} – ${window.fmtDate(w.endDate)}`}>
+                          W{w.weekNumber} · {planned && activity ? 'Planned + Activity' : planned ? 'Planned' : 'Activity'}
+                        </span>
+                      ))}
+                      {rows.length > 4 && <span className="chip" style={{ fontSize: 11 }}>+{rows.length - 4} more</span>}
+                    </span>
+                  );
                 })()}
               </div>
               <div className="meta-row"><span className="meta-k">Status</span>
