@@ -297,21 +297,65 @@ function buildMondayReport(week, tasks, deliverables) {
   if (deps.length) { L.push('## Details — Dependencies', ''); deps.forEach(t => L.push(`- ${t.title} → ${t.dependencies.join('; ')}`)); L.push(''); }
   return L.join('\n').trim();
 }
+/* Executive paragraph built from DERIVED weekly activity — describes what
+   actually happened (same dataset as the metrics below it), never the plan. */
+function summarizeDerivedWeek(dv, blocked) {
+  if (!dv.rows.length) return 'No activity was recorded this week — no progress updates, status changes or completions fall in this range.';
+  const S = [];
+  const moved = dv.rows.length;
+  S.push(`${moved} task${moved === 1 ? '' : 's'} moved this week — ${dv.tasksCompleted} completed, ${moved - dv.tasksCompleted} advanced (avg ${dv.overallDelta > 0 ? '+' : ''}${dv.overallDelta}% per active task).`);
+  const top = dv.rows[0];
+  if (top && (top.delta > 0 || top.completedInWeek)) {
+    S.push(`Biggest mover: ${top.task.title} (${top.completedInWeek ? 'completed' : `+${top.delta}%`}).`);
+  }
+  const p = dv.plannedTasks.length;
+  if (p) {
+    S.push(`Against plan: ${dv.plannedCompleted} of ${p} committed task${p === 1 ? '' : 's'} completed, ${dv.plannedPartial} advanced${dv.plannedUntouched ? `, ${dv.plannedUntouched} untouched` : ''}.`);
+  }
+  if (dv.unplanned.length) S.push(`${dv.unplanned.length} unplanned item${dv.unplanned.length === 1 ? '' : 's'} absorbed effort outside the weekly commitment.`);
+  if (dv.dlvRows.length) {
+    const names = dv.dlvRows.slice(0, 3).map(d => `${d.title} (${d.delta > 0 ? '+' : ''}${d.delta}%)`).join(', ');
+    S.push(`Deliverables advanced: ${names}.`);
+  }
+  if (blocked && blocked.length) S.push(`Watch items: ${blocked.map(t => t.title).join('; ')} — blocked or waiting.`);
+  return S.join(' ');
+}
+
 function buildFridaySummary(week, tasks, deliverables) {
   const sel = _selTasks(week, tasks);
   const completed = sel.filter(t => t.status === 'Completed');
   const inProg = sel.filter(t => t.status === 'In Progress');
   const blocked = sel.filter(t => t.status === 'Blocked' || t.status === 'Waiting' || t.status === 'MD Review');
   const carry = sel.filter(t => !['Completed', 'Cancelled'].includes(t.status));
+  // Derived activity drives the executive view so the narrative can never
+  // contradict the derived metrics below it. Legacy fallback keeps the report
+  // working if the derivation helper isn't loaded.
+  const dv0 = window.deriveWeekActivity ? window.deriveWeekActivity(week, tasks, deliverables) : null;
   const L = [];
   L.push(`# Friday Summary — Week ${week.weekNumber} (${_weekRange(week)})`, '');
-  // Lead with the executive view; task-level detail is grouped under Details.
-  L.push('## Executive Summary', '', summarizeLocally({ completed, inProgress: inProg, blocked, upcoming: [] }), '');
+  L.push('## Executive Summary', '',
+    dv0 ? summarizeDerivedWeek(dv0, blocked) : summarizeLocally({ completed, inProgress: inProg, blocked, upcoming: [] }), '');
   L.push('## Objectives', '');
   const objs = _objLines(week);
   if (objs.length) objs.forEach(o => L.push(`- ${o}`));
   else L.push('_No objectives set._');
   L.push('');
+  // Derived activity — what actually moved this week, from dated progress
+  // logs (deriveWeekActivity lives in weekly.jsx; looked up at call time).
+  const dv = dv0;
+  if (dv && dv.rows.length) {
+    L.push("## This Week's Activity", '');
+    dv.rows.forEach(r => {
+      const tag = r.completedInWeek ? 'Completed' : r.delta ? `${r.delta > 0 ? '+' : ''}${r.delta}%` : 'updated';
+      L.push(`- ${r.task.title} — ${tag}${r.planned ? '' : ' _(unplanned)_'}`);
+      r.notes.slice(0, 3).forEach(n => L.push(`  - ${n}`));
+    });
+    L.push('');
+    L.push(`**Planned vs actual:** ${dv.plannedTasks.length} planned · ${dv.plannedCompleted} completed · ${dv.plannedPartial} advanced · ${dv.plannedUntouched} untouched · ${dv.unplanned.length} unplanned`, '');
+    if (dv.dlvRows.length) {
+      L.push('**Deliverables advanced:** ' + dv.dlvRows.map(d => `${d.title} (${d.delta > 0 ? '+' : ''}${d.delta}%)`).join(' · '), '');
+    }
+  }
   L.push('## Details', '');
   L.push(`### Completed (${completed.length})`, '');
   if (completed.length) completed.forEach(t => L.push(`- ${t.title}`)); else L.push('_None completed this week._');

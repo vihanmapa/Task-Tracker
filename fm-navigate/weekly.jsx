@@ -33,6 +33,113 @@ function makeWeek(forDate, carriedFrom = null) {
   };
 }
 const PRANK = { Critical: 0, High: 1, Medium: 2, Low: 3 };
+
+/* ---------------- derived weekly activity (reporting layer) ----------------
+   A week stores INTENT (objectives, taskIds). What actually HAPPENED is
+   derived on the fly from each task's dated progressLog / activity /
+   completedAt — no manual week assignment, so a long-running task shows up
+   in every week it actually moved. Pure function of its inputs; nothing
+   here is persisted. */
+function deriveWeekActivity(week, tasks, deliverables) {
+  const s = new Date(week.startDate), e = new Date(week.endDate);
+  const within = (iso) => { if (!iso) return false; const d = new Date(iso); return d >= s && d <= e; };
+  // normalised, time-sorted log for one task; a completion without a matching
+  // log entry still counts as reaching 100% at completedAt
+  const logsOf = (t) => {
+    const L = (t.progressLog || []).map(l => ({ at: l.at, percent: l.percent || 0, note: (l.note || '').trim() }));
+    if (t.completedAt && !L.some(l => new Date(l.at) >= new Date(t.completedAt))) L.push({ at: t.completedAt, percent: 100, note: '' });
+    return L.sort((a, b) => new Date(a.at) - new Date(b.at));
+  };
+  const pctAt = (logs, dt) => { let p = 0; for (const l of logs) { if (new Date(l.at) <= dt) p = l.percent; else break; } return p; };
+  const preWeek = new Date(s.getTime() - 1);
+
+  const planned = new Set(week.taskIds || []);
+  const rows = [];
+  for (const t of tasks) {
+    if (t.status === 'Cancelled') continue;
+    const logs = logsOf(t);
+    const inLogs = logs.filter(l => within(l.at));
+    const statusChanges = (t.activity || []).filter(a => (a.type === 'status' || a.type === 'completed') && within(a.at));
+    const completedInWeek = within(t.completedAt);
+    if (!inLogs.length && !statusChanges.length && !completedInWeek) continue;
+    rows.push({
+      task: t,
+      delta: pctAt(logs, e) - pctAt(logs, preWeek),
+      notes: inLogs.map(l => l.note).filter(Boolean),
+      updates: inLogs.length,
+      completedInWeek,
+      started: statusChanges.some(a => /^Not Started → /.test(a.detail || '')),
+      planned: planned.has(t.id),
+    });
+  }
+  rows.sort((a, b) => (b.completedInWeek - a.completedInWeek) || (b.delta - a.delta) || (b.updates - a.updates));
+
+  // planned vs actual
+  const plannedTasks = [...planned].map(id => tasks.find(t => t.id === id)).filter(Boolean);
+  const activeIds = new Set(rows.map(r => r.task.id));
+  const isDone = (t) => within(t.completedAt) || (t.status === 'Completed' && !t.completedAt);
+  const plannedCompleted = plannedTasks.filter(isDone).length;
+  const plannedPartial = plannedTasks.filter(t => !isDone(t) && activeIds.has(t.id)).length;
+  const plannedUntouched = plannedTasks.filter(t => !isDone(t) && !activeIds.has(t.id)).length;
+  const unplanned = rows.filter(r => !r.planned);
+
+  // deliverable rollup — weekly delta = mean task delta across ALL the
+  // deliverable's live tasks (untouched tasks contribute 0), so the number
+  // reads as "how much this deliverable moved this week"
+  const dlvIds = [...new Set(rows.map(r => r.task.deliverableId).filter(Boolean))];
+  const dlvRows = dlvIds.map(id => {
+    const d = (deliverables || []).find(x => x.id === id);
+    const kids = tasks.filter(t => t.deliverableId === id && t.status !== 'Cancelled');
+    const delta = kids.length
+      ? Math.round(kids.reduce((sum, t) => { const L = logsOf(t); return sum + (pctAt(L, e) - pctAt(L, preWeek)); }, 0) / kids.length)
+      : 0;
+    const overall = kids.length ? Math.round(kids.reduce((sum, t) => sum + (t.progress || 0), 0) / kids.length) : 0;
+    return { id, title: d ? d.title : id, tasksAdvanced: rows.filter(r => r.task.deliverableId === id).length, delta, overall };
+  }).sort((a, b) => b.delta - a.delta);
+
+  return {
+    rows, unplanned, dlvRows, plannedTasks,
+    plannedCompleted, plannedPartial, plannedUntouched,
+    tasksStarted: rows.filter(r => r.started).length,
+    tasksCompleted: rows.filter(r => r.completedInWeek).length,
+    // executive headline — average progress gained per task that moved
+    overallDelta: rows.length ? Math.round(rows.reduce((s2, r) => s2 + r.delta, 0) / rows.length) : 0,
+  };
+}
+window.deriveWeekActivity = deriveWeekActivity;
+
+/* delta badge for a derived activity row */
+function DeltaTag({ delta, completed }) {
+  if (completed) return <span className="chip" style={{ background: 'var(--accent-soft)', color: 'var(--st-completed)', fontWeight: 700 }}>Completed</span>;
+  const c = delta > 0 ? 'var(--st-completed)' : delta < 0 ? 'var(--neg)' : 'var(--muted)';
+  const txt = delta ? `${delta > 0 ? '+' : ''}${delta}%` : 'updated';
+  return <span className="chip mono" style={{ color: c, fontWeight: 700 }}>{txt}</span>;
+}
+
+/* one derived activity row: task, weekly delta, in-week log notes */
+function ActivityRow({ r, onOpenTask, unplanned }) {
+  const t = r.task;
+  return (
+    <div className="ws-item" onClick={() => onOpenTask(t.id)} style={{ cursor: 'pointer' }}>
+      <span className="dot" style={{ background: (window.STATUS_META[t.status] || {}).c || 'var(--accent)', marginTop: 6 }} />
+      <div className="grow" style={{ minWidth: 0 }}>
+        <div className="row center" style={{ gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 600, fontSize: 13.5 }}>{t.title}</span>
+          {unplanned && <span className="chip" style={{ fontSize: 10, color: 'var(--st-waiting)' }}>Not planned</span>}
+        </div>
+        {r.notes.length > 0 && (
+          <ul style={{ margin: '4px 0 0', paddingLeft: 16, listStyle: 'disc' }}>
+            {r.notes.slice(0, 4).map((n, i) => <li key={i} className="muted" style={{ fontSize: 12.5, lineHeight: 1.5 }}>{n}</li>)}
+            {r.notes.length > 4 && <li className="faint" style={{ fontSize: 12 }}>+{r.notes.length - 4} more update{r.notes.length - 4 === 1 ? '' : 's'}</li>}
+          </ul>
+        )}
+        {r.notes.length === 0 && r.updates > 0 && <div className="att-meta">{r.updates} update{r.updates === 1 ? '' : 's'} logged</div>}
+      </div>
+      <DeltaTag delta={r.delta} completed={r.completedInWeek} />
+    </div>
+  );
+}
+
 function fmtStamp(iso) {
   if (!iso) return '';
   const d = new Date(iso);
@@ -330,6 +437,11 @@ function WeeklyWorkspace({ weeks, onSaveWeek, onPatchWeek, onDeleteWeek, tasks, 
   const range = `${window.fmtDate(week.startDate)} – ${window.fmtDate(week.endDate)}`;
   const isCurrent = week.id === currentId;
 
+  // derived reporting layer — what actually happened this week, from dated
+  // progress logs (see deriveWeekActivity above); never manually assigned
+  const derived = deriveWeekActivity(week, tasks, deliverables);
+  const plannedRows = derived.rows.filter(r => r.planned);
+
   // "What should I work on next?" — high priority / due today first, blocked sinks.
   const focusList = [...incomplete]
     .sort((a, b) => {
@@ -462,8 +574,9 @@ function WeeklyWorkspace({ weeks, onSaveWeek, onPatchWeek, onDeleteWeek, tasks, 
           </div>
         </div>
 
-        {/* ---- today's focus: what to work on next ---- */}
-        <div className="ws-section" style={{ background: 'var(--accent-soft)', borderColor: 'var(--accent)' }}>
+        {/* ---- today's focus: what to work on next (only meaningful for the
+             live week — it ranks against TODAY) ---- */}
+        {isCurrent && <div className="ws-section" style={{ background: 'var(--accent-soft)', borderColor: 'var(--accent)' }}>
           {sectionHead(<I.flame size={16} />, "Today's Focus", null, null)}
           <div className="row wrap" style={{ gap: 8, marginBottom: focusList.length ? 10 : 0 }}>
             {focusChips.map(c => (
@@ -481,7 +594,7 @@ function WeeklyWorkspace({ weeks, onSaveWeek, onPatchWeek, onDeleteWeek, tasks, 
                 </div><I.chevR size={16} className="faint" />
               </div>))
             : <div className="muted" style={{ fontSize: 13 }}>Nothing outstanding — pick tasks below to plan your week.</div>}
-        </div>
+        </div>}
 
         {/* ---- objectives ---- */}
         <div className="ws-section">
@@ -531,6 +644,93 @@ function WeeklyWorkspace({ weeks, onSaveWeek, onPatchWeek, onDeleteWeek, tasks, 
               </div>
             ))}
         </div>
+
+        {/* ============ DERIVED REPORTING — nothing below is stored on the
+             week; it's computed live from dated task progress logs ============ */}
+
+        {/* ---- executive snapshot: the week in five numbers ---- */}
+        {derived.rows.length > 0 && (
+          <div className="ws-section">
+            {sectionHead(<I.spark size={16} />, 'Weekly Progress', null,
+              <span className="chip" style={{ fontSize: 10 }}>Derived from progress logs</span>)}
+            <div className="kpi-grid" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
+              {[
+                { label: 'Overall progress', val: `${derived.overallDelta > 0 ? '+' : ''}${derived.overallDelta}%`, color: derived.overallDelta > 0 ? 'var(--st-completed)' : 'var(--muted)' },
+                { label: 'Tasks advanced', val: derived.rows.length, color: 'var(--accent)' },
+                { label: 'Completed', val: derived.tasksCompleted, color: 'var(--st-completed)' },
+                { label: 'Deliverables advanced', val: derived.dlvRows.length, color: 'var(--st-inprogress)' },
+                { label: 'Unplanned work', val: derived.unplanned.length, color: 'var(--st-waiting)' },
+              ].map(s2 => (
+                <div key={s2.label} className="kpi" style={{ cursor: 'default', padding: '10px 12px' }}>
+                  <div className="kpi-val" style={{ color: s2.color, fontSize: 24 }}>{s2.val}</div>
+                  <div className="kpi-foot">{s2.label}</div>
+                </div>
+              ))}
+            </div>
+            <div className="att-meta" style={{ marginTop: 8 }}>Overall progress = average % gained across the {derived.rows.length} task{derived.rows.length === 1 ? '' : 's'} that moved this week</div>
+          </div>
+        )}
+
+        {/* ---- this week's activity ---- */}
+        <div className="ws-section">
+          {sectionHead(<I.trend size={16} />, "This Week's Activity", derived.rows.length,
+            <span className="chip" style={{ fontSize: 10 }}>Derived from progress logs</span>)}
+          {derived.rows.length === 0
+            ? <div className="muted" style={{ fontSize: 13, padding: '6px 0' }}>No progress logged between {range}. Updates recorded on any task in this range appear here automatically.</div>
+            : <>
+                {plannedRows.map(r => <ActivityRow key={r.task.id} r={r} onOpenTask={onOpenTask} />)}
+                {derived.unplanned.length > 0 && <>
+                  <div className="att-meta" style={{ margin: '12px 0 6px', paddingTop: 10, borderTop: '1px dashed var(--border)', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.04em' }}>Unplanned</div>
+                  {derived.unplanned.map(r => <ActivityRow key={r.task.id} r={r} onOpenTask={onOpenTask} unplanned />)}
+                </>}
+              </>}
+        </div>
+
+        {/* ---- planned vs actual ---- */}
+        {(sel.length > 0 || derived.rows.length > 0) && (
+          <div className="ws-section">
+            {sectionHead(<I.target size={16} />, 'Planned vs Actual', null,
+              <span className="chip" style={{ fontSize: 10 }}>Derived</span>)}
+            <div className="kpi-grid" style={{ gridTemplateColumns: 'repeat(5, 1fr)' }}>
+              {[
+                { label: 'Planned', val: derived.plannedTasks.length, color: 'var(--accent)' },
+                { label: 'Completed', val: derived.plannedCompleted, color: 'var(--st-completed)' },
+                { label: 'Advanced', val: derived.plannedPartial, color: 'var(--st-inprogress)' },
+                { label: 'Untouched', val: derived.plannedUntouched, color: 'var(--muted)' },
+                { label: 'Unplanned', val: derived.unplanned.length, color: 'var(--st-waiting)' },
+              ].map(s2 => (
+                <div key={s2.label} className="kpi" style={{ cursor: 'default', padding: '10px 12px' }}>
+                  <div className="kpi-val" style={{ color: s2.color, fontSize: 24 }}>{s2.val}</div>
+                  <div className="kpi-foot">{s2.label}</div>
+                </div>
+              ))}
+            </div>
+            <div className="att-meta" style={{ marginTop: 8 }}>
+              {derived.tasksStarted} started · {derived.tasksCompleted} completed this week (all tasks)
+            </div>
+          </div>
+        )}
+
+        {/* ---- deliverable progress ---- */}
+        {derived.dlvRows.length > 0 && (
+          <div className="ws-section">
+            {sectionHead(<I.inbox size={16} />, 'Deliverable Progress', derived.dlvRows.length,
+              <span className="chip" style={{ fontSize: 10 }}>Derived</span>)}
+            {derived.dlvRows.map(dr => (
+              <div key={dr.id} className="ws-item" style={{ alignItems: 'center' }}>
+                <div className="grow" style={{ minWidth: 0 }}>
+                  <div style={{ fontWeight: 600, fontSize: 13.5 }}>{dr.title}</div>
+                  <div className="row center" style={{ gap: 8, marginTop: 4 }}>
+                    <div className="grow" style={{ maxWidth: 220 }}><window.Progress value={dr.overall} height={6} /></div>
+                    <span style={{ fontSize: 12.5, fontWeight: 700 }}>{dr.overall}%</span>
+                    <span className="att-meta" style={{ margin: 0 }}>overall · {dr.tasksAdvanced} task{dr.tasksAdvanced === 1 ? '' : 's'} advanced</span>
+                  </div>
+                </div>
+                <DeltaTag delta={dr.delta} />
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* ---- generated reports (collapsed artifacts) ---- */}
         <div className="ws-section">
