@@ -354,7 +354,7 @@ function DeliverablesScreen({ deliverables, tasks, canEdit, onOpen, onCreate }) 
    it; lives in Supabase under per-user RLS). A per-item lock toggles between
    the two. parentType: 'task' | 'deliverable'.
    onAddPublic(res) / onDeletePublic(id) mutate the shared blob (editor only). */
-function ResourceList({ parentType, parentId, publicItems = [], canEdit, onAddPublic, onDeletePublic }) {
+function ResourceList({ parentType, parentId, publicItems = [], canEdit, onAddPublic, onDeletePublic, onEditPublic }) {
   const I = window.I;
   const ds = window.dataService;
   const vault = ds && ds.authReady && ds.authReady(); // private storage available
@@ -363,6 +363,8 @@ function ResourceList({ parentType, parentId, publicItems = [], canEdit, onAddPu
   const [adding, setAdding] = useStateD(false);
   const [busy, setBusy] = useStateD(false);
   const [f, setF] = useStateD({ kind: 'link', title: '', url: '', note: '', private: !canEdit });
+  const [editingKey, setEditingKey] = useStateD(null);
+  const [ef, setEf] = useStateD({ title: '', url: '', note: '' });
 
   const refresh = () => {
     if (!vault) { setPriv([]); return; }
@@ -393,6 +395,29 @@ function ResourceList({ parentType, parentId, publicItems = [], canEdit, onAddPu
       onAddPublic && onAddPublic(payload);
     }
     resetForm(); setAdding(false);
+  };
+
+  const startEdit = (it) => {
+    setErr('');
+    setEditingKey((it._private ? 'p' : 's') + it.id);
+    setEf({ title: it.title || '', url: it.url || '', note: it.note || '' });
+  };
+  const cancelEdit = () => { setEditingKey(null); setErr(''); };
+  const doEditSave = async (it) => {
+    setErr('');
+    if (!ef.title.trim() && !ef.url.trim()) { setErr('Add a title or a link.'); return; }
+    const patch = { title: ef.title.trim(), url: ef.url.trim(), note: ef.note.trim() };
+    if (it._private) {
+      setBusy(true);
+      const r = await ds.updateResource(it.id, patch);
+      setBusy(false);
+      if (!r.ok) { setErr(r.error || 'Could not save.'); return; }
+      refresh();
+    } else {
+      if (!canEdit) { setErr('Only the editor can edit shared resources.'); return; }
+      onEditPublic && onEditPublic(it.id, patch);
+    }
+    setEditingKey(null);
   };
 
   const doDelete = async (it) => {
@@ -450,31 +475,51 @@ function ResourceList({ parentType, parentId, publicItems = [], canEdit, onAddPu
       )}
 
       <div className="col gap8">
-        {items.map(it => (
-          <div key={(it._private ? 'p' : 's') + it.id} className="row gap10 center" style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
-            <span className="faint" style={{ flexShrink: 0 }}>{it.kind === 'note' ? <I.edit size={14} /> : <I.link size={14} />}</span>
-            <div className="grow" style={{ minWidth: 0 }}>
-              <div className="row gap6 center" style={{ minWidth: 0 }}>
-                {it.url
-                  ? <a href={it.url} target="_blank" rel="noopener noreferrer" title={it.url} style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--accent)', display: 'block', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title || pretty(it.url)}</a>
-                  : <span style={{ fontSize: 13.5, fontWeight: 600, display: 'block', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title}</span>}
-                {it._private
-                  ? <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }} title="Only you can see this"><I.lock size={10} /> only you</span>
-                  : <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0, color: 'var(--muted)' }} title="Everyone in the workspace sees this">shared</span>}
-                {it.url && it.title && host(it.url) && <span className="faint" style={{ fontSize: 11, flexShrink: 0 }}>{host(it.url)}</span>}
+        {items.map(it => {
+          const key = (it._private ? 'p' : 's') + it.id;
+          const canModify = it._private || canEdit;
+          if (editingKey === key) {
+            return (
+              <div key={key} className="col gap8" style={{ padding: '8px 0', borderBottom: '1px solid var(--border)', maxWidth: 480 }}>
+                <input className="input" placeholder="Title" value={ef.title} onChange={e => setEf(s => ({ ...s, title: e.target.value }))} />
+                <input className="input" placeholder="https://…" value={ef.url} onChange={e => setEf(s => ({ ...s, url: e.target.value }))} />
+                <textarea className="ai-textarea" style={{ minHeight: 44, fontSize: 13 }} placeholder="Note (optional)" value={ef.note} onChange={e => setEf(s => ({ ...s, note: e.target.value }))} />
+                <div className="row gap8">
+                  <button className="btn btn-primary btn-sm" onClick={() => doEditSave(it)} disabled={busy}><I.check size={13} /> Save</button>
+                  <button className="btn btn-subtle btn-sm" onClick={cancelEdit}>Cancel</button>
+                </div>
               </div>
-              {it.note && <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{it.note}</div>}
+            );
+          }
+          return (
+            <div key={key} className="row gap10 center" style={{ padding: '8px 0', borderBottom: '1px solid var(--border)' }}>
+              <span className="faint" style={{ flexShrink: 0 }}>{it.kind === 'note' ? <I.edit size={14} /> : <I.link size={14} />}</span>
+              <div className="grow" style={{ minWidth: 0 }}>
+                <div className="row gap6 center" style={{ minWidth: 0 }}>
+                  {it.url
+                    ? <a href={it.url} target="_blank" rel="noopener noreferrer" title={it.url} style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--accent)', display: 'block', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title || pretty(it.url)}</a>
+                    : <span style={{ fontSize: 13.5, fontWeight: 600, display: 'block', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{it.title}</span>}
+                  {it._private
+                    ? <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0 }} title="Only you can see this"><I.lock size={10} /> only you</span>
+                    : <span className="chip" style={{ fontSize: 10, padding: '1px 6px', flexShrink: 0, color: 'var(--muted)' }} title="Everyone in the workspace sees this">shared</span>}
+                  {it.url && it.title && host(it.url) && <span className="faint" style={{ fontSize: 11, flexShrink: 0 }}>{host(it.url)}</span>}
+                </div>
+                {it.note && <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>{it.note}</div>}
+              </div>
+              {canModify && (
+                <button className="icon-btn" title="Edit" onClick={() => startEdit(it)} style={{ flexShrink: 0 }}><I.edit size={14} /></button>
+              )}
+              {canEdit && vault && (
+                <button className="icon-btn" title={it._private ? 'Make shared' : 'Make private (only you)'} onClick={() => doToggle(it)} disabled={busy} style={{ flexShrink: 0 }}>
+                  {it._private ? <I.unlock size={14} /> : <I.lock size={14} />}
+                </button>
+              )}
+              {canModify && (
+                <button className="icon-btn" title="Delete" onClick={() => doDelete(it)} style={{ flexShrink: 0 }}><I.x size={15} /></button>
+              )}
             </div>
-            {canEdit && vault && (
-              <button className="icon-btn" title={it._private ? 'Make shared' : 'Make private (only you)'} onClick={() => doToggle(it)} disabled={busy} style={{ flexShrink: 0 }}>
-                {it._private ? <I.unlock size={14} /> : <I.lock size={14} />}
-              </button>
-            )}
-            {(it._private || canEdit) && (
-              <button className="icon-btn" title="Delete" onClick={() => doDelete(it)} style={{ flexShrink: 0 }}><I.x size={15} /></button>
-            )}
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       {adding && (
@@ -576,7 +621,7 @@ function InstanceLog({ deliverable, canEdit, onEdit }) {
 }
 
 /* ---- detail: breadcrumb + rollup + sub-deliverables + tasks ---- */
-function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, currentUser, onBack, onOpen, onOpenTask, onCreate, onEdit, onDelete, onAssign, onAddResource, onDeleteResource }) {
+function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, currentUser, onBack, onOpen, onOpenTask, onCreate, onEdit, onDelete, onAssign, onAddResource, onDeleteResource, onEditResource }) {
   const I = window.I;
   const [picking, setPicking] = useStateD(false);
   const [addingSub, setAddingSub] = useStateD(false);
@@ -808,7 +853,8 @@ function DeliverableDetail({ deliverable, deliverables, tasks, canEdit, currentU
         <ResourceList parentType="deliverable" parentId={deliverable.id} publicItems={deliverable.resources || []}
           canEdit={canEdit}
           onAddPublic={(res) => onAddResource && onAddResource('deliverable', deliverable.id, res)}
-          onDeletePublic={(id) => onDeleteResource && onDeleteResource('deliverable', deliverable.id, id)} />
+          onDeletePublic={(id) => onDeleteResource && onDeleteResource('deliverable', deliverable.id, id)}
+          onEditPublic={(id, patch) => onEditResource && onEditResource('deliverable', deliverable.id, id, patch)} />
 
         {canEdit && (
           <div className="row mt16">

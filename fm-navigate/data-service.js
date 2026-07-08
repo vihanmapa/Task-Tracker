@@ -615,6 +615,19 @@
         .catch(function (e) { return { ok: false, error: String(e) }; });
     },
 
+    updateResource: function (id, patch) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false });
+      var fields = {};
+      if (patch.title !== undefined) fields.title = patch.title;
+      if (patch.url !== undefined) fields.url = patch.url;
+      if (patch.note !== undefined) fields.note = patch.note;
+      if (patch.kind !== undefined) fields.kind = patch.kind;
+      return c.from('private_resources').update(fields).eq('id', id)
+        .then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
     // Purge ALL private resources for one parent (called when a task or
     // deliverable is deleted) so they don't orphan and resurface on a future
     // record. RLS scopes the delete to the caller's own rows; other users'

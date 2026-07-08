@@ -589,6 +589,12 @@ function App() {
     if (parentType === 'task') setTasks(ts => ts.map(t => t.id === parentId ? { ...t, resources: (t.resources || []).filter(r => r.id !== resId) } : t));
     else setDeliverables(ds2 => ds2.map(d => d.id === parentId ? { ...d, resources: (d.resources || []).filter(r => r.id !== resId) } : d));
   }, [canEdit]);
+  const editEntityResource = useCallbackA((parentType, parentId, resId, patch) => {
+    if (!canEdit) return;
+    const apply = (r) => r.id === resId ? { ...r, ...patch } : r;
+    if (parentType === 'task') setTasks(ts => ts.map(t => t.id === parentId ? { ...t, resources: (t.resources || []).map(apply) } : t));
+    else setDeliverables(ds2 => ds2.map(d => d.id === parentId ? { ...d, resources: (d.resources || []).map(apply) } : d));
+  }, [canEdit]);
 
   const goAsk = useCallbackA((q) => { if (typeof q === 'string') setAskQ(q); setRoute('ask'); }, []);
 
@@ -795,7 +801,7 @@ function App() {
           <window.DeliverableDetail deliverable={selectedDeliverable} deliverables={deliverables} tasks={tasks} canEdit={canEdit} currentUser={currentUser}
             onBack={() => { setRoute('deliverables'); setDlvSelected(null); }} onOpen={openDeliverable} onOpenTask={openTask}
             onCreate={createDeliverable} onEdit={editDeliverable} onDelete={deleteDeliverable} onAssign={assignDeliverable}
-            onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} />
+            onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} onEditResource={editEntityResource} />
         )}
         {route === 'detail' && (
           <window.TaskDetail task={selectedTask} deliverables={deliverables} allTasks={tasks} onClose={() => { setRoute('tasks'); setSelected(null); }}
@@ -803,7 +809,7 @@ function App() {
             onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onOpenTask={openTask} onUpdate={() => {}} onDeleteTask={deleteTask} canEdit={canEdit} currentUser={currentUser}
             weeks={weeks} onAssignWeek={assignWeek}
             onCreateLinked={(t) => setComposer({ linkTo: { taskId: t.id, title: t.title, deliverableId: t.deliverableId } })}
-            onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} />
+            onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} onEditResource={editEntityResource} />
         )}
         {route === 'week' && (
           <window.WeeklyWorkspace weeks={weeks} onSaveWeek={saveWeek} onPatchWeek={patchWeek} onDeleteWeek={deleteWeek} tasks={tasks} deliverables={deliverables} canEdit={canEdit} onOpenTask={openTask} />
