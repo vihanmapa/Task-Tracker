@@ -402,10 +402,16 @@ function App() {
       // activity entry, the 'progress' entry below already covers it
       const clIds = (entry.checklistIds || []).filter(cid => (t.checklist || []).some(c => c.id === cid));
       const rec = { id: 'pl' + Date.now(), percent: pct, status, note: entry.note || '', links: entry.links || (entry.link ? [entry.link] : []), files, checklistIds: clIds, userId: currentUser, at };
+      // items not yet done get full completion stamps; items completed earlier
+      // from the checklist keep their original completedAt/By and only gain
+      // the link (completion time = when the work happened, not when logged)
       const checklist = clIds.length
-        ? (t.checklist || []).map(c => clIds.includes(c.id) && !c.done
-            ? { ...c, done: true, completedAt: at, completedBy: currentUser, completedInLogId: rec.id }
-            : c)
+        ? (t.checklist || []).map(c => {
+            if (!clIds.includes(c.id)) return c;
+            if (!c.done) return { ...c, done: true, completedAt: at, completedBy: currentUser, completedInLogId: rec.id };
+            if (!c.completedInLogId) return { ...c, completedInLogId: rec.id };
+            return c;
+          })
         : t.checklist;
       const log = [...(t.progressLog || []), rec];
       const act = [...(t.activity || [])];
@@ -447,9 +453,12 @@ function App() {
       const clIds = (entry.checklistIds || []).filter(cid => (t.checklist || []).some(c => c.id === cid));
       const newlyLinked = clIds.filter(cid => !((prev && prev.checklistIds) || []).includes(cid));
       const checklist = newlyLinked.length
-        ? (t.checklist || []).map(c => newlyLinked.includes(c.id) && !c.done
-            ? { ...c, done: true, completedAt: at, completedBy: currentUser, completedInLogId: entryId }
-            : c)
+        ? (t.checklist || []).map(c => {
+            if (!newlyLinked.includes(c.id)) return c;
+            if (!c.done) return { ...c, done: true, completedAt: at, completedBy: currentUser, completedInLogId: entryId };
+            if (!c.completedInLogId) return { ...c, completedInLogId: entryId };
+            return c;
+          })
         : t.checklist;
       const log = (t.progressLog || []).map(e => e.id === entryId
         ? { ...e, percent: pct, status, note: entry.note || '', links: entry.links || (entry.link ? [entry.link] : []), files, checklistIds: clIds, at, editedAt: now }
@@ -608,17 +617,70 @@ function App() {
     const item = { id: clid(), title: title.trim(), done: false };
     setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: [...(t.checklist || []), item], updatedAt: new Date().toISOString() } : t));
   }, [canEdit]);
-  // manual tick stamps completedAt/completedBy but no completedInLogId — only
-  // items linked through a progress update count in weekly reporting
+  // ticking stamps completedAt/completedBy; linking to a progress update
+  // (completedInLogId) is a separate explicit step — only linked items count
+  // in weekly reporting. Unticking a linked item warns first: the log keeps
+  // its historical reference, but the live link is cleared.
   const toggleChecklistItem = useCallbackA((taskId, itemId) => {
     if (!canEdit) return;
+    const t0 = tasks.find(t => t.id === taskId);
+    const c0 = t0 && (t0.checklist || []).find(c => c.id === itemId);
+    if (c0 && c0.done && c0.completedInLogId &&
+        !confirm('This item is linked to a progress update. Un-completing it clears the link (the update keeps its history). Continue?')) return;
     const now = new Date().toISOString();
     setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: (t.checklist || []).map(c => c.id === itemId
       ? (c.done
           ? { ...c, done: false, completedAt: null, completedBy: null, completedInLogId: null }
           : { ...c, done: true, completedAt: now, completedBy: currentUser })
       : c), updatedAt: now } : t));
+  }, [canEdit, currentUser, tasks]);
+  // per-item working note — belongs to the work item, not the progress log
+  const setChecklistNote = useCallbackA((taskId, itemId, text) => {
+    if (!canEdit) return;
+    mapChecklistItem(taskId, itemId, c => ({ ...c, note: (text || '').trim() }));
+  }, [canEdit]);
+  // attach a completed item to an existing progress update (adds the id to the
+  // log's checklistIds + points the item back at the log)
+  const linkChecklistToLog = useCallbackA((taskId, itemId, logId) => {
+    if (!canEdit) return;
+    const now = new Date().toISOString();
+    setTasks(ts => ts.map(t => {
+      if (t.id !== taskId) return t;
+      if (!(t.progressLog || []).some(e => e.id === logId)) return t;
+      return {
+        ...t,
+        checklist: (t.checklist || []).map(c => c.id === itemId
+          ? (c.done ? { ...c, completedInLogId: logId }
+                    : { ...c, done: true, completedAt: now, completedBy: currentUser, completedInLogId: logId })
+          : c),
+        progressLog: (t.progressLog || []).map(e => e.id === logId && !(e.checklistIds || []).includes(itemId)
+          ? { ...e, checklistIds: [...(e.checklistIds || []), itemId] }
+          : e),
+        updatedAt: now,
+      };
+    }));
   }, [canEdit, currentUser]);
+  // detach an item from its progress update — item stays completed (checklist
+  // is current state); the log's historical reference is removed too so
+  // weekly reporting no longer claims it
+  const unlinkChecklistFromLog = useCallbackA((taskId, itemId) => {
+    if (!canEdit) return;
+    const now = new Date().toISOString();
+    setTasks(ts => ts.map(t => {
+      if (t.id !== taskId) return t;
+      const item = (t.checklist || []).find(c => c.id === itemId);
+      const logId = item && item.completedInLogId;
+      if (!logId) return t;
+      return {
+        ...t,
+        checklist: (t.checklist || []).map(c => c.id === itemId ? { ...c, completedInLogId: null } : c),
+        progressLog: (t.progressLog || []).map(e => e.id === logId
+          ? { ...e, checklistIds: (e.checklistIds || []).filter(x => x !== itemId) }
+          : e),
+        updatedAt: now,
+      };
+    }));
+  }, [canEdit]);
   const editChecklistItem = useCallbackA((taskId, itemId, title) => {
     if (!canEdit || !title.trim()) return;
     setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: (t.checklist || []).map(c => c.id === itemId ? { ...c, title: title.trim() } : c), updatedAt: new Date().toISOString() } : t));
@@ -863,7 +925,8 @@ function App() {
             onCreateLinked={(t) => setComposer({ linkTo: { taskId: t.id, title: t.title, deliverableId: t.deliverableId } })}
             onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} onEditResource={editEntityResource}
             onAddChecklistItem={addChecklistItem} onToggleChecklistItem={toggleChecklistItem} onEditChecklistItem={editChecklistItem} onDeleteChecklistItem={deleteChecklistItem}
-            onAddChecklistLink={addChecklistLink} onDeleteChecklistLink={deleteChecklistLink} onAddChecklistFile={addChecklistFile} onDeleteChecklistFile={deleteChecklistFile} />
+            onAddChecklistLink={addChecklistLink} onDeleteChecklistLink={deleteChecklistLink} onAddChecklistFile={addChecklistFile} onDeleteChecklistFile={deleteChecklistFile}
+            onSetChecklistNote={setChecklistNote} onLinkChecklistToLog={linkChecklistToLog} onUnlinkChecklistFromLog={unlinkChecklistFromLog} />
         )}
         {route === 'week' && (
           <window.WeeklyWorkspace weeks={weeks} onSaveWeek={saveWeek} onPatchWeek={patchWeek} onDeleteWeek={deleteWeek} tasks={tasks} deliverables={deliverables} canEdit={canEdit} onOpenTask={openTask} />

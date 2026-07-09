@@ -657,7 +657,7 @@ function AttachmentView({ f, size, onOpen }) {
     : <span className="chip"><I.edit size={11} /> {f.name}</span>;
 }
 
-function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, currentUser }) {
+function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, currentUser, seed }) {
   const I = window.I;
   const log = [...(task.progressLog || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
   const [open, setOpen] = useStateT(false);
@@ -667,11 +667,13 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
   const [note, setNote] = useStateT('');
   const [links, setLinks] = useStateT(['']);
   const [files, setFiles] = useStateT([]); // [{ name, data, type }]
-  // checklist items deliverable in this update — options are captured when the
-  // form opens (incomplete items + any already linked when editing) so a
-  // deselect doesn't make the row vanish mid-edit
-  const [clSel, setClSel] = useStateT([]); // selected checklist item ids
-  const [clOptions, setClOptions] = useStateT([]);
+  // checklist items delivered in this update. The dialog never lists the raw
+  // checklist — completion happens on the checklist itself. clSel arrives
+  // from a seed ("Create Progress Update" on an item) plus an optional
+  // "also include" list of completed-but-unlinked items captured at open.
+  const [clSel, setClSel] = useStateT([]); // delivered checklist item ids
+  const [awaiting, setAwaiting] = useStateT([]); // completed, unreported items offered at open
+  const [pendSel, setPendSel] = useStateT([]); // review-list ticks not yet promoted to clSel
   const [err, setErr] = useStateT('');
   const [preview, setPreview] = useStateT(null); // { src, name } — in-app lightbox
   const fileRef = useRefT(null);
@@ -681,11 +683,25 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
   const today = dayStr();
   const [date, setDate] = useStateT(today);
 
-  const openForm = () => {
+  const openForm = (seedIds) => {
     setEditingId(null); setStatus(task.status); setPct(task.progress || 0); setNote(''); setLinks(['']); setFiles([]); setDate(dayStr()); setErr('');
-    setClSel([]); setClOptions((task.checklist || []).filter(c => !c.done));
+    const ids = Array.isArray(seedIds) ? seedIds : [];
+    setClSel(ids);
+    setPendSel([]);
+    setAwaiting((task.checklist || []).filter(c => c.done && !c.completedInLogId && !ids.includes(c.id)));
     setOpen(true);
   };
+
+  // "Create Progress Update" on a checklist item opens this form pre-seeded
+  // with that item as Work delivered (the checklist lives below the log, so
+  // scroll the form into view)
+  const formRef = useRefT(null);
+  useEffectT(() => {
+    if (seed && seed.token) {
+      openForm(seed.ids);
+      setTimeout(() => formRef.current && formRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' }), 60);
+    }
+  }, [seed && seed.token]);
 
   // open the same form pre-filled to edit an existing entry
   const openEditForm = (e) => {
@@ -697,11 +713,12 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
     setLinks(ls.length ? ls : ['']);
     const fs = (e.files && e.files.length ? e.files : (e.fileName ? [{ name: e.fileName, data: e.fileData, type: '' }] : []));
     setFiles(fs);
-    // linked items (even if since completed) + still-incomplete items; deselect
-    // only unlinks from this log — it never un-completes the checklist item
-    const linked = e.checklistIds || [];
-    setClSel(linked);
-    setClOptions((task.checklist || []).filter(c => !c.done || linked.includes(c.id)));
+    // Work delivered is read-only when editing — linking/unlinking happens on
+    // the checklist item itself. clSel carries the ids through unchanged so a
+    // note/percent edit never disturbs the links.
+    setClSel(e.checklistIds || []);
+    setPendSel([]);
+    setAwaiting([]);
     setDate(dayStr(e.at));
     setErr(''); setOpen(true);
   };
@@ -760,10 +777,13 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
     // only persist path-backed (or, for legacy entries being re-saved unchanged, data-backed) files —
     // never a transient blob: preview URL
     const cleanFiles = files.filter(f => f.path || f.data).map(f => f.path ? { name: f.name, type: f.type, path: f.path } : f);
-    if (!note.trim() && !cleanLinks.length && !cleanFiles.length && !clSel.length) { setErr('Add a note, a link, evidence, or a completed checklist item before saving.'); return; }
+    // fold still-staged review-list ticks into the delivery so a save without
+    // "Include selected" never silently drops them
+    const delivered = [...clSel, ...pendSel.filter(id => !clSel.includes(id))];
+    if (!note.trim() && !cleanLinks.length && !cleanFiles.length && !delivered.length) { setErr('Add a note, a link, evidence, or a completed checklist item before saving.'); return; }
     // back-dated entries land at local noon; today keeps the precise current time
     const at = (date && date < today) ? new Date(date + 'T12:00:00').toISOString() : new Date().toISOString();
-    const payload = { status, percent: effPct, note: note.trim(), links: cleanLinks, files: cleanFiles, checklistIds: clSel, at };
+    const payload = { status, percent: effPct, note: note.trim(), links: cleanLinks, files: cleanFiles, checklistIds: delivered, at };
     if (editingId) onEdit(task.id, editingId, payload);
     else onLog(task.id, payload);
     setNote(''); setLinks(['']); setFiles([]); setErr(''); setOpen(false); setEditingId(null);
@@ -778,7 +798,7 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
         {canEdit && !open && (
           <span className="row gap8 center">
             {onCreateLinked && <button className="btn btn-ghost btn-sm" onClick={onCreateLinked} title="Create a follow-up task linked to this one"><I.link size={13} /> New linked task</button>}
-            <button className="btn btn-ghost btn-sm" onClick={openForm}><I.plus size={13} /> Log progress</button>
+            <button className="btn btn-ghost btn-sm" onClick={() => openForm()}><I.plus size={13} /> Log progress</button>
           </span>
         )}
       </div>
@@ -786,7 +806,7 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
       <div className="mb12"><window.Progress value={task.progress || 0} height={8} /></div>
 
       {open && (
-        <div className="card card-pad mb12 fade-in" style={{ background: 'var(--bg-sunken)' }} onPaste={onPaste}>
+        <div ref={formRef} className="card card-pad mb12 fade-in" style={{ background: 'var(--bg-sunken)' }} onPaste={onPaste}>
           <div className="row between center mb8">
             <span className="field-label" style={{ margin: 0 }}>{editingId ? 'Edit update' : 'Update'} — {effPct}% complete</span>
             <button className="icon-btn" onClick={() => { setOpen(false); setErr(''); setEditingId(null); }}><I.x size={15} /></button>
@@ -807,20 +827,46 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
           <input type="range" min="0" max="100" step="5" value={effPct} disabled={pctLocked}
             onChange={e => setPct(+e.target.value)} style={{ width: '100%', accentColor: 'var(--accent)', opacity: pctLocked ? 0.5 : 1 }} />
           <textarea className="ai-textarea" style={{ minHeight: 64, marginTop: 10, fontSize: 13.5 }} placeholder="What progressed? (note)" value={note} onChange={e => setNote(e.target.value)} />
-          {/* checklist items delivered in this update — saving marks them
-              complete and links them to this log for weekly reporting */}
-          {clOptions.length > 0 && (
+          {/* Work delivered — read-only; items arrive from the checklist
+              ("Create Progress Update" / "Link Existing"), never picked here */}
+          {clSel.length > 0 && (
             <div className="field mt8">
-              <label className="field-label"><I.check size={12} /> Checklist completed in this update {editingId && <span className="faint" style={{ fontWeight: 400, textTransform: 'none' }}>· unticking only unlinks — it won't un-complete the item</span>}</label>
-              {clOptions.map(c => {
-                const on = clSel.includes(c.id);
+              <label className="field-label"><I.check size={12} /> Work delivered</label>
+              {clSel.map(cid => {
+                const c = (task.checklist || []).find(x => x.id === cid);
+                if (!c) return null;
+                return (
+                  <div key={cid} className="row gap8 center" style={{ padding: '2px 0', fontSize: 13.5 }}>
+                    <span style={{ color: 'var(--st-completed)', fontWeight: 700 }}>✓</span>
+                    <span>{c.title}</span>
+                    {!editingId && <button className="icon-btn" style={{ width: 18, height: 18 }} title="Remove from this update" onClick={() => { setClSel(sel => sel.filter(x => x !== cid)); setAwaiting(a => a.some(x => x.id === cid) ? a : [...a, c]); }}><I.x size={11} /></button>}
+                  </div>
+                );
+              })}
+              {editingId && <span className="faint" style={{ fontSize: 11 }}>Manage links from the checklist item itself.</span>}
+            </div>
+          )}
+          {/* review list: completed-but-unreported work can be swept into this
+              update — never the raw (incomplete) checklist. Ticks are staged
+              in pendSel; "Include selected" promotes them to Work delivered,
+              and submit() folds in any still-staged ticks so nothing silently
+              drops if the user saves without clicking the button. */}
+          {!editingId && awaiting.filter(c => !clSel.includes(c.id)).length > 0 && (
+            <div className="field mt8">
+              <label className="field-label">Unreported completed work</label>
+              <div className="faint" style={{ fontSize: 11.5, marginBottom: 4 }}>The following completed work has not yet been reported in a progress update.</div>
+              {awaiting.filter(c => !clSel.includes(c.id)).map(c => {
+                const on = pendSel.includes(c.id);
                 return (
                   <label key={c.id} className="row gap8 center" style={{ padding: '3px 0', cursor: 'pointer', fontSize: 13.5 }}>
-                    <input type="checkbox" checked={on} onChange={() => setClSel(sel => on ? sel.filter(x => x !== c.id) : [...sel, c.id])} />
+                    <input type="checkbox" checked={on} onChange={() => setPendSel(sel => on ? sel.filter(x => x !== c.id) : [...sel, c.id])} />
                     <span style={{ color: on ? 'var(--text)' : 'var(--text-2)' }}>{c.title}</span>
                   </label>
                 );
               })}
+              <button className="btn btn-subtle btn-sm mt4" disabled={!pendSel.length} onClick={() => { setClSel(sel => [...sel, ...pendSel.filter(id => !sel.includes(id))]); setPendSel([]); }} style={{ alignSelf: 'flex-start' }}>
+                <I.check size={12} /> Include selected{pendSel.length ? ` (${pendSel.length})` : ''}
+              </button>
             </div>
           )}
           <div className="field mt8">
@@ -866,7 +912,7 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
             {log.map(e => {
               const u = window.USERS[e.userId];
               return (
-                <div key={e.id} className="comment" style={{ alignItems: 'flex-start' }}>
+                <div key={e.id} id={'pl-' + e.id} className="comment" style={{ alignItems: 'flex-start' }}>
                   <window.Ring value={e.percent} size={34} />
                   <div className="grow" style={{ minWidth: 0 }}>
                     <div className="comment-meta row gap8 center" style={{ flexWrap: 'wrap' }}><b style={{ color: 'var(--text)' }}>{e.percent}%</b>{e.status && <window.StatusPill status={e.status} />}<span>· {u?.name || 'Someone'} · {window.fmtRelTime(e.at)}{e.editedAt && ' · edited'}</span>
@@ -1068,7 +1114,7 @@ function ChecklistItemAttachments({ task, item, canEdit, onAddLink, onDeleteLink
   const isImg = (f) => (f.type || '').startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(f.name || '');
 
   return (
-    <div className="col gap8" style={{ padding: '2px 0 10px 30px' }}>
+    <div className="col gap8" style={{ padding: 0 }}>
       {(links.length > 0 || files.length > 0) && (
         <div className="row gap8" style={{ flexWrap: 'wrap' }}>
           {links.map((l, i) => (
@@ -1101,7 +1147,77 @@ function ChecklistItemAttachments({ task, item, canEdit, onAddLink, onDeleteLink
   );
 }
 
-function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDeleteLink, onAddFile, onDeleteFile, canEdit }) {
+/* Expanded checklist item — the item is where execution happens: notes,
+   evidence, completion meta, and the link to the progress update that
+   reported it. The progress-log dialog never shows the raw checklist. */
+function ChecklistItemPanel({ task, item, canEdit, onSetNote, onAddLink, onDeleteLink, onAddFile, onDeleteFile, onCreateUpdate, onLinkToLog, onUnlink }) {
+  const I = window.I;
+  const [noteDraft, setNoteDraft] = useStateT(item.note || '');
+  const [picking, setPicking] = useStateT(false); // "Link Existing" chooser open
+  useEffectT(() => { setNoteDraft(item.note || ''); }, [item.id, item.note]);
+
+  const linkedLog = item.completedInLogId && (task.progressLog || []).find(e => e.id === item.completedInLogId);
+  const logs = [...(task.progressLog || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
+  const fmtDay = (iso) => new Date(iso).toLocaleDateString('en-US', { day: '2-digit', month: 'short', year: 'numeric' });
+  const viewLog = (id) => {
+    const el = document.getElementById('pl-' + id);
+    if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.style.transition = 'background .3s'; el.style.background = 'var(--accent-soft)'; setTimeout(() => { el.style.background = ''; }, 1400); }
+  };
+  const saveNote = () => { if ((item.note || '') !== noteDraft.trim()) onSetNote(task.id, item.id, noteDraft); };
+
+  return (
+    <div className="col gap8" style={{ padding: '4px 0 12px 30px' }}>
+      {item.done && (
+        <div className="row gap8 center" style={{ flexWrap: 'wrap', fontSize: 12 }}>
+          <span className="chip" style={{ color: 'var(--st-completed)', fontWeight: 600 }}><I.check size={11} /> Completed {item.completedAt ? fmtDay(item.completedAt) : ''}</span>
+          {item.completedBy && window.USERS[item.completedBy] && <span className="faint">by {window.USERS[item.completedBy].name}</span>}
+        </div>
+      )}
+      {/* link to the progress update that reported this work */}
+      {item.done && (linkedLog ? (
+        <div className="row gap8 center" style={{ flexWrap: 'wrap', fontSize: 12 }}>
+          <span className="faint">Linked to progress update ·</span>
+          <span className="chip mono">{fmtDay(linkedLog.at)} · {linkedLog.percent}%</span>
+          <button className="btn btn-subtle btn-sm" onClick={() => viewLog(linkedLog.id)}>View →</button>
+          {canEdit && <button className="btn btn-subtle btn-sm" title="Detach from this update — the item stays completed but leaves weekly reporting" onClick={() => onUnlink(task.id, item.id)}>Unlink</button>}
+        </div>
+      ) : (
+        <div className="row gap8 center" style={{ flexWrap: 'wrap' }}>
+          <span className="chip" style={{ color: 'var(--st-waiting)', fontWeight: 600 }}><I.alert size={11} /> Pending progress update</span>
+          {canEdit && <>
+            <button className="btn btn-subtle btn-sm" onClick={() => onCreateUpdate(item.id)}><I.plus size={12} /> Create Progress Update</button>
+            <button className="btn btn-subtle btn-sm" onClick={() => setPicking(p => !p)} disabled={!logs.length} title={logs.length ? undefined : 'No progress updates on this task yet'}><I.link size={12} /> Link Existing</button>
+          </>}
+        </div>
+      ))}
+      {picking && !linkedLog && (
+        <div className="col" style={{ gap: 4, maxHeight: 180, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 'var(--r-sm)', padding: 6 }}>
+          {logs.map(e => (
+            <button key={e.id} className="ws-item" style={{ cursor: 'pointer', width: '100%', textAlign: 'left', padding: '5px 8px' }}
+              onClick={() => { onLinkToLog(task.id, item.id, e.id); setPicking(false); }}>
+              <span className="mono" style={{ fontSize: 11.5, flexShrink: 0 }}>{fmtDay(e.at)} · {e.percent}%</span>
+              <span className="muted" style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{e.note || '(no note)'}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {/* working note — belongs to the work item, not the progress log */}
+      {(canEdit || item.note) && (
+        <div className="field" style={{ margin: 0 }}>
+          <label className="field-label" style={{ marginBottom: 3 }}><I.msg size={11} /> Notes</label>
+          {canEdit
+            ? <textarea className="ai-textarea" style={{ minHeight: 44, fontSize: 12.5 }} placeholder="e.g. Updated Clause 4 after Richard's review."
+                value={noteDraft} onChange={e => setNoteDraft(e.target.value)} onBlur={saveNote} />
+            : <div className="muted" style={{ fontSize: 12.5 }}>{item.note}</div>}
+        </div>
+      )}
+      <ChecklistItemAttachments task={task} item={item} canEdit={canEdit}
+        onAddLink={onAddLink} onDeleteLink={onDeleteLink} onAddFile={onAddFile} onDeleteFile={onDeleteFile} />
+    </div>
+  );
+}
+
+function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDeleteLink, onAddFile, onDeleteFile, onSetNote, onCreateUpdate, onLinkToLog, onUnlink, canEdit }) {
   const I = window.I;
   const [draft, setDraft] = useStateT('');
   const [adding, setAdding] = useStateT(false);
@@ -1144,11 +1260,21 @@ function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDelet
         </div>
       )}
       {items.map(it => {
-        const attCount = (it.links || []).length + (it.files || []).length;
+        const nFiles = (it.files || []).length, nLinks = (it.links || []).length, nNotes = it.note ? 1 : 0;
+        const fmtDay = (iso) => new Date(iso).toLocaleDateString('en-US', { day: '2-digit', month: 'short' });
+        const counter = (n, icon, label) => n > 0 && (
+          <button className="faint" title={`${n} ${label} — click to view`} onClick={() => setExpandedId(id => id === it.id ? null : it.id)}
+            style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 11, background: 'none', border: 'none', cursor: 'pointer', padding: '0 2px', flexShrink: 0 }}>
+            {icon} {n}
+          </button>
+        );
         return (
         <div key={it.id}>
           <div className="row gap8 center" style={{ padding: '5px 0' }}>
-            <input type="checkbox" checked={!!it.done} disabled={!canEdit} onChange={() => onToggle(task.id, it.id)} />
+            {/* ticking = completing the work; auto-expand so notes/evidence and
+                the progress-update link are one gesture away */}
+            <input type="checkbox" checked={!!it.done} disabled={!canEdit}
+              onChange={() => { if (!it.done) setExpandedId(it.id); onToggle(task.id, it.id); }} />
             {editingId === it.id ? (
               <input className="input" autoFocus value={editVal} onChange={e => setEditVal(e.target.value)}
                 onBlur={submitEdit}
@@ -1157,23 +1283,27 @@ function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDelet
             ) : (
               <span onClick={() => canEdit && startEdit(it)}
                 title={it.done && it.completedAt ? `Completed ${window.fmtRelTime(it.completedAt)}${it.completedBy && window.USERS[it.completedBy] ? ' by ' + window.USERS[it.completedBy].name : ''}` : undefined}
-                style={{ flex: 1, fontSize: 13.5, cursor: canEdit ? 'text' : 'default', textDecoration: it.done ? 'line-through' : 'none', color: it.done ? 'var(--muted)' : 'var(--text)' }}>
+                style={{ flex: 1, minWidth: 0, fontSize: 13.5, cursor: canEdit ? 'text' : 'default', textDecoration: it.done ? 'line-through' : 'none', color: it.done ? 'var(--muted)' : 'var(--text)' }}>
                 {it.title}
               </span>
             )}
-            {it.done && !it.completedInLogId && (
-              <span className="faint" title="Completed manually — not linked to a progress update, so it won't appear in Weekly reporting" style={{ fontSize: 10.5, flexShrink: 0, cursor: 'help' }}>manual</span>
-            )}
-            <button className="btn btn-subtle btn-sm" title="Links & attachments" onClick={() => setExpandedId(id => id === it.id ? null : it.id)} style={{ padding: '2px 6px' }}>
-              <I.link size={12} /> {attCount > 0 && attCount}
+            {counter(nFiles, <I.edit size={11} />, 'file' + (nFiles === 1 ? '' : 's'))}
+            {counter(nLinks, <I.link size={11} />, 'link' + (nLinks === 1 ? '' : 's'))}
+            {counter(nNotes, <I.msg size={11} />, 'note')}
+            {it.done && (it.completedInLogId
+              ? <span className="chip" title="Reported in a progress update" style={{ fontSize: 10, color: 'var(--st-completed)', flexShrink: 0 }}>{it.completedAt ? fmtDay(it.completedAt) : 'Done'}</span>
+              : <span className="chip" title="The work is done — reporting is pending. Link it to a progress update so it counts in Weekly reporting" style={{ fontSize: 10, color: 'var(--st-waiting)', flexShrink: 0, cursor: 'help' }}>⚠ Pending report</span>)}
+            <button className="icon-btn" title={expandedId === it.id ? 'Collapse' : 'Expand'} onClick={() => setExpandedId(id => id === it.id ? null : it.id)} style={{ width: 22, height: 22, flexShrink: 0 }}>
+              {expandedId === it.id ? <I.chevD size={13} /> : <I.chevR size={13} />}
             </button>
             {canEdit && (
-              <button className="btn btn-subtle btn-sm" onClick={() => onDelete(task.id, it.id)} style={{ padding: '2px 6px' }}><I.x size={12} /></button>
+              <button className="btn btn-subtle btn-sm" onClick={() => onDelete(task.id, it.id)} style={{ padding: '2px 6px', flexShrink: 0 }}><I.x size={12} /></button>
             )}
           </div>
           {expandedId === it.id && (
-            <ChecklistItemAttachments task={task} item={it} canEdit={canEdit}
-              onAddLink={onAddLink} onDeleteLink={onDeleteLink} onAddFile={onAddFile} onDeleteFile={onDeleteFile} />
+            <ChecklistItemPanel task={task} item={it} canEdit={canEdit}
+              onSetNote={onSetNote} onAddLink={onAddLink} onDeleteLink={onDeleteLink} onAddFile={onAddFile} onDeleteFile={onDeleteFile}
+              onCreateUpdate={onCreateUpdate} onLinkToLog={onLinkToLog} onUnlink={onUnlink} />
           )}
         </div>
         );
@@ -1195,7 +1325,10 @@ function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDelet
   );
 }
 
-function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onCreateLinked, onAddResource, onDeleteResource, onEditResource, onAddChecklistItem, onToggleChecklistItem, onEditChecklistItem, onDeleteChecklistItem, onAddChecklistLink, onDeleteChecklistLink, onAddChecklistFile, onDeleteChecklistFile, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
+function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onCreateLinked, onAddResource, onDeleteResource, onEditResource, onAddChecklistItem, onToggleChecklistItem, onEditChecklistItem, onDeleteChecklistItem, onAddChecklistLink, onDeleteChecklistLink, onAddChecklistFile, onDeleteChecklistFile, onSetChecklistNote, onLinkChecklistToLog, onUnlinkChecklistFromLog, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
+  // "Create Progress Update" from a checklist item — seeds the progress form
+  // with that item as Work delivered; token forces the form open each click
+  const [logSeed, setLogSeed] = useStateT(null);
   const I = window.I;
   const [comment, setComment] = useStateT('');
   const [editing, setEditing] = useStateT(false);
@@ -1386,13 +1519,15 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
               </>
             )}
 
-            {/* progress log */}
-            <ProgressLog task={task} onLog={onLogProgress} onEdit={onEditProgress} onDelete={onDeleteProgress} onCreateLinked={onCreateLinked && (() => onCreateLinked(task))} canEdit={canEdit} currentUser={currentUser} />
+            {/* progress log — describes work; the checklist manages it */}
+            <ProgressLog task={task} onLog={onLogProgress} onEdit={onEditProgress} onDelete={onDeleteProgress} onCreateLinked={onCreateLinked && (() => onCreateLinked(task))} canEdit={canEdit} currentUser={currentUser} seed={logSeed} />
 
-            {/* checklist — Trello-style sub-items */}
+            {/* checklist — where work is executed, evidenced and completed */}
             <Checklist task={task} canEdit={canEdit}
               onAdd={onAddChecklistItem} onToggle={onToggleChecklistItem} onEdit={onEditChecklistItem} onDelete={onDeleteChecklistItem}
-              onAddLink={onAddChecklistLink} onDeleteLink={onDeleteChecklistLink} onAddFile={onAddChecklistFile} onDeleteFile={onDeleteChecklistFile} />
+              onAddLink={onAddChecklistLink} onDeleteLink={onDeleteChecklistLink} onAddFile={onAddChecklistFile} onDeleteFile={onDeleteChecklistFile}
+              onSetNote={onSetChecklistNote} onLinkToLog={onLinkChecklistToLog} onUnlink={onUnlinkChecklistFromLog}
+              onCreateUpdate={(itemId) => setLogSeed({ ids: [itemId], token: Date.now() })} />
 
             {/* resources — shared + private (per-item lock toggle) */}
             <div className="mt24">
