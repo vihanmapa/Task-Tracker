@@ -667,6 +667,11 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
   const [note, setNote] = useStateT('');
   const [links, setLinks] = useStateT(['']);
   const [files, setFiles] = useStateT([]); // [{ name, data, type }]
+  // checklist items deliverable in this update — options are captured when the
+  // form opens (incomplete items + any already linked when editing) so a
+  // deselect doesn't make the row vanish mid-edit
+  const [clSel, setClSel] = useStateT([]); // selected checklist item ids
+  const [clOptions, setClOptions] = useStateT([]);
   const [err, setErr] = useStateT('');
   const [preview, setPreview] = useStateT(null); // { src, name } — in-app lightbox
   const fileRef = useRefT(null);
@@ -676,7 +681,11 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
   const today = dayStr();
   const [date, setDate] = useStateT(today);
 
-  const openForm = () => { setEditingId(null); setStatus(task.status); setPct(task.progress || 0); setNote(''); setLinks(['']); setFiles([]); setDate(dayStr()); setErr(''); setOpen(true); };
+  const openForm = () => {
+    setEditingId(null); setStatus(task.status); setPct(task.progress || 0); setNote(''); setLinks(['']); setFiles([]); setDate(dayStr()); setErr('');
+    setClSel([]); setClOptions((task.checklist || []).filter(c => !c.done));
+    setOpen(true);
+  };
 
   // open the same form pre-filled to edit an existing entry
   const openEditForm = (e) => {
@@ -688,6 +697,11 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
     setLinks(ls.length ? ls : ['']);
     const fs = (e.files && e.files.length ? e.files : (e.fileName ? [{ name: e.fileName, data: e.fileData, type: '' }] : []));
     setFiles(fs);
+    // linked items (even if since completed) + still-incomplete items; deselect
+    // only unlinks from this log — it never un-completes the checklist item
+    const linked = e.checklistIds || [];
+    setClSel(linked);
+    setClOptions((task.checklist || []).filter(c => !c.done || linked.includes(c.id)));
     setDate(dayStr(e.at));
     setErr(''); setOpen(true);
   };
@@ -746,10 +760,10 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
     // only persist path-backed (or, for legacy entries being re-saved unchanged, data-backed) files —
     // never a transient blob: preview URL
     const cleanFiles = files.filter(f => f.path || f.data).map(f => f.path ? { name: f.name, type: f.type, path: f.path } : f);
-    if (!note.trim() && !cleanLinks.length && !cleanFiles.length) { setErr('Add a note, a link, or evidence before saving.'); return; }
+    if (!note.trim() && !cleanLinks.length && !cleanFiles.length && !clSel.length) { setErr('Add a note, a link, evidence, or a completed checklist item before saving.'); return; }
     // back-dated entries land at local noon; today keeps the precise current time
     const at = (date && date < today) ? new Date(date + 'T12:00:00').toISOString() : new Date().toISOString();
-    const payload = { status, percent: effPct, note: note.trim(), links: cleanLinks, files: cleanFiles, at };
+    const payload = { status, percent: effPct, note: note.trim(), links: cleanLinks, files: cleanFiles, checklistIds: clSel, at };
     if (editingId) onEdit(task.id, editingId, payload);
     else onLog(task.id, payload);
     setNote(''); setLinks(['']); setFiles([]); setErr(''); setOpen(false); setEditingId(null);
@@ -793,6 +807,22 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
           <input type="range" min="0" max="100" step="5" value={effPct} disabled={pctLocked}
             onChange={e => setPct(+e.target.value)} style={{ width: '100%', accentColor: 'var(--accent)', opacity: pctLocked ? 0.5 : 1 }} />
           <textarea className="ai-textarea" style={{ minHeight: 64, marginTop: 10, fontSize: 13.5 }} placeholder="What progressed? (note)" value={note} onChange={e => setNote(e.target.value)} />
+          {/* checklist items delivered in this update — saving marks them
+              complete and links them to this log for weekly reporting */}
+          {clOptions.length > 0 && (
+            <div className="field mt8">
+              <label className="field-label"><I.check size={12} /> Checklist completed in this update {editingId && <span className="faint" style={{ fontWeight: 400, textTransform: 'none' }}>· unticking only unlinks — it won't un-complete the item</span>}</label>
+              {clOptions.map(c => {
+                const on = clSel.includes(c.id);
+                return (
+                  <label key={c.id} className="row gap8 center" style={{ padding: '3px 0', cursor: 'pointer', fontSize: 13.5 }}>
+                    <input type="checkbox" checked={on} onChange={() => setClSel(sel => on ? sel.filter(x => x !== c.id) : [...sel, c.id])} />
+                    <span style={{ color: on ? 'var(--text)' : 'var(--text-2)' }}>{c.title}</span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
           <div className="field mt8">
             <label className="field-label"><I.link size={12} /> Evidence links (optional)</label>
             {links.map((l, i) => (
@@ -848,6 +878,23 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
                       )}
                     </div>
                     {e.note && <window.Markdown className="comment-body" text={e.note} />}
+                    {(() => {
+                      // checklist items delivered in this update — resolved by
+                      // id at render time so renames stay current and deleted
+                      // items drop out
+                      const items = (e.checklistIds || []).map(cid => (task.checklist || []).find(c => c.id === cid)).filter(Boolean);
+                      if (!items.length) return null;
+                      return (
+                        <div className="mt4">
+                          <div className="faint" style={{ fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>Work delivered</div>
+                          {items.map(c => (
+                            <div key={c.id} style={{ fontSize: 12.5, lineHeight: 1.6 }}>
+                              <span style={{ color: 'var(--st-completed)', fontWeight: 700 }}>✓</span> <span className="muted">{c.title}</span>
+                            </div>
+                          ))}
+                        </div>
+                      );
+                    })()}
                     {(() => {
                       // links: `links` (array) or legacy `link` (string)
                       const ls = (e.links && e.links.length ? e.links : (e.link ? [e.link] : []));
@@ -1066,9 +1113,19 @@ function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDelet
   const pct = items.length ? Math.round((doneCount / items.length) * 100) : 0;
 
   const submitAdd = () => {
-    if (!draft.trim()) { setAdding(false); return; }
-    onAdd(task.id, draft);
+    const lines = draft.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (!lines.length) { setAdding(false); return; }
+    lines.forEach(line => onAdd(task.id, line));
     setDraft('');
+  };
+  const handlePaste = (e) => {
+    const text = e.clipboardData.getData('text');
+    const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+    if (lines.length > 1) {
+      e.preventDefault();
+      lines.forEach(line => onAdd(task.id, line));
+      setDraft('');
+    }
   };
   const startEdit = (it) => { setEditingId(it.id); setEditVal(it.title); };
   const submitEdit = () => {
@@ -1099,9 +1156,13 @@ function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDelet
                 style={{ flex: 1, fontSize: 13, padding: '3px 8px' }} />
             ) : (
               <span onClick={() => canEdit && startEdit(it)}
+                title={it.done && it.completedAt ? `Completed ${window.fmtRelTime(it.completedAt)}${it.completedBy && window.USERS[it.completedBy] ? ' by ' + window.USERS[it.completedBy].name : ''}` : undefined}
                 style={{ flex: 1, fontSize: 13.5, cursor: canEdit ? 'text' : 'default', textDecoration: it.done ? 'line-through' : 'none', color: it.done ? 'var(--muted)' : 'var(--text)' }}>
                 {it.title}
               </span>
+            )}
+            {it.done && !it.completedInLogId && (
+              <span className="faint" title="Completed manually — not linked to a progress update, so it won't appear in Weekly reporting" style={{ fontSize: 10.5, flexShrink: 0, cursor: 'help' }}>manual</span>
             )}
             <button className="btn btn-subtle btn-sm" title="Links & attachments" onClick={() => setExpandedId(id => id === it.id ? null : it.id)} style={{ padding: '2px 6px' }}>
               <I.link size={12} /> {attCount > 0 && attCount}
@@ -1120,7 +1181,8 @@ function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDelet
       {!items.length && !adding && <div className="muted" style={{ fontSize: 12.5 }}>No checklist items yet.</div>}
       {canEdit && (adding ? (
         <div className="row gap8 center mt8">
-          <input className="input" autoFocus placeholder="Add an item…" value={draft} onChange={e => setDraft(e.target.value)}
+          <input className="input" autoFocus placeholder="Add an item… (paste a list to add multiple)" value={draft} onChange={e => setDraft(e.target.value)}
+            onPaste={handlePaste}
             onKeyDown={e => { if (e.key === 'Enter') submitAdd(); if (e.key === 'Escape') { setAdding(false); setDraft(''); } }}
             style={{ flex: 1, fontSize: 13, padding: '5px 10px' }} />
           <button className="btn btn-primary btn-sm" onClick={submitAdd}>Add</button>

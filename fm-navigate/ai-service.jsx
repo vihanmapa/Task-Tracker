@@ -308,6 +308,13 @@ function summarizeDerivedWeek(dv, blocked) {
   if (top && (top.delta > 0 || top.completedInWeek)) {
     S.push(`Biggest mover: ${top.task.title} (${top.completedInWeek ? 'completed' : `+${top.delta}%`}).`);
   }
+  // concrete outputs first — checklist items delivered through this week's
+  // linked progress updates read better to an exec than percentages
+  const delivered = dv.rows.flatMap(r => r.delivered || []);
+  if (delivered.length) {
+    const shown = delivered.slice(0, 5).join(', ');
+    S.push(`Work delivered: ${shown}${delivered.length > 5 ? ` and ${delivered.length - 5} more` : ''}.`);
+  }
   const p = dv.plannedTasks.length;
   if (p) {
     S.push(`Against plan: ${dv.plannedCompleted} of ${p} committed task${p === 1 ? '' : 's'} completed, ${dv.plannedPartial} advanced${dv.plannedUntouched ? `, ${dv.plannedUntouched} untouched` : ''}.`);
@@ -349,6 +356,8 @@ function buildFridaySummary(week, tasks, deliverables) {
       const tag = r.completedInWeek ? 'Completed' : r.delta ? `${r.delta > 0 ? '+' : ''}${r.delta}%` : 'updated';
       L.push(`- ${r.task.title} — ${tag}${r.planned ? '' : ' _(unplanned)_'}`);
       r.notes.slice(0, 3).forEach(n => L.push(`  - ${n}`));
+      // checklist items delivered via this week's linked progress updates
+      if ((r.delivered || []).length) L.push(`  - **Work delivered:** ${r.delivered.join(', ')}`);
     });
     L.push('');
     L.push(`**Planned vs actual:** ${dv.plannedTasks.length} planned · ${dv.plannedCompleted} completed · ${dv.plannedPartial} advanced · ${dv.plannedUntouched} untouched · ${dv.unplanned.length} unplanned`, '');

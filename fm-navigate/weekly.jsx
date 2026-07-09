@@ -46,8 +46,8 @@ function deriveWeekActivity(week, tasks, deliverables) {
   // normalised, time-sorted log for one task; a completion without a matching
   // log entry still counts as reaching 100% at completedAt
   const logsOf = (t) => {
-    const L = (t.progressLog || []).map(l => ({ at: l.at, percent: l.percent || 0, note: (l.note || '').trim() }));
-    if (t.completedAt && !L.some(l => new Date(l.at) >= new Date(t.completedAt))) L.push({ at: t.completedAt, percent: 100, note: '' });
+    const L = (t.progressLog || []).map(l => ({ at: l.at, percent: l.percent || 0, note: (l.note || '').trim(), checklistIds: l.checklistIds || [] }));
+    if (t.completedAt && !L.some(l => new Date(l.at) >= new Date(t.completedAt))) L.push({ at: t.completedAt, percent: 100, note: '', checklistIds: [] });
     return L.sort((a, b) => new Date(a.at) - new Date(b.at));
   };
   const pctAt = (logs, dt) => { let p = 0; for (const l of logs) { if (new Date(l.at) <= dt) p = l.percent; else break; } return p; };
@@ -62,10 +62,16 @@ function deriveWeekActivity(week, tasks, deliverables) {
     const statusChanges = (t.activity || []).filter(a => (a.type === 'status' || a.type === 'completed') && within(a.at));
     const completedInWeek = within(t.completedAt);
     if (!inLogs.length && !statusChanges.length && !completedInWeek) continue;
+    // checklist items delivered via in-week logs — resolved by id at read time
+    // (renamed items show current title, deleted items drop out), deduped
+    // across logs; manually ticked items have no log link so never appear here
+    const delivered = [...new Set(inLogs.flatMap(l => l.checklistIds))]
+      .map(cid => (t.checklist || []).find(c => c.id === cid)).filter(Boolean).map(c => c.title);
     rows.push({
       task: t,
       delta: pctAt(logs, e) - pctAt(logs, preWeek),
       notes: inLogs.map(l => l.note).filter(Boolean),
+      delivered,
       updates: inLogs.length,
       completedInWeek,
       started: statusChanges.some(a => /^Not Started → /.test(a.detail || '')),
@@ -134,6 +140,16 @@ function ActivityRow({ r, onOpenTask, unplanned }) {
           </ul>
         )}
         {r.notes.length === 0 && r.updates > 0 && <div className="att-meta">{r.updates} update{r.updates === 1 ? '' : 's'} logged</div>}
+        {(r.delivered || []).length > 0 && (
+          <div style={{ marginTop: 5 }}>
+            <div className="faint" style={{ fontSize: 10.5, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '.04em' }}>Work delivered</div>
+            {r.delivered.map((d, i) => (
+              <div key={i} style={{ fontSize: 12.5, lineHeight: 1.6 }}>
+                <span style={{ color: 'var(--st-completed)', fontWeight: 700 }}>✓</span> <span className="muted">{d}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
       <DeltaTag delta={r.delta} completed={r.completedInWeek} />
     </div>

@@ -397,12 +397,21 @@ function App() {
       if (status === 'Completed') pct = 100;
       else if (pct >= 100) pct = 99; // not-completed can't sit at 100
       const files = entry.files || (entry.fileName ? [{ name: entry.fileName, data: entry.fileData, type: '' }] : []);
-      const rec = { id: 'pl' + Date.now(), percent: pct, status, note: entry.note || '', links: entry.links || (entry.link ? [entry.link] : []), files, userId: currentUser, at };
+      // checklist items delivered in this update — the log stores the link
+      // (checklistIds) and the items get completion stamps; no separate
+      // activity entry, the 'progress' entry below already covers it
+      const clIds = (entry.checklistIds || []).filter(cid => (t.checklist || []).some(c => c.id === cid));
+      const rec = { id: 'pl' + Date.now(), percent: pct, status, note: entry.note || '', links: entry.links || (entry.link ? [entry.link] : []), files, checklistIds: clIds, userId: currentUser, at };
+      const checklist = clIds.length
+        ? (t.checklist || []).map(c => clIds.includes(c.id) && !c.done
+            ? { ...c, done: true, completedAt: at, completedBy: currentUser, completedInLogId: rec.id }
+            : c)
+        : t.checklist;
       const log = [...(t.progressLog || []), rec];
       const act = [...(t.activity || [])];
       if (status !== t.status) act.push({ type: status === 'Completed' ? 'completed' : 'status', userId: currentUser, at, detail: `${t.status} → ${status}` });
       act.push({ type: 'progress', userId: currentUser, at, detail: `${pct}%` });
-      return { ...t, progress: pct, progressLog: log, status, updatedAt: now,
+      return { ...t, progress: pct, progressLog: log, checklist, status, updatedAt: now,
         completedAt: status === 'Completed' ? at : (status !== 'Completed' ? null : t.completedAt),
         activity: act };
     }));
@@ -430,11 +439,23 @@ function App() {
       if (status === 'Completed') pct = 100;
       else if (pct >= 100) pct = 99;
       const files = entry.files || (entry.fileName ? [{ name: entry.fileName, data: entry.fileData, type: '' }] : []);
+      // checklist links: the log is history, the checklist is current state.
+      // Editing rewrites only the historical link (checklistIds) — deselecting
+      // an item never un-completes it. Newly selected items DO get completed
+      // (explicit user action, same as logging them fresh).
+      const prev = (t.progressLog || []).find(e => e.id === entryId);
+      const clIds = (entry.checklistIds || []).filter(cid => (t.checklist || []).some(c => c.id === cid));
+      const newlyLinked = clIds.filter(cid => !((prev && prev.checklistIds) || []).includes(cid));
+      const checklist = newlyLinked.length
+        ? (t.checklist || []).map(c => newlyLinked.includes(c.id) && !c.done
+            ? { ...c, done: true, completedAt: at, completedBy: currentUser, completedInLogId: entryId }
+            : c)
+        : t.checklist;
       const log = (t.progressLog || []).map(e => e.id === entryId
-        ? { ...e, percent: pct, status, note: entry.note || '', links: entry.links || (entry.link ? [entry.link] : []), files, at, editedAt: now }
+        ? { ...e, percent: pct, status, note: entry.note || '', links: entry.links || (entry.link ? [entry.link] : []), files, checklistIds: clIds, at, editedAt: now }
         : e);
       const act = [...(t.activity || []), { type: 'edit', userId: currentUser, at: now, detail: 'Progress update' }];
-      return syncFromLatest({ ...t, progressLog: log, activity: act }, now);
+      return syncFromLatest({ ...t, progressLog: log, checklist, activity: act }, now);
     }));
   }, [canEdit, currentUser]);
 
@@ -587,10 +608,17 @@ function App() {
     const item = { id: clid(), title: title.trim(), done: false };
     setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: [...(t.checklist || []), item], updatedAt: new Date().toISOString() } : t));
   }, [canEdit]);
+  // manual tick stamps completedAt/completedBy but no completedInLogId — only
+  // items linked through a progress update count in weekly reporting
   const toggleChecklistItem = useCallbackA((taskId, itemId) => {
     if (!canEdit) return;
-    setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: (t.checklist || []).map(c => c.id === itemId ? { ...c, done: !c.done } : c), updatedAt: new Date().toISOString() } : t));
-  }, [canEdit]);
+    const now = new Date().toISOString();
+    setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: (t.checklist || []).map(c => c.id === itemId
+      ? (c.done
+          ? { ...c, done: false, completedAt: null, completedBy: null, completedInLogId: null }
+          : { ...c, done: true, completedAt: now, completedBy: currentUser })
+      : c), updatedAt: now } : t));
+  }, [canEdit, currentUser]);
   const editChecklistItem = useCallbackA((taskId, itemId, title) => {
     if (!canEdit || !title.trim()) return;
     setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: (t.checklist || []).map(c => c.id === itemId ? { ...c, title: title.trim() } : c), updatedAt: new Date().toISOString() } : t));
