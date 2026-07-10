@@ -1375,9 +1375,20 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
 
   return (
     <div className="scroll-area fade-in">
-      <div style={{ padding: '16px 28px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div style={{ padding: '16px 28px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
         <button className="btn btn-subtle btn-sm" onClick={onClose}><I.chevL size={15} /> Tasks</button>
-        <span className="muted mono" style={{ fontSize: 12 }}>{task.id}</span>
+        {/* breadcrumb: deliverable ancestry (all clickable), task id last */}
+        {dlv && window.dlvHelpers && window.dlvHelpers.pathOf(dlv.id, deliverables).map(p => (
+          <span key={p.id} className="row gap6 center" style={{ minWidth: 0 }}>
+            <I.chevR size={13} className="faint" />
+            <button className="btn-link" onClick={() => onOpenDeliverable && onOpenDeliverable(p.id)}
+              style={{ background: 'none', border: 0, color: 'var(--muted)', cursor: 'pointer', fontSize: 12.5, padding: 0, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.title}</button>
+          </span>
+        ))}
+        <span className="row gap6 center">
+          {dlv && <I.chevR size={13} className="faint" />}
+          <span className="muted mono" style={{ fontSize: 12 }}>{task.id}</span>
+        </span>
         <span className="grow" />
         <window.StatusPill status={task.status} />
       </div>
@@ -1588,9 +1599,13 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
               )}
               <div className="meta-row"><span className="meta-k">Deliverable</span>
                 {canEdit
-                  ? <span style={{ flex: '0 1 210px', minWidth: 0 }}>
+                  ? <span className="row gap6 center" style={{ flex: '0 1 210px', minWidth: 0 }}>
                       <window.DeliverablePicker value={task.deliverableId} deliverables={deliverables}
                         onChange={(v) => onAssignDeliverable && onAssignDeliverable(task.id, v)} />
+                      {dlv && onOpenDeliverable && (
+                        <button className="icon-btn" title={`Open ${dlv.title}`} style={{ flexShrink: 0 }}
+                          onClick={() => onOpenDeliverable(dlv.id)}><I.arrowR size={14} /></button>
+                      )}
                     </span>
                   : (dlv
                       ? <window.DeliverableChip deliverable={dlv} onClick={() => onOpenDeliverable && onOpenDeliverable(dlv.id)} />
