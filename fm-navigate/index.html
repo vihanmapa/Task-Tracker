@@ -8,6 +8,10 @@
     // Mount base: "/<repo>/" on GitHub Pages project sites, "/" otherwise.
     window.__BASE__ = location.hostname.endsWith('github.io')
       ? '/' + location.pathname.split('/')[1] + '/' : '/';
+    // Must run before any relative href/src below: serve.py's SPA fallback
+    // serves this file at deep URLs like /tasks/T-142, and without a <base>
+    // the browser resolves "tasks.jsx?v=NN" under /tasks/ and 404s.
+    document.write('<base href="' + window.__BASE__ + '">');
     // SPA restore after a deep-link redirect (Pages 404.html / serve.py).
     (function (l) {
       if (l.search && l.search.charAt(1) === '/') {
