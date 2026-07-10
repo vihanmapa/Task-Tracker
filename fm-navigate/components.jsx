@@ -59,9 +59,22 @@ function fmtRelTime(iso) {
 // stamped on a realtime entry before their profile is registered locally). We
 // still render a neutral avatar rather than nothing so history never disappears.
 function avatarFallback(key) {
-  const s = String(key || '');
-  const letters = (s.replace(/[^a-zA-Z]/g, '').slice(0, 2) || s.slice(0, 2) || '?');
-  return { name: s || 'Unknown', role: 'Member', color: 'oklch(0.55 0.02 250)', initials: letters.toUpperCase() };
+  let s = String(key || '');
+  if (s.startsWith('email:')) s = s.slice(6);
+  // Opaque profile ids (UUIDs) make terrible display names — show a neutral
+  // label instead of the raw key.
+  const opaque = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+  const name = opaque ? 'Team member' : (s || 'Unknown');
+  const letters = opaque ? 'TM' : ((s.replace(/[^a-zA-Z]/g, '').slice(0, 2) || s.slice(0, 2) || '?').toUpperCase());
+  return { name, role: 'Member', color: 'oklch(0.55 0.02 250)', initials: letters };
+}
+
+// Resolve a USERS key to a renderable person, never undefined. Attribution ids
+// may reference a profile that isn't registered in USERS yet (profiles load
+// async after sign-in, and other members' profiles are never registered) —
+// callers reading .name on a raw USERS[...] lookup crash on those.
+function userOf(key) {
+  return window.USERS[key] || avatarFallback(key);
 }
 
 function Avatar({ user, size = 26 }) {
@@ -232,6 +245,6 @@ function SaveIndicator({ status }) {
 Object.assign(window, {
   STATUS_META, PRIO_META, EFFORT_LABEL,
   startOfWeek, endOfWeek, daysBetween, relDue, fmtDate, fmtDateFull, fmtRelTime,
-  Avatar, StatusPill, PriorityTag, DueTag, CatChip, Progress, Ring, Spark, Modal, Markdown,
+  Avatar, userOf, StatusPill, PriorityTag, DueTag, CatChip, Progress, Ring, Spark, Modal, Markdown,
   SaveIndicator,
 });

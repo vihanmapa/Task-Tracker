@@ -1334,7 +1334,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
   const [editing, setEditing] = useStateT(false);
   const [histOpen, setHistOpen] = useStateT(false);
   if (!task) return null;
-  const owner = window.USERS[task.ownerId];
+  const owner = window.userOf(task.ownerId);
   const dlv = deliverables.find(d => d.id === task.deliverableId);
 
   const taskTitle = (id) => { const t = allTasks.find(x => x.id === id); return t ? `${t.id} ${t.title}` : id; };
@@ -1542,7 +1542,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
             <div className="section-eyebrow mt24 mb8" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.msg size={13} /> Comments · {task.comments?.length || 0}</div>
             <div>
               {(task.comments || []).map(c => {
-                const u = window.USERS[c.userId];
+                const u = window.userOf(c.userId);
                 return (
                   <div key={c.id} className="comment">
                     <window.Avatar user={u} size={30} />
@@ -1673,7 +1673,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
               <div className="section-eyebrow mb12" style={{ display: 'flex', alignItems: 'center', gap: 7 }}><I.clock size={13} /> Activity</div>
               <div style={{ position: 'relative' }}>
                 {activity.map((a, i) => {
-                  const u = window.USERS[a.userId];
+                  const u = window.userOf(a.userId);
                   return (
                     <div key={i} className="row gap10" style={{ paddingBottom: i < activity.length - 1 ? 14 : 0, alignItems: 'flex-start' }}>
                       <div className="col center" style={{ alignItems: 'center' }}>
