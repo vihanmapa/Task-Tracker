@@ -47,6 +47,7 @@ function AIComposer({ onClose, onCreate, onCreateMany, linkTo }) {
       successCriteria: '',
       risk: '',
       effort: 'M',
+      ownerId: '',
     });
     setPhase('review');
   };
@@ -206,6 +207,13 @@ function AIComposer({ onClose, onCreate, onCreateMany, linkTo }) {
                   {STATUSES4.map(s => <option key={s}>{s}</option>)}
                 </select>
               </div>
+              <div className="field ai-filled">
+                <label className="field-label">Owner</label>
+                <select className="select" value={fields.ownerId || ''} onChange={e => set('ownerId', e.target.value)}>
+                  <option value="">— Me (default) —</option>
+                  {window.peopleOptions(fields.ownerId || null).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                </select>
+              </div>
             </div>
 
             <div className="field mb16 ai-filled">
@@ -255,7 +263,7 @@ function AIComposer({ onClose, onCreate, onCreateMany, linkTo }) {
                     <input className="input" style={{ fontWeight: 600 }} value={r.title} onChange={e => setRow(i, 'title', e.target.value)} placeholder="Task title" />
                     <button className="icon-btn" onClick={() => rmRow(i)} title="Remove" style={{ flexShrink: 0 }}><I.x size={15} /></button>
                   </div>
-                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8 }}>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr 1fr', gap: 8 }}>
                     <select className="select" value={r.priority} onChange={e => setRow(i, 'priority', e.target.value)} title="Priority">
                       {window.PRIORITIES.map(p => <option key={p}>{p}</option>)}
                     </select>
@@ -265,6 +273,10 @@ function AIComposer({ onClose, onCreate, onCreateMany, linkTo }) {
                     <input type="date" className="input" value={toDateInput(r.dueDate)} onChange={e => setRow(i, 'dueDate', fromDateInput(e.target.value))} title="Due date" />
                     <select className="select" value={r.status} onChange={e => setRow(i, 'status', e.target.value)} title="Status">
                       {STATUSES4.map(s => <option key={s}>{s}</option>)}
+                    </select>
+                    <select className="select" value={r.ownerId || ''} onChange={e => setRow(i, 'ownerId', e.target.value)} title="Owner">
+                      <option value="">— Me —</option>
+                      {window.peopleOptions(r.ownerId || null).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
                     </select>
                   </div>
                   {(r.dependencies?.length > 0 || r.risk) && (

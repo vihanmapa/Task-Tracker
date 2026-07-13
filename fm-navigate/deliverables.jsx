@@ -206,7 +206,7 @@ function DeliverableForm({ onCreate, onCancel, parentTitle }) {
         <Field label="Owner">
           <select className="input" value={f.ownerId} onChange={e => set('ownerId', e.target.value)}>
             <option value="">— Me (default) —</option>
-            {Object.values(window.USERS).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            {window.peopleOptions(f.ownerId || null).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
           </select>
         </Field>
         <Field label="Status">

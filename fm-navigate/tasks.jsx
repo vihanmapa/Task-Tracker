@@ -285,6 +285,9 @@ function FilterPopover({ deliverables, fStatus, setFStatus, fPrio, setFPrio, fDl
       </Field>
       <Field label="Owner">
         <select className="select" value={fOwner} onChange={e => setFOwner(e.target.value)}>
+          {/* Unlike the assignment pickers this lists legacy seed ids too:
+              older tasks still carry them as ownerId, and filtering is by
+              exact id — hiding them would make those tasks unfilterable. */}
           <option value="All">All owners</option>{Object.values(window.USERS).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
         </select>
       </Field>
@@ -1656,7 +1659,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
               <div className="meta-row"><span className="meta-k">Owner</span>
                 {canEdit
                   ? <select className="select meta-edit" value={task.ownerId} onChange={e => onEditTask && onEditTask(task.id, { ownerId: e.target.value })}>
-                      {Object.values(window.USERS).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                      {window.peopleOptions(task.ownerId).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
                     </select>
                   : <span className="row gap6 center"><window.Avatar user={owner} size={22} /><span className="meta-v">{owner.name}</span></span>}
               </div>
