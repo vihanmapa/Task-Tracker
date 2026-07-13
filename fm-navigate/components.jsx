@@ -71,10 +71,27 @@ function avatarFallback(key) {
 
 // Resolve a USERS key to a renderable person, never undefined. Attribution ids
 // may reference a profile that isn't registered in USERS yet (profiles load
-// async after sign-in, and other members' profiles are never registered) —
+// async after sign-in, e.g. before AuthProvider's listProfiles pass lands) —
 // callers reading .name on a raw USERS[...] lookup crash on those.
 function userOf(key) {
   return window.USERS[key] || avatarFallback(key);
+}
+
+// Options for owner/assignee pickers. Once the team directory has loaded
+// (entries carry .profile, see registerIdentity), offer every enabled
+// profile — NOT the legacy seed trio, which would duplicate the same humans
+// under old ids. Before it loads (or in local-only mode) fall back to the
+// full USERS map. `currentId` stays in the list so a select whose value is
+// a legacy/disabled/unknown id never renders blank.
+function peopleOptions(currentId) {
+  const all = Object.values(window.USERS);
+  const profiles = all.filter(u => u.profile);
+  const base = profiles.length ? profiles.filter(u => u.status !== 'disabled') : all;
+  const opts = base.slice().sort((a, b) => a.name.localeCompare(b.name));
+  if (currentId && !opts.some(u => u.id === currentId)) {
+    opts.unshift({ ...userOf(currentId), id: currentId });
+  }
+  return opts;
 }
 
 function Avatar({ user, size = 26 }) {
@@ -245,6 +262,6 @@ function SaveIndicator({ status }) {
 Object.assign(window, {
   STATUS_META, PRIO_META, EFFORT_LABEL,
   startOfWeek, endOfWeek, daysBetween, relDue, fmtDate, fmtDateFull, fmtRelTime,
-  Avatar, userOf, StatusPill, PriorityTag, DueTag, CatChip, Progress, Ring, Spark, Modal, Markdown,
+  Avatar, userOf, peopleOptions, StatusPill, PriorityTag, DueTag, CatChip, Progress, Ring, Spark, Modal, Markdown,
   SaveIndicator,
 });

@@ -346,7 +346,7 @@ function App() {
       dueDate: data.dueDate || null, dependencies: data.dependencies || [], depTaskIds: data.depTaskIds || [],
       successCriteria: data.successCriteria || '', risk: data.risk || '', effort: data.effort || 'M',
       deliverableId: data.deliverableId || null,
-      ownerId: currentUser, progress: data.status === 'Completed' ? 100 : data.status === 'In Progress' ? 10 : 0,
+      ownerId: data.ownerId || currentUser, progress: data.status === 'Completed' ? 100 : data.status === 'In Progress' ? 10 : 0,
       createdAt: now, updatedAt: now, completedAt: null,
       comments: [], progressLog: [], checklist: [], activity: [{ type: 'created', userId: currentUser, at: now }],
     };

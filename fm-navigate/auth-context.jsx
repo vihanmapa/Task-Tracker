@@ -59,6 +59,11 @@ function registerIdentity(profile) {
     color: identityColor(key),
     initials: identityInitials(profile.name, profile.email),
     avatar_url: profile.avatar_url || null,
+    // Marks entries backed by a real Supabase profile (vs the legacy seed
+    // trio) so pickers can offer the whole team; status lets them hide
+    // disabled accounts while attribution on old records keeps resolving.
+    profile: true,
+    status: profile.status || 'enabled',
   };
   return key;
 }
@@ -72,6 +77,8 @@ function AuthProvider({ children }) {
   // Cached profile { id, email, name, avatar_url, role, status }. Fetched once
   // when the signed-in user id changes — never on every render/refresh.
   const [profile, setProfile] = useState(null);
+  // Bumped when the team directory lands in window.USERS so pickers re-render.
+  const [peopleVersion, setPeopleVersion] = useState(0);
 
   // Resolve the Supabase session, then keep it in sync.
   useEffect(() => {
@@ -102,6 +109,21 @@ function AuthProvider({ children }) {
     registerIdentity(profile);
   }, [shared, profile && profile.id, profile && profile.name,
       profile && profile.avatar_url, profile && profile.role]);
+
+  // Register EVERY team profile (RLS lets any signed-in user read the
+  // directory) so owner pickers can assign anyone — not just the legacy seed
+  // trio plus whoever is signed in — and attribution by teammates resolves
+  // to real names instead of the avatarFallback placeholder.
+  useEffect(() => {
+    if (!shared || !authUser) return;
+    let alive = true;
+    ds.listProfiles().then(list => {
+      if (!alive || !Array.isArray(list) || !list.length) return;
+      list.forEach(registerIdentity);
+      setPeopleVersion(v => v + 1);
+    });
+    return () => { alive = false; };
+  }, [shared, authUser && authUser.id]);
 
   const signOut = useCallback(() => ds.signOut().then(() => { setAuthUser(null); setProfile(null); }), []);
 
@@ -140,9 +162,12 @@ function AuthProvider({ children }) {
       currentUser,
       signOut,
       ready: !shared || authUser !== undefined,
+      // Consumers don't read this directly — it's in the memo deps so the tree
+      // re-renders (and pickers re-enumerate window.USERS) once the team loads.
+      peopleVersion,
       setAuthUser, // for LoginScreen to push the user immediately on sign-in
     };
-  }, [shared, authUser, profile, signOut]);
+  }, [shared, authUser, profile, signOut, peopleVersion]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
