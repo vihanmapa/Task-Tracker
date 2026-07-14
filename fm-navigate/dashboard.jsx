@@ -85,7 +85,7 @@ function Dashboard({ tasks, deliverables = [], onOpen, onOpenDeliverable, onComp
   const statusLine = useMemoDash(() => {
     const n = m.attention.filter(a => a.sev >= 2).length;
     if (tasks.length === 0)
-      return <span><b>No tasks yet.</b> Create your first task to start tracking execution{canEdit ? '' : ' — switch to Vihan (PM) to add tasks'}.</span>;
+      return <span><b>No tasks yet.</b> Create your first task to start tracking execution{canEdit ? '' : ' — your role is read-only'}.</span>;
     if (m.blocked.length === 0 && m.overdue.length === 0)
       return <span><b>Execution is on track.</b> {m.inProgress.length} tasks in motion, {m.completedWeek.length} shipped this week. Nothing blocked.</span>;
     return <span><b>{n} item{n !== 1 ? 's' : ''} need your attention.</b> {m.blocked.length} blocked{m.overdue.length ? `, ${m.overdue.length} overdue` : ''}.</span>;

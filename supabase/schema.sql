@@ -202,14 +202,22 @@ drop policy if exists "workspace read (authenticated)" on public.workspace;
 create policy "workspace read (authenticated)"
   on public.workspace for select to authenticated using (true);
 
--- WRITE is gated by ROLE now (was: a single EDITOR_UID). Only owner and
--- product_manager may persist the document. Everyone else is read-only.
+-- WRITE is gated by ROLE (was: a single EDITOR_UID). Jira-style execution
+-- model: every DELIVERY role may persist the document so they can work tasks
+-- (progress, comments, checklists, evidence). investor + viewer stay read-only.
+--
+-- HONEST LIMIT: the workspace is still ONE jsonb document, so the DB can only
+-- gate "may write the blob at all". The finer split — only leads change
+-- owner/priority, only owner/PM delete tasks or manage deliverables — is
+-- enforced in the app's mutation handlers (app.jsx) and is NOT a hard
+-- boundary until the blob is normalised into per-resource tables. Acceptable
+-- for a small trusted team; revisit at normalisation.
 drop policy if exists "workspace write (editor only)" on public.workspace;
 drop policy if exists "workspace write (role)" on public.workspace;
 create policy "workspace write (role)"
   on public.workspace for update to authenticated
-  using (public.jwt_role() in ('owner', 'product_manager'))
-  with check (public.jwt_role() in ('owner', 'product_manager'));
+  using (public.jwt_role() in ('owner', 'product_manager', 'tech_lead', 'business_analyst', 'developer', 'qa'))
+  with check (public.jwt_role() in ('owner', 'product_manager', 'tech_lead', 'business_analyst', 'developer', 'qa'));
 
 -- ============================================================
 -- 3b. Storage — task-attachments (progress-log evidence: images/files)
@@ -231,17 +239,17 @@ create policy "task-attachments read (authenticated)"
 drop policy if exists "task-attachments write (role)" on storage.objects;
 create policy "task-attachments write (role)"
   on storage.objects for insert to authenticated
-  with check (bucket_id = 'task-attachments' and public.jwt_role() in ('owner', 'product_manager'));
+  with check (bucket_id = 'task-attachments' and public.jwt_role() in ('owner', 'product_manager', 'tech_lead', 'business_analyst', 'developer', 'qa'));
 
 drop policy if exists "task-attachments update (role)" on storage.objects;
 create policy "task-attachments update (role)"
   on storage.objects for update to authenticated
-  using (bucket_id = 'task-attachments' and public.jwt_role() in ('owner', 'product_manager'));
+  using (bucket_id = 'task-attachments' and public.jwt_role() in ('owner', 'product_manager', 'tech_lead', 'business_analyst', 'developer', 'qa'));
 
 drop policy if exists "task-attachments delete (role)" on storage.objects;
 create policy "task-attachments delete (role)"
   on storage.objects for delete to authenticated
-  using (bucket_id = 'task-attachments' and public.jwt_role() in ('owner', 'product_manager'));
+  using (bucket_id = 'task-attachments' and public.jwt_role() in ('owner', 'product_manager', 'tech_lead', 'business_analyst', 'developer', 'qa'));
 
 -- ============================================================
 -- 4. Comments  (generic — attach to any entity)

@@ -132,10 +132,17 @@ function AuthProvider({ children }) {
     // the profile's role; a signed-in user with no profile yet is a viewer.
     const role = !shared ? 'owner' : ((profile && profile.role) || (authUser ? 'viewer' : null));
     const can = (resource, action) => window.RBAC.can(role, resource, action);
-    // PHASE 1: one workspace document, so the only DB-enforced write is the
-    // `workspace` resource (owner + product_manager). canEdit stays the single
-    // gate the mutation callsites read; finer per-resource rules live in can().
+    // GOVERNANCE gate: full workspace control (deliverables, weeks, KPI,
+    // import/clear/migrate, unrestricted task edits). Owner + PM.
     const canEdit = !shared || can('workspace', 'write');
+    // EXECUTION gates (Jira-style): every delivery role can work tasks;
+    // owner/priority changes and deletes stay with lead/governance roles.
+    // The DB still enforces only the coarse blob write (see schema.sql) —
+    // these flags shape the UI and are re-checked at the app.jsx handlers.
+    const canExecute = !shared || can('tasks', 'write');
+    const canAssign = !shared || can('tasks', 'assign');
+    const canPrioritize = !shared || can('tasks', 'prioritize');
+    const canDeleteTask = !shared || can('tasks', 'delete');
     // Attribution is the REAL signed-in person: a stable profile key registered
     // in window.USERS (see registerIdentity). The role→person map below is kept
     // ONLY as a compatibility fallback — for local-only mode and for the brief
@@ -159,6 +166,10 @@ function AuthProvider({ children }) {
       roleLabelOf: function (r) { return (window.RBAC.ROLE_LABELS && window.RBAC.ROLE_LABELS[r]) || r; },
       can,
       canEdit,
+      canExecute,
+      canAssign,
+      canPrioritize,
+      canDeleteTask,
       currentUser,
       signOut,
       ready: !shared || authUser !== undefined,
