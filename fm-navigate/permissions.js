@@ -53,14 +53,25 @@
   };
 
   // role → resource → [actions]. '*' as a resource = applies to every
-  // resource. Actions: read | write | delete | approve | invite | manage.
+  // resource. Actions: read | write | create | assign | prioritize |
+  // delete | approve | invite | manage.
+  //
+  // JIRA-STYLE SPLIT (tasks resource)
+  // - EXECUTION  — write/create: work any task (progress, comments,
+  //   checklist, evidence, status) and edit descriptive fields on tasks
+  //   you own or created. Granted to every delivery role.
+  // - GOVERNANCE — assign (change owner), prioritize, delete: reserved
+  //   for owner / product_manager / tech_lead (delete: owner + PM only).
+  // Until the workspace blob is normalised into tables, the DB can only
+  // enforce the coarse write (see schema.sql); the finer split below is
+  // enforced at the app.jsx mutation handlers.
   var PERMISSIONS = {
     owner: {
-      '*': ['read', 'write', 'delete', 'approve', 'invite', 'manage'],
+      '*': ['read', 'write', 'create', 'assign', 'prioritize', 'delete', 'approve', 'invite', 'manage'],
     },
     product_manager: {
       workspace: ['read', 'write', 'delete'],
-      tasks: ['read', 'write', 'delete', 'approve'],
+      tasks: ['read', 'write', 'create', 'assign', 'prioritize', 'delete', 'approve'],
       deliverables: ['read', 'write', 'delete'],
       roadmap: ['read', 'write', 'delete'],
       stories: ['read', 'write', 'delete'],
@@ -84,7 +95,7 @@
     },
     business_analyst: {
       workspace: ['read'],
-      tasks: ['read'],
+      tasks: ['read', 'write', 'create'],
       deliverables: ['read'],
       roadmap: ['read'],
       stories: ['read', 'write', 'delete'],
@@ -94,7 +105,7 @@
     },
     tech_lead: {
       workspace: ['read'],
-      tasks: ['read', 'write', 'approve'],
+      tasks: ['read', 'write', 'create', 'assign', 'prioritize', 'approve'],
       deliverables: ['read'],
       roadmap: ['read'],
       stories: ['read'],
@@ -105,7 +116,7 @@
     },
     developer: {
       workspace: ['read'],
-      tasks: ['read', 'write'],
+      tasks: ['read', 'write', 'create'],
       deliverables: ['read'],
       roadmap: ['read'],
       defects: ['read', 'write'],
@@ -113,7 +124,7 @@
     },
     qa: {
       workspace: ['read'],
-      tasks: ['read'],
+      tasks: ['read', 'write', 'create'],
       deliverables: ['read'],
       roadmap: ['read'],
       defects: ['read', 'write'],

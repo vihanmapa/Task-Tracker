@@ -105,7 +105,7 @@ function App() {
   // App is just a consumer now: identity, role, can()/canEdit, currentUser and
   // signOut all come from one place. The provider owns the Supabase session and
   // the cached profile (see auth-context.jsx).
-  const { authUser, profile, can, canEdit, currentUser, roleLabel, signOut } = useAuth();
+  const { authUser, profile, can, canEdit, canExecute, canAssign, canPrioritize, canDeleteTask, currentUser, roleLabel, signOut } = useAuth();
 
   // Apply a loaded/realtime workspace document (v2: { metadata, data }) to state.
   const applyDoc = useCallbackA((doc) => {
@@ -151,7 +151,7 @@ function App() {
       localStorage.setItem('fm_col_weeks', JSON.stringify(weeks));
     } catch (_) {}
     if (skipSaveRef.current) { skipSaveRef.current = false; return; }
-    if (shared && canEdit) {
+    if (shared && (canEdit || canExecute)) {
       latestDocRef.current = { metadata: metaRef.current, data: { tasks, deliverables, weeks, kpiScores } };
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => runSaveRef.current(), 400);
@@ -304,8 +304,25 @@ function App() {
   const openTask = useCallbackA((id) => { setSelected(id); setRoute('detail'); }, []);
   const openDeliverable = useCallbackA((id) => { setDlvSelected(id); setRoute('dlvDetail'); }, []);
 
+  // ---- Jira-style task permissions (single choke point) ----
+  // Execution roles work any task (progress, comments, checklist, evidence,
+  // status). Descriptive fields are editable only on tasks they own or
+  // created; owner/priority/delete stay with governance/lead roles. The UI
+  // flags passed to screens only shape rendering — these checks decide.
+  const taskCreator = (t) => {
+    const c = (t.activity || []).find(a => a.type === 'created');
+    return c ? c.userId : null;
+  };
+  const isMyTask = useCallbackA((t) => !!t && (t.ownerId === currentUser || taskCreator(t) === currentUser), [currentUser]);
+  const fieldAllowed = useCallbackA((t, field) => {
+    if (field === 'ownerId') return canAssign;
+    if (field === 'priority') return canPrioritize;
+    if (field === 'status') return canExecute;
+    return canEdit || (canExecute && isMyTask(t));
+  }, [canEdit, canExecute, canAssign, canPrioritize, isMyTask]);
+
   const moveTask = useCallbackA((id, status) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     setTasks(ts => ts.map(t => {
       if (t.id !== id || t.status === status) return t;
       const act = [...(t.activity || []), { type: status === 'Completed' ? 'completed' : 'status', userId: currentUser, at: new Date().toISOString(), detail: `${t.status} → ${status}` }];
@@ -313,10 +330,10 @@ function App() {
         completedAt: status === 'Completed' ? new Date().toISOString() : t.completedAt,
         progress: status === 'Completed' ? 100 : t.progress, activity: act };
     }));
-  }, [canEdit, currentUser]);
+  }, [canExecute, currentUser]);
 
   const toggleDone = useCallbackA((id) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     setTasks(ts => ts.map(t => {
       if (t.id !== id) return t;
       const done = t.status === 'Completed';
@@ -324,17 +341,17 @@ function App() {
       const act = [...(t.activity || []), { type: done ? 'status' : 'completed', userId: currentUser, at: new Date().toISOString(), detail: done ? 'Completed → In Progress' : undefined }];
       return { ...t, status, updatedAt: new Date().toISOString(), completedAt: done ? null : new Date().toISOString(), progress: done ? 75 : 100, activity: act };
     }));
-  }, [canEdit, currentUser]);
+  }, [canExecute, currentUser]);
 
   const addComment = useCallbackA((id, text) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     setTasks(ts => ts.map(t => t.id === id ? {
       ...t,
       comments: [...(t.comments || []), { id: 'c' + Date.now(), userId: currentUser, comment: text, createdAt: new Date().toISOString() }],
       activity: [...(t.activity || []), { type: 'comment', userId: currentUser, at: new Date().toISOString() }],
       updatedAt: new Date().toISOString(),
     } : t));
-  }, [currentUser]);
+  }, [canExecute, currentUser]);
 
   // shared: build a full task record from extracted/edited fields
   const buildTask = useCallbackA((data) => {
@@ -353,25 +370,25 @@ function App() {
   }, [currentUser]);
 
   const createTask = useCallbackA((data) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     const task = buildTask(data);
     setTasks(ts => [task, ...ts]);
     setComposer(false);
     setSelected(task.id); setRoute('detail');
-  }, [canEdit, buildTask]);
+  }, [canExecute, buildTask]);
 
   // batch create — add many tasks at once, then land on the Tasks list
   const createTasks = useCallbackA((rows) => {
-    if (!canEdit || !rows || !rows.length) return;
+    if (!canExecute || !rows || !rows.length) return;
     const built = rows.map(buildTask);
     setTasks(ts => [...built, ...ts]);
     setComposer(false);
     setSelected(null); setRoute('tasks');
-  }, [canEdit, buildTask]);
+  }, [canExecute, buildTask]);
 
-  // permanently remove a task (editor only); land back on the Tasks list
+  // permanently remove a task (governance: owner/PM only); land on the Tasks list
   const deleteTask = useCallbackA((id) => {
-    if (!canEdit) return;
+    if (!canDeleteTask) return;
     const t = tasks.find(x => x.id === id);
     if (!confirm(`Delete "${t ? t.title : id}"? This permanently removes the task and its history. This cannot be undone.`)) return;
     setTasks(ts => ts.filter(x => x.id !== id));
@@ -380,11 +397,11 @@ function App() {
     if (ds && ds.authReady && ds.authReady()) ds.deleteResourcesFor('task', id);
     if (selected === id) setSelected(null);
     setRoute('tasks');
-  }, [canEdit, tasks, selected]);
+  }, [canDeleteTask, tasks, selected]);
 
   // log a progress update: status + % complete + note + evidence (link or attached file)
   const logProgress = useCallbackA((id, entry) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     const now = new Date().toISOString();
     // when the update happened — back-datable from the form; never in the future
     const at = entry.at && new Date(entry.at) <= new Date(now) ? entry.at : now;
@@ -421,7 +438,7 @@ function App() {
         completedAt: status === 'Completed' ? at : (status !== 'Completed' ? null : t.completedAt),
         activity: act };
     }));
-  }, [canEdit, currentUser]);
+  }, [canExecute, currentUser]);
 
   // task.progress/status mirror the most recent progress entry; recompute it
   // after a log entry is edited or removed
@@ -434,12 +451,15 @@ function App() {
   };
 
   // edit an existing progress entry in place, then re-derive task progress/status
+  // (execution roles may only touch their OWN entries; governance may touch any)
   const editProgress = useCallbackA((id, entryId, entry) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     const now = new Date().toISOString();
     const at = entry.at && new Date(entry.at) <= new Date(now) ? entry.at : now;
     setTasks(ts => ts.map(t => {
       if (t.id !== id) return t;
+      const target = (t.progressLog || []).find(e => e.id === entryId);
+      if (!canEdit && target && target.userId !== currentUser) return t;
       let status = entry.status || t.status;
       let pct = Math.max(0, Math.min(100, Math.round(entry.percent)));
       if (status === 'Completed') pct = 100;
@@ -466,27 +486,30 @@ function App() {
       const act = [...(t.activity || []), { type: 'edit', userId: currentUser, at: now, detail: 'Progress update' }];
       return syncFromLatest({ ...t, progressLog: log, checklist, activity: act }, now);
     }));
-  }, [canEdit, currentUser]);
+  }, [canEdit, canExecute, currentUser]);
 
   // permanently remove a single progress entry, then re-derive task progress/status
+  // (execution roles may only remove their OWN entries; governance may remove any)
   const deleteProgress = useCallbackA((id, entryId) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     if (!confirm('Delete this progress update? This cannot be undone.')) return;
     const now = new Date().toISOString();
     setTasks(ts => ts.map(t => {
       if (t.id !== id) return t;
+      const target = (t.progressLog || []).find(e => e.id === entryId);
+      if (!canEdit && target && target.userId !== currentUser) return t;
       const log = (t.progressLog || []).filter(e => e.id !== entryId);
       const act = [...(t.activity || []), { type: 'edit', userId: currentUser, at: now, detail: 'Removed a progress update' }];
       return syncFromLatest({ ...t, progressLog: log, activity: act }, now);
     }));
-  }, [canEdit, currentUser]);
+  }, [canEdit, canExecute, currentUser]);
 
   // edit task fields — diff each field, log the change, keep it revertable
   const EDIT_LABELS = { title: 'Title', description: 'Description', successCriteria: 'Success criteria', dependencies: 'Dependencies', depTaskIds: 'Dependency tasks', risk: 'Risk', priority: 'Priority', effort: 'Effort', category: 'Category', status: 'Status', ownerId: 'Owner', dueDate: 'Due date' };
   const sameVal = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
   const editTask = useCallbackA((id, changes) => {
-    if (!canEdit) return;
+    if (!canEdit && !canExecute) return;
     const now = new Date().toISOString();
     setTasks(ts => ts.map(t => {
       if (t.id !== id) return t;
@@ -496,6 +519,7 @@ function App() {
       let changed = false;
       Object.keys(changes).forEach(field => {
         if (!(field in EDIT_LABELS)) return;
+        if (!fieldAllowed(t, field)) return; // per-field: assign/prioritize/ownership rules
         const from = t[field];
         const to = changes[field];
         if (sameVal(from, to)) return;
@@ -514,23 +538,24 @@ function App() {
       if (!changed) return t;
       return { ...next, edits, activity: act, updatedAt: now };
     }));
-  }, [canEdit, currentUser]);
+  }, [canEdit, canExecute, fieldAllowed, currentUser]);
 
   // revert one logged change back to its previous value (the revert is itself logged)
   const revertEdit = useCallbackA((id, editId) => {
-    if (!canEdit) return;
+    if (!canEdit && !canExecute) return;
     const now = new Date().toISOString();
     setTasks(ts => ts.map(t => {
       if (t.id !== id) return t;
       const target = (t.edits || []).find(e => e.id === editId);
       if (!target || target.reverted) return t;
+      if (!fieldAllowed(t, target.field)) return t; // reverting IS editing that field
       const edits = (t.edits || []).map(e => e.id === editId ? { ...e, reverted: true } : e);
       const revId = 'ed' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       edits.push({ id: revId, field: target.field, label: target.label, from: t[target.field] ?? null, to: target.from ?? null, userId: currentUser, at: now, reverted: false, isRevert: true });
       const act = [...(t.activity || []), { type: 'revert', userId: currentUser, at: now, detail: target.label }];
       return { ...t, [target.field]: target.from, edits, activity: act, updatedAt: now };
     }));
-  }, [canEdit, currentUser]);
+  }, [canEdit, canExecute, fieldAllowed, currentUser]);
 
   // ---- deliverables (parent milestones) ----
   const createDeliverable = useCallbackA((data) => {
@@ -592,37 +617,40 @@ function App() {
   // Private resources live in Supabase (per-user RLS); these public ones live
   // in the shared blob so everyone sees them — only the editor can change them.
   const rrid = () => 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  // Task resources are execution evidence (any delivery role); deliverable
+  // resources are part of deliverable management (governance).
+  const resourcePermFor = (parentType) => parentType === 'task' ? canExecute : canEdit;
   const addEntityResource = useCallbackA((parentType, parentId, res) => {
-    if (!canEdit) return;
+    if (!resourcePermFor(parentType)) return;
     const item = { id: rrid(), kind: res.kind || 'link', title: res.title || '', url: res.url || '', note: res.note || '' };
     if (parentType === 'task') setTasks(ts => ts.map(t => t.id === parentId ? { ...t, resources: [...(t.resources || []), item] } : t));
     else setDeliverables(ds2 => ds2.map(d => d.id === parentId ? { ...d, resources: [...(d.resources || []), item] } : d));
-  }, [canEdit]);
+  }, [canEdit, canExecute]);
   const deleteEntityResource = useCallbackA((parentType, parentId, resId) => {
-    if (!canEdit) return;
+    if (!resourcePermFor(parentType)) return;
     if (parentType === 'task') setTasks(ts => ts.map(t => t.id === parentId ? { ...t, resources: (t.resources || []).filter(r => r.id !== resId) } : t));
     else setDeliverables(ds2 => ds2.map(d => d.id === parentId ? { ...d, resources: (d.resources || []).filter(r => r.id !== resId) } : d));
-  }, [canEdit]);
+  }, [canEdit, canExecute]);
   const editEntityResource = useCallbackA((parentType, parentId, resId, patch) => {
-    if (!canEdit) return;
+    if (!resourcePermFor(parentType)) return;
     const apply = (r) => r.id === resId ? { ...r, ...patch } : r;
     if (parentType === 'task') setTasks(ts => ts.map(t => t.id === parentId ? { ...t, resources: (t.resources || []).map(apply) } : t));
     else setDeliverables(ds2 => ds2.map(d => d.id === parentId ? { ...d, resources: (d.resources || []).map(apply) } : d));
-  }, [canEdit]);
+  }, [canEdit, canExecute]);
 
   // ---- checklist items on a task (Trello-style sub-items) ----
   const clid = () => 'cl' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
   const addChecklistItem = useCallbackA((taskId, title) => {
-    if (!canEdit || !title.trim()) return;
+    if (!canExecute || !title.trim()) return;
     const item = { id: clid(), title: title.trim(), done: false };
     setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: [...(t.checklist || []), item], updatedAt: new Date().toISOString() } : t));
-  }, [canEdit]);
+  }, [canExecute]);
   // ticking stamps completedAt/completedBy; linking to a progress update
   // (completedInLogId) is a separate explicit step — only linked items count
   // in weekly reporting. Unticking a linked item warns first: the log keeps
   // its historical reference, but the live link is cleared.
   const toggleChecklistItem = useCallbackA((taskId, itemId) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     const t0 = tasks.find(t => t.id === taskId);
     const c0 = t0 && (t0.checklist || []).find(c => c.id === itemId);
     if (c0 && c0.done && c0.completedInLogId &&
@@ -633,16 +661,16 @@ function App() {
           ? { ...c, done: false, completedAt: null, completedBy: null, completedInLogId: null }
           : { ...c, done: true, completedAt: now, completedBy: currentUser })
       : c), updatedAt: now } : t));
-  }, [canEdit, currentUser, tasks]);
+  }, [canExecute, currentUser, tasks]);
   // per-item working note — belongs to the work item, not the progress log
   const setChecklistNote = useCallbackA((taskId, itemId, text) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     mapChecklistItem(taskId, itemId, c => ({ ...c, note: (text || '').trim() }));
-  }, [canEdit]);
+  }, [canExecute]);
   // attach a completed item to an existing progress update (adds the id to the
   // log's checklistIds + points the item back at the log)
   const linkChecklistToLog = useCallbackA((taskId, itemId, logId) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     const now = new Date().toISOString();
     setTasks(ts => ts.map(t => {
       if (t.id !== taskId) return t;
@@ -659,12 +687,12 @@ function App() {
         updatedAt: now,
       };
     }));
-  }, [canEdit, currentUser]);
+  }, [canExecute, currentUser]);
   // detach an item from its progress update — item stays completed (checklist
   // is current state); the log's historical reference is removed too so
   // weekly reporting no longer claims it
   const unlinkChecklistFromLog = useCallbackA((taskId, itemId) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     const now = new Date().toISOString();
     setTasks(ts => ts.map(t => {
       if (t.id !== taskId) return t;
@@ -680,35 +708,35 @@ function App() {
         updatedAt: now,
       };
     }));
-  }, [canEdit]);
+  }, [canExecute]);
   const editChecklistItem = useCallbackA((taskId, itemId, title) => {
-    if (!canEdit || !title.trim()) return;
+    if (!canExecute || !title.trim()) return;
     setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: (t.checklist || []).map(c => c.id === itemId ? { ...c, title: title.trim() } : c), updatedAt: new Date().toISOString() } : t));
-  }, [canEdit]);
+  }, [canExecute]);
   const deleteChecklistItem = useCallbackA((taskId, itemId) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     setTasks(ts => ts.map(t => t.id === taskId ? { ...t, checklist: (t.checklist || []).filter(c => c.id !== itemId), updatedAt: new Date().toISOString() } : t));
-  }, [canEdit]);
+  }, [canExecute]);
   const mapChecklistItem = (taskId, itemId, fn) =>
     setTasks(ts => ts.map(t => t.id === taskId
       ? { ...t, checklist: (t.checklist || []).map(c => c.id === itemId ? fn(c) : c), updatedAt: new Date().toISOString() }
       : t));
   const addChecklistLink = useCallbackA((taskId, itemId, url) => {
-    if (!canEdit || !url.trim()) return;
+    if (!canExecute || !url.trim()) return;
     mapChecklistItem(taskId, itemId, c => ({ ...c, links: [...(c.links || []), url.trim()] }));
-  }, [canEdit]);
+  }, [canExecute]);
   const deleteChecklistLink = useCallbackA((taskId, itemId, idx) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     mapChecklistItem(taskId, itemId, c => ({ ...c, links: (c.links || []).filter((_, i) => i !== idx) }));
-  }, [canEdit]);
+  }, [canExecute]);
   const addChecklistFile = useCallbackA((taskId, itemId, file) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     mapChecklistItem(taskId, itemId, c => ({ ...c, files: [...(c.files || []), file] }));
-  }, [canEdit]);
+  }, [canExecute]);
   const deleteChecklistFile = useCallbackA((taskId, itemId, idx) => {
-    if (!canEdit) return;
+    if (!canExecute) return;
     mapChecklistItem(taskId, itemId, c => ({ ...c, files: (c.files || []).filter((_, i) => i !== idx) }));
-  }, [canEdit]);
+  }, [canExecute]);
 
   const goAsk = useCallbackA((q) => { if (typeof q === 'string') setAskQ(q); setRoute('ask'); }, []);
 
@@ -900,12 +928,12 @@ function App() {
 
         {route === 'dashboard' && (
           <div className="scroll-area">
-            <window.Dashboard tasks={tasks} deliverables={deliverables} onOpen={openTask} onOpenDeliverable={openDeliverable} onCompose={() => setComposer(true)} onAsk={goAsk} onNav={setRoute} density={tweaks.density} canEdit={canEdit} currentUser={currentUser} />
+            <window.Dashboard tasks={tasks} deliverables={deliverables} onOpen={openTask} onOpenDeliverable={openDeliverable} onCompose={() => setComposer(true)} onAsk={goAsk} onNav={setRoute} density={tweaks.density} canEdit={canExecute} currentUser={currentUser} />
           </div>
         )}
         {route === 'tasks' && (
           <window.TasksScreen tasks={tasks} deliverables={deliverables} view={taskView} setView={setTaskView} onOpen={openTask}
-            onOpenDeliverable={openDeliverable} onCompose={() => setComposer(true)} onMove={moveTask} onToggleDone={toggleDone} canEdit={canEdit} />
+            onOpenDeliverable={openDeliverable} onCompose={() => setComposer(true)} onMove={moveTask} onToggleDone={toggleDone} canEdit={canExecute} />
         )}
         {route === 'deliverables' && (
           <window.DeliverablesScreen deliverables={deliverables} tasks={tasks} canEdit={canEdit}
@@ -920,7 +948,12 @@ function App() {
         {route === 'detail' && (
           <window.TaskDetail task={selectedTask} deliverables={deliverables} allTasks={tasks} onClose={() => { setRoute('tasks'); setSelected(null); }}
             onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditProgress={editProgress} onDeleteProgress={deleteProgress} onEditTask={editTask} onRevertEdit={revertEdit}
-            onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onOpenTask={openTask} onUpdate={() => {}} onDeleteTask={deleteTask} canEdit={canEdit} currentUser={currentUser}
+            onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onOpenTask={openTask} onUpdate={() => {}}
+            onDeleteTask={canDeleteTask ? deleteTask : null}
+            canEdit={canExecute}
+            canEditFields={canEdit || (canExecute && isMyTask(selectedTask))}
+            canAssign={canAssign} canPrioritize={canPrioritize} canLinkDeliverable={canEdit} canModerate={canEdit}
+            currentUser={currentUser}
             weeks={weeks}
             onCreateLinked={(t) => setComposer({ linkTo: { taskId: t.id, title: t.title, deliverableId: t.deliverableId } })}
             onAddResource={addEntityResource} onDeleteResource={deleteEntityResource} onEditResource={editEntityResource}

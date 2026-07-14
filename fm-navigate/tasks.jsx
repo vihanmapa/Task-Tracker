@@ -458,7 +458,7 @@ function ListView({ tasks, deliverables = [], groupBy = 'none', cols = DEFAULT_C
         <button className={`check ${done ? 'done' : ''}`} disabled={!canEdit}
           style={canEdit ? null : { cursor: 'default', opacity: done ? 1 : 0.5 }}
           onClick={e => { e.stopPropagation(); if (canEdit) onToggleDone(t.id); }}
-          title={canEdit ? 'Toggle complete' : 'Read-only — sign in as Vihan to edit'}>
+          title={canEdit ? 'Toggle complete' : 'Read-only — your role can’t edit tasks'}>
           {done && <I.check size={13} />}
         </button>
         <div style={{ minWidth: 0 }}>
@@ -660,7 +660,9 @@ function AttachmentView({ f, size, onOpen }) {
     : <span className="chip"><I.edit size={11} /> {f.name}</span>;
 }
 
-function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, currentUser, seed }) {
+// canModerate: governance roles may edit/delete anyone's entries; execution
+// roles only their own (matches the editProgress/deleteProgress handlers)
+function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, canModerate = true, currentUser, seed }) {
   const I = window.I;
   const log = [...(task.progressLog || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
   const [open, setOpen] = useStateT(false);
@@ -919,7 +921,7 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
                   <window.Ring value={e.percent} size={34} />
                   <div className="grow" style={{ minWidth: 0 }}>
                     <div className="comment-meta row gap8 center" style={{ flexWrap: 'wrap' }}><b style={{ color: 'var(--text)' }}>{e.percent}%</b>{e.status && <window.StatusPill status={e.status} />}<span>· {u?.name || 'Someone'} · {window.fmtRelTime(e.at)}{e.editedAt && ' · edited'}</span>
-                      {canEdit && (
+                      {canEdit && (canModerate || e.userId === currentUser) && (
                         <span className="row gap8 center" style={{ marginLeft: 'auto' }}>
                           <button className="icon-btn" title="Edit update" onClick={() => openEditForm(e)}><I.edit size={14} /></button>
                           <button className="icon-btn" title="Delete update" onClick={() => onDelete(task.id, e.id)}><I.trash size={14} /></button>
@@ -986,7 +988,7 @@ function ProgressLog({ task, onLog, onEdit, onDelete, onCreateLinked, canEdit, c
 }
 
 /* ---------------- Editable details panel ---------------- */
-function TaskEditPanel({ task, allTasks = [], onSave, onCancel }) {
+function TaskEditPanel({ task, allTasks = [], canPrioritize = true, onSave, onCancel }) {
   const I = window.I;
   const [f, setF] = useStateT({
     title: task.title || '',
@@ -1056,12 +1058,14 @@ function TaskEditPanel({ task, allTasks = [], onSave, onCancel }) {
       <Lbl>Risk</Lbl>
       <textarea className="ai-textarea" style={{ minHeight: 60, fontSize: 13.5 }} value={f.risk} onChange={e => set('risk', e.target.value)} />
       <div className="row gap12" style={{ flexWrap: 'wrap' }}>
-        <div style={{ flex: 1, minWidth: 140 }}>
-          <Lbl>Priority</Lbl>
-          <select className="input" value={f.priority} onChange={e => set('priority', e.target.value)}>
-            {window.PRIORITIES.map(p => <option key={p}>{p}</option>)}
-          </select>
-        </div>
+        {canPrioritize && (
+          <div style={{ flex: 1, minWidth: 140 }}>
+            <Lbl>Priority</Lbl>
+            <select className="input" value={f.priority} onChange={e => set('priority', e.target.value)}>
+              {window.PRIORITIES.map(p => <option key={p}>{p}</option>)}
+            </select>
+          </div>
+        )}
         <div style={{ flex: 1, minWidth: 140 }}>
           <Lbl>Effort</Lbl>
           <select className="input" value={f.effort} onChange={e => set('effort', e.target.value)}>
@@ -1328,7 +1332,15 @@ function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDelet
   );
 }
 
-function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onCreateLinked, onAddResource, onDeleteResource, onEditResource, onAddChecklistItem, onToggleChecklistItem, onEditChecklistItem, onDeleteChecklistItem, onAddChecklistLink, onDeleteChecklistLink, onAddChecklistFile, onDeleteChecklistFile, onSetChecklistNote, onLinkChecklistToLog, onUnlinkChecklistFromLog, onDeleteTask, canEdit = true, currentUser = 'richard' }) {
+/* Permission props (Jira-style, all default true for local mode):
+   - canEdit         EXECUTION on this task: progress, checklist, evidence,
+                     comments, status. True for every delivery role.
+   - canEditFields   descriptive fields (title/desc/due/effort/category…):
+                     governance, or an execution role on their own task.
+   - canAssign / canPrioritize   owner + priority changes (lead roles).
+   - canLinkDeliverable          deliverable linking (governance).
+   Enforcement lives in the app.jsx handlers — these only shape the UI. */
+function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClose, onUpdate, onAddComment, onToggleDone, onLogProgress, onEditProgress, onDeleteProgress, onEditTask, onRevertEdit, onAssignDeliverable, onOpenDeliverable, onOpenTask, onCreateLinked, onAddResource, onDeleteResource, onEditResource, onAddChecklistItem, onToggleChecklistItem, onEditChecklistItem, onDeleteChecklistItem, onAddChecklistLink, onDeleteChecklistLink, onAddChecklistFile, onDeleteChecklistFile, onSetChecklistNote, onLinkChecklistToLog, onUnlinkChecklistFromLog, onDeleteTask, canEdit = true, canEditFields = true, canAssign = true, canPrioritize = true, canLinkDeliverable = true, canModerate = true, currentUser = 'richard' }) {
   // "Create Progress Update" from a checklist item — seeds the progress form
   // with that item as Work delivered; token forces the form open each click
   const [logSeed, setLogSeed] = useStateT(null);
@@ -1405,13 +1417,13 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
               <window.PriorityTag priority={task.priority} />
               <window.CatChip category={task.category} />
               <span className="grow" />
-              {canEdit && !editing && (
+              {canEditFields && !editing && (
                 <button className="btn btn-subtle btn-sm" onClick={() => setEditing(true)}><I.edit size={13} /> Edit</button>
               )}
             </div>
 
             {editing ? (
-              <TaskEditPanel task={task} allTasks={allTasks}
+              <TaskEditPanel task={task} allTasks={allTasks} canPrioritize={canPrioritize}
                 onSave={(changes) => { onEditTask && onEditTask(task.id, changes); setEditing(false); }}
                 onCancel={() => setEditing(false)} />
             ) : (
@@ -1534,7 +1546,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
             )}
 
             {/* progress log — describes work; the checklist manages it */}
-            <ProgressLog task={task} onLog={onLogProgress} onEdit={onEditProgress} onDelete={onDeleteProgress} onCreateLinked={onCreateLinked && (() => onCreateLinked(task))} canEdit={canEdit} currentUser={currentUser} seed={logSeed} />
+            <ProgressLog task={task} onLog={onLogProgress} onEdit={onEditProgress} onDelete={onDeleteProgress} onCreateLinked={onCreateLinked && (() => onCreateLinked(task))} canEdit={canEdit} canModerate={canModerate} currentUser={currentUser} seed={logSeed} />
 
             {/* checklist — where work is executed, evidenced and completed */}
             <Checklist task={task} canEdit={canEdit}
@@ -1569,15 +1581,21 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
               })}
               {(!task.comments || task.comments.length === 0) && <div className="muted" style={{ fontSize: 13, padding: '8px 0' }}>No comments yet.</div>}
             </div>
-            <div className="row gap8 mt12" style={{ alignItems: 'flex-end' }}>
-              <window.Avatar user={currentUser} size={30} />
-              <div className="chat-inputbar" style={{ flex: 1, padding: '6px 8px 6px 14px' }}>
-                <textarea rows={1} placeholder="Add a comment…" value={comment}
-                  onChange={e => setComment(e.target.value)}
-                  onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(); } }} />
-                <button className="btn btn-primary btn-sm" onClick={submitComment} disabled={!comment.trim()}><I.send size={14} /></button>
+            {/* the composer only renders for roles whose writes RLS will accept —
+                otherwise a comment would appear locally and silently fail to persist */}
+            {canEdit ? (
+              <div className="row gap8 mt12" style={{ alignItems: 'flex-end' }}>
+                <window.Avatar user={currentUser} size={30} />
+                <div className="chat-inputbar" style={{ flex: 1, padding: '6px 8px 6px 14px' }}>
+                  <textarea rows={1} placeholder="Add a comment…" value={comment}
+                    onChange={e => setComment(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(); } }} />
+                  <button className="btn btn-primary btn-sm" onClick={submitComment} disabled={!comment.trim()}><I.send size={14} /></button>
+                </div>
               </div>
-            </div>
+            ) : (
+              <div className="muted mt12" style={{ fontSize: 12.5 }}>Read-only — your role can view but not comment.</div>
+            )}
 
             {/* danger zone — permanent delete */}
             {canEdit && onDeleteTask && (
@@ -1601,7 +1619,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
                 </div>
               )}
               <div className="meta-row"><span className="meta-k">Deliverable</span>
-                {canEdit
+                {canLinkDeliverable
                   ? <span className="row gap6 center" style={{ flex: '0 1 210px', minWidth: 0 }}>
                       <window.DeliverablePicker value={task.deliverableId} deliverables={deliverables}
                         onChange={(v) => onAssignDeliverable && onAssignDeliverable(task.id, v)} />
@@ -1650,34 +1668,34 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
                   : <window.StatusPill status={task.status} />}
               </div>
               <div className="meta-row"><span className="meta-k">Priority</span>
-                {canEdit
+                {canEdit && canPrioritize
                   ? <select className="select meta-edit" value={task.priority} onChange={e => onEditTask && onEditTask(task.id, { priority: e.target.value })}>
                       {window.PRIORITIES.map(p => <option key={p}>{p}</option>)}
                     </select>
                   : <window.PriorityTag priority={task.priority} />}
               </div>
               <div className="meta-row"><span className="meta-k">Owner</span>
-                {canEdit
+                {canEdit && canAssign
                   ? <select className="select meta-edit" value={task.ownerId} onChange={e => onEditTask && onEditTask(task.id, { ownerId: e.target.value })}>
                       {window.peopleOptions(task.ownerId).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
                     </select>
                   : <span className="row gap6 center"><window.Avatar user={owner} size={22} /><span className="meta-v">{owner.name}</span></span>}
               </div>
               <div className="meta-row"><span className="meta-k">Due date</span>
-                {canEdit
+                {canEditFields
                   ? <input type="date" className="select meta-edit" value={toDateInput(task.dueDate)}
                       onChange={e => onEditTask && onEditTask(task.id, { dueDate: e.target.value ? new Date(e.target.value + 'T17:00:00').toISOString() : null })} />
                   : <span className="meta-v"><window.DueTag iso={task.dueDate} status={task.status} /></span>}
               </div>
               <div className="meta-row"><span className="meta-k">Effort</span>
-                {canEdit
+                {canEditFields
                   ? <select className="select meta-edit" value={task.effort} onChange={e => onEditTask && onEditTask(task.id, { effort: e.target.value })}>
                       {Object.keys(window.EFFORT_LABEL).map(k => <option key={k} value={k}>{window.EFFORT_LABEL[k]}</option>)}
                     </select>
                   : <span className="meta-v">{window.EFFORT_LABEL[task.effort] || task.effort}</span>}
               </div>
               <div className="meta-row"><span className="meta-k">Category</span>
-                {canEdit
+                {canEditFields
                   ? <select className="select meta-edit" value={task.category} onChange={e => onEditTask && onEditTask(task.id, { category: e.target.value })}>
                       {window.CATEGORIES.map(c => <option key={c}>{c}</option>)}
                     </select>

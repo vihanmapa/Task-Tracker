@@ -13,22 +13,29 @@ that Row Level Security enforces. The client mirror is `fm-navigate/permissions.
 
 ## Roles
 
-| Role               | `app_role`         | Workspace write? |
-| ------------------ | ------------------ | ---------------- |
-| Owner              | `owner`            | ✅ (everything)  |
-| Product Manager    | `product_manager`  | ✅               |
-| Investor           | `investor`         | ❌ read + comment |
-| Business Analyst   | `business_analyst` | ❌ (stories later) |
-| Tech Lead          | `tech_lead`        | ❌ (tasks later)  |
-| Software Engineer  | `developer`        | ❌ (tasks later)  |
-| QA Engineer        | `qa`               | ❌ (defects later) |
-| Viewer             | `viewer`           | ❌ read only      |
+Jira-style split: **execution** (work tasks — progress, comments, checklists,
+evidence, create tasks) is open to every delivery role; **governance**
+(assign owner, prioritise, delete tasks, deliverables, weekly plans, KPI,
+import/clear, users, settings) stays with leads/owner/PM.
+
+| Role               | `app_role`         | Execute tasks? | Assign/prioritise | Delete tasks / govern |
+| ------------------ | ------------------ | -------------- | ----------------- | --------------------- |
+| Owner              | `owner`            | ✅             | ✅                | ✅ (everything)       |
+| Product Manager    | `product_manager`  | ✅             | ✅                | ✅ (not users/settings) |
+| Tech Lead          | `tech_lead`        | ✅             | ✅                | ❌                    |
+| Business Analyst   | `business_analyst` | ✅             | ❌                | ❌                    |
+| Software Engineer  | `developer`        | ✅             | ❌                | ❌                    |
+| QA Engineer        | `qa`               | ✅             | ❌                | ❌                    |
+| Investor           | `investor`         | ❌ read only   | ❌                | ❌                    |
+| Viewer             | `viewer`           | ❌ read only   | ❌                | ❌                    |
 
 **Phase 1 caveat:** tasks/deliverables/KPIs all live in ONE `workspace` jsonb
-document, so the only DB-enforced WRITE today is the whole document — granted to
-`owner` + `product_manager`. The finer per-resource rules in `permissions.js`
-(tasks, stories, defects, roadmap…) are future-named: when the blob is split into
-real tables, RLS tightens under the same `can()` calls with no UI change.
+document, so the only DB-enforced WRITE is the whole document — granted to all
+six delivery roles above. The finer split (execution vs assign/prioritise/delete,
+own-task field edits) is enforced centrally in the app's mutation handlers
+(`app.jsx`) and is NOT a hard security boundary until the blob is normalised
+into per-resource tables. Acceptable for a small trusted team. Execution roles
+can also edit descriptive fields only on tasks they own or created.
 
 ---
 
@@ -71,11 +78,22 @@ on conflict (id) do nothing;
 **Bootstrap the first owner via SQL** (no owner exists yet to use the UI):
 
 ```sql
-update public.profiles set role = 'owner', name = 'Richard Davies'
-  where email = 'richard@...';
-update public.profiles set role = 'product_manager', name = 'Vihan Mapalagama'
+-- TWO owners: Vihan runs the platform day-to-day; Richard is the Managing
+-- Director. Both get full authority (the last-active-owner guard keeps the
+-- account from ever being locked out).
+update public.profiles set role = 'owner', name = 'Vihan Mapalagama'
   where email = 'vihancmapa@gmail.com';
+update public.profiles set role = 'owner', name = 'Richard Davies'
+  where email = 'richard.davies@evbex.com';
+-- The rest can be set here too, or via Settings → Users once an owner is live:
+update public.profiles set role = 'business_analyst', name = 'Jathurshan Sivakumaran'
+  where email = 'jathurshan.sivakumaran@evbex.com';
+-- Isuru (tech_lead): assign via Settings → Users, or add his email here.
 ```
+
+> Jathurshan's business title is *Senior* Business Analyst; the `app_role` enum
+> has no seniority tiers, so he maps to `business_analyst`. Titles ≠ permission
+> roles — add tiers only if permissions genuinely diverge.
 
 After that, **the owner assigns everyone else from the app**: Settings → *Users
 & roles* → pick a role per person, or disable a user. No more SQL. (Only the
@@ -117,6 +135,9 @@ least three accounts: an owner, a product_manager, and a viewer.
 | Login           | Owner, PM, Viewer can all sign in                             |
 | JWT             | `user_role` claim present (decode the access token)           |
 | Workspace       | Owner/PM can create/move/complete; Viewer's edits are blocked |
+| Execution roles | BA/Dev/QA/TL can create tasks, log progress, comment, tick checklist, add evidence — and the write PERSISTS (RLS accepts) |
+| Execution limits| BA cannot change priority/owner (controls absent), cannot delete tasks, can edit description only on own/created tasks, can edit/delete only own progress entries |
+| Tech Lead       | Same as BA plus owner + priority changes                      |
 | Users page      | Visible to Owner only; absent for PM/Viewer                   |
 | Role change     | Owner changes a role in Settings → Users; saves               |
 | Session refresh | New role takes effect only after that user re-authenticates   |
