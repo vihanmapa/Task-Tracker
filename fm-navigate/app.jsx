@@ -20,14 +20,21 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "dark": false
 }/*EDITMODE-END*/;
 
+// Navigation registry (TDD §7.2 decision record): an item renders iff its
+// `visible` check passes against the user's PERMISSIONS — there are no
+// separate navigation.* permission keys, so menu visibility can never drift
+// from what the role can actually do. Items without `visible` always render.
+// (Settings stays open to everyone: it holds personal appearance prefs; the
+// admin cards inside it gate themselves.) Routes stay reachable by URL —
+// screens are read-open today, this only shapes the menu.
 const NAV = [
   { key: 'dashboard',    label: 'Dashboard', icon: 'grid' },
-  { key: 'week',         label: 'This Week', icon: 'calendar' },
-  { key: 'kpi',          label: 'KPI Scorecard', icon: 'trend' },
-  { key: 'deliverables', label: 'Deliverables', icon: 'target' },
-  { key: 'tasks',        label: 'Tasks',     icon: 'list' },
-  { key: 'summary',      label: 'Weekly Summary', icon: 'summary' },
-  { key: 'ask',          label: 'Ask AI',    icon: 'spark' },
+  { key: 'week',         label: 'This Week', icon: 'calendar', visible: can => can('weekly', 'read') },
+  { key: 'kpi',          label: 'KPI Scorecard', icon: 'trend', visible: can => can('kpi', 'read') },
+  { key: 'deliverables', label: 'Deliverables', icon: 'target', visible: can => can('deliverables', 'read') },
+  { key: 'tasks',        label: 'Tasks',     icon: 'list', visible: can => can('tasks', 'read') },
+  { key: 'summary',      label: 'Weekly Summary', icon: 'summary', visible: can => can('reports', 'read') },
+  { key: 'ask',          label: 'Ask AI',    icon: 'spark', visible: can => can('tasks', 'read') },
   { key: 'settings',     label: 'Settings',  icon: 'settings' },
 ];
 
@@ -854,7 +861,7 @@ function App() {
           </button>
         </div>
 
-        {NAV.map(n => {
+        {NAV.filter(n => !n.visible || n.visible(can)).map(n => {
           const Icon = I[n.icon];
           const active = route === n.key || (route === 'detail' && n.key === 'tasks') || (route === 'dlvDetail' && n.key === 'deliverables');
           const count = n.key === 'tasks' ? counts.tasks : null;
@@ -1046,6 +1053,11 @@ function UsersManager() {
             <div style={{ fontWeight: 600, fontSize: 13.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name || p.email || p.id}</div>
             <div className="muted" style={{ fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.email}</div>
           </div>
+          {/* Job title: organizational display text — separate concept from the
+              security role beside it, and it grants nothing (TDD §3.2). */}
+          <input className="input" style={{ width: 130, fontSize: 12.5, padding: '5px 8px' }}
+            placeholder="Job title" defaultValue={p.job_title || ''} disabled={savingId === p.id}
+            onBlur={e => { const v = e.target.value.trim() || null; if (v !== (p.job_title || null)) patch(p.id, 'job_title', v); }} />
           <select className="input" style={{ width: 'auto', fontSize: 12.5, padding: '5px 8px' }}
             value={p.role} disabled={savingId === p.id}
             onChange={e => patch(p.id, 'role', e.target.value)}>
