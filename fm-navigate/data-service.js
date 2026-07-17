@@ -480,7 +480,9 @@
       return c.auth.getUser().then(function (u) {
         var uid = u && u.data && u.data.user && u.data.user.id;
         if (!uid) return null;
-        return c.from('profiles').select('id,email,name,avatar_url,role,status').eq('id', uid).maybeSingle()
+        // select('*') on purpose: explicit columns would 400 when the client
+        // ships before the Phase-2 SQL adds job_title. Star is deploy-order safe.
+        return c.from('profiles').select('*').eq('id', uid).maybeSingle()
           .then(function (r) { return r.error ? null : (r.data || null); });
       }).catch(function () { return null; });
     },
@@ -489,7 +491,7 @@
     listProfiles: function () {
       var c = client();
       if (!c) return Promise.resolve([]);
-      return c.from('profiles').select('id,email,name,avatar_url,role,status').order('created_at', { ascending: true })
+      return c.from('profiles').select('*').order('created_at', { ascending: true })
         .then(function (r) { return r.error ? [] : (r.data || []); })
         .catch(function () { return []; });
     },
@@ -502,7 +504,7 @@
       var c = client();
       if (!c) return Promise.resolve({ ok: false, error: 'no client' });
       var allowed = {};
-      ['name', 'avatar_url', 'role', 'status'].forEach(function (k) {
+      ['name', 'avatar_url', 'role', 'status', 'job_title'].forEach(function (k) {
         if (patch && patch[k] !== undefined) allowed[k] = patch[k];
       });
       return c.from('profiles').update(allowed).eq('id', id).select()
@@ -513,6 +515,97 @@
           return { ok: true, row: rows[0] };
         })
         .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    /* ---- Phase 2 RBAC: table-driven roles & permissions ----
+       (docs/TDD-ROLES-PERMISSIONS.md). The catalog tables are readable by
+       any signed-in user; role_permissions reads are scoped by RLS to the
+       caller's own role unless they hold admin.permissions. list* methods
+       REJECT on error (unlike the []-fallback style above) so RBAC.load()
+       can tell "tables unavailable → fall back to DEFAULTS" apart from
+       "role genuinely has zero grants → deny". ---- */
+
+    // All roles, admin sort order. Rejects when the Phase-2 tables are absent.
+    listRoles: function () {
+      var c = client();
+      if (!c) return Promise.reject(new Error('no client'));
+      return c.from('roles').select('slug,label,description,sort_order').order('sort_order', { ascending: true })
+        .then(function (r) {
+          if (r.error) throw new Error(r.error.message);
+          return r.data || [];
+        });
+    },
+
+    // The permission catalog (grouped in the admin UI). Rejects on error.
+    listPermissionCatalog: function () {
+      var c = client();
+      if (!c) return Promise.reject(new Error('no client'));
+      return c.from('permissions').select('key,grp,layer,label,description,sort_order').order('sort_order', { ascending: true })
+        .then(function (r) {
+          if (r.error) throw new Error(r.error.message);
+          return r.data || [];
+        });
+    },
+
+    // Current grants. RLS returns the caller's own role's rows — or the full
+    // matrix for admin.permissions holders (the admin screen). Rejects on error.
+    listRolePermissions: function () {
+      var c = client();
+      if (!c) return Promise.reject(new Error('no client'));
+      return c.from('role_permissions').select('role_slug,permission_key')
+        .then(function (r) {
+          if (r.error) throw new Error(r.error.message);
+          return r.data || [];
+        });
+    },
+
+    // Grant one permission to a role. RLS restricts to admin.permissions
+    // holders; the owner role additionally has an immutability trigger.
+    grantPermission: function (roleSlug, permissionKey) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      return c.auth.getUser().then(function (u) {
+        var uid = u && u.data && u.data.user && u.data.user.id;
+        return c.from('role_permissions')
+          .insert({ role_slug: roleSlug, permission_key: permissionKey, updated_by: uid || null })
+          .then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; });
+      }).catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    // Revoke one permission from a role. `.select()` so an RLS-filtered
+    // silent no-op (0 rows) reports as failure instead of fake success.
+    revokePermission: function (roleSlug, permissionKey) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      return c.from('role_permissions').delete()
+        .eq('role_slug', roleSlug).eq('permission_key', permissionKey).select()
+        .then(function (r) {
+          if (r.error) return { ok: false, error: r.error.message };
+          if (!r.data || !r.data.length) return { ok: false, error: 'Not permitted.' };
+          return { ok: true };
+        })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    // Replace a role's grants with its template's factory settings.
+    resetRoleToTemplate: function (roleSlug) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      return c.rpc('reset_role_to_template', { p_role: roleSlug })
+        .then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    // Live permission changes (RLS scopes events to rows the caller may read).
+    // cb() fires on any grant/revoke; callers refetch via RBAC.load().
+    subscribeRolePermissions: function (cb) {
+      var c = client();
+      if (!c) return function () {};
+      var ch = c.channel('role-permissions')
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'role_permissions' },
+          function () { cb(); })
+        .subscribe();
+      return function () { try { c.removeChannel(ch); } catch (_) {} };
     },
 
     // List comments on one entity, oldest first.
