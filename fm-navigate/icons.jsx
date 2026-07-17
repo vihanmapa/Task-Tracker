@@ -50,6 +50,7 @@ const I = {
   trend:    (p) => <Ico {...p}><path d="M3 17l6-6 4 4 7-7M21 8v4h-4"/></Ico>,
   inbox:    (p) => <Ico {...p}><path d="M4 13l2-8h12l2 8M4 13v6h16v-6M4 13h5l1 2h4l1-2h5"/></Ico>,
   menu:     (p) => <Ico {...p} d="M4 6h16M4 12h16M4 18h16"/>,
+  copy:     (p) => <Ico {...p}><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></Ico>,
 };
 
 window.I = I;

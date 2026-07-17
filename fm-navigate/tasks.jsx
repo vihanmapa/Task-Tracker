@@ -1332,6 +1332,82 @@ function Checklist({ task, onAdd, onToggle, onEdit, onDelete, onAddLink, onDelet
   );
 }
 
+/* Serialize a task to self-contained markdown — everything an external AI
+   needs to summarize it without access to the app. */
+function taskToMarkdown(task, { deliverables = [], allTasks = [], weeks = [] } = {}) {
+  const lines = [];
+  const push = (s) => lines.push(s);
+  const name = (id) => window.userOf(id).name;
+  const taskRef = (id) => { const t = allTasks.find(x => x.id === id); return t ? `${t.id} ${t.title} (${t.status})` : `${id} (deleted)`; };
+  const dlv = deliverables.find(d => d.id === task.deliverableId);
+  const dlvPath = dlv && window.dlvHelpers ? window.dlvHelpers.pathOf(dlv.id, deliverables).map(p => p.title).join(' > ') : dlv?.title;
+
+  push(`# ${task.id} — ${task.title}`);
+  push('');
+  push(`- Status: ${task.status}`);
+  push(`- Priority: ${task.priority}`);
+  push(`- Category: ${task.category}`);
+  push(`- Owner: ${name(task.ownerId)}`);
+  push(`- Due date: ${task.dueDate ? window.fmtDateFull(task.dueDate) : '—'}`);
+  push(`- Effort: ${window.EFFORT_LABEL[task.effort] || task.effort || '—'}`);
+  push(`- Progress: ${task.progress || 0}%`);
+  push(`- Deliverable: ${dlvPath || '—'}`);
+  push(`- Created: ${window.fmtDateFull(task.createdAt)} · Last updated: ${window.fmtDateFull(task.updatedAt)}`);
+  if (task.completedAt) push(`- Completed: ${window.fmtDateFull(task.completedAt)}`);
+
+  const weekRows = (weeks || []).filter(w => (w.taskIds || []).includes(task.id));
+  if (weekRows.length) push(`- Planned in: ${weekRows.map(w => `W${w.weekNumber}`).join(', ')}`);
+
+  if (task.description) { push(''); push('## Description'); push(task.description); }
+  if (task.successCriteria) { push(''); push('## Success criteria'); push(task.successCriteria); }
+
+  if (task.depTaskIds?.length) {
+    push(''); push('## Dependency tasks');
+    task.depTaskIds.forEach(id => push(`- ${taskRef(id)}`));
+  }
+  const linkedFrom = allTasks.filter(t => t.id !== task.id && (t.depTaskIds || []).includes(task.id));
+  if (linkedFrom.length) {
+    push(''); push('## Linked tasks (follow-ups that reference this task)');
+    linkedFrom.forEach(t => push(`- ${t.id} ${t.title} (${t.status})`));
+  }
+  if (task.dependencies?.length) {
+    push(''); push('## Dependencies');
+    task.dependencies.forEach(d => push(`- ${d}`));
+  }
+  if (task.risk) { push(''); push('## Risk'); push(task.risk); }
+
+  const cl = task.checklist || [];
+  if (cl.length) {
+    push(''); push(`## Checklist (${cl.filter(c => c.done).length}/${cl.length} done)`);
+    cl.forEach(c => {
+      push(`- [${c.done ? 'x' : ' '}] ${c.text}`);
+      if (c.note) push(`  - Note: ${c.note.replace(/\n/g, '\n    ')}`);
+      (c.links || []).forEach(l => push(`  - Link: ${l.url || l}`));
+      (c.files || []).forEach(f => push(`  - File: ${f.name || 'attachment'}`));
+    });
+  }
+
+  const log = [...(task.progressLog || [])].sort((a, b) => new Date(a.at) - new Date(b.at));
+  if (log.length) {
+    push(''); push('## Progress log');
+    log.forEach(e => {
+      const head = [e.status, e.percent != null ? `${e.percent}%` : null].filter(Boolean).join(' · ');
+      push(`- ${window.fmtDateFull(e.at)} — ${name(e.userId)}${head ? ` — ${head}` : ''}${e.note ? `: ${e.note.replace(/\n/g, ' ')}` : ''}`);
+      const delivered = (e.checklistIds || []).map(cid => cl.find(c => c.id === cid)?.text).filter(Boolean);
+      if (delivered.length) push(`  - Delivered: ${delivered.join('; ')}`);
+      // links: new entries carry {links:[...]}, legacy ones a single `link`
+      (e.links || (e.link ? [e.link] : [])).forEach(l => push(`  - Link: ${l.url || l}`));
+    });
+  }
+
+  if (task.comments?.length) {
+    push(''); push('## Comments');
+    task.comments.forEach(c => push(`- ${name(c.userId)} (${window.fmtDateFull(c.createdAt)}): ${c.comment}`));
+  }
+
+  return lines.join('\n');
+}
+
 /* Permission props (Jira-style, all default true for local mode):
    - canEdit         EXECUTION on this task: progress, checklist, evidence,
                      comments, status. True for every delivery role.
@@ -1348,6 +1424,7 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
   const [comment, setComment] = useStateT('');
   const [editing, setEditing] = useStateT(false);
   const [histOpen, setHistOpen] = useStateT(false);
+  const [copied, setCopied] = useStateT(false);
   if (!task) return null;
   const owner = window.userOf(task.ownerId);
   const dlv = deliverables.find(d => d.id === task.deliverableId);
@@ -1373,6 +1450,22 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
     if (!comment.trim()) return;
     onAddComment(task.id, comment.trim());
     setComment('');
+  };
+
+  const copyTask = async () => {
+    const text = taskToMarkdown(task, { deliverables, allTasks, weeks });
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (_) {
+      // clipboard API unavailable (e.g. insecure context) — textarea fallback
+      const ta = document.createElement('textarea');
+      ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch (_) {}
+      document.body.removeChild(ta);
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const activity = [...(task.activity || [])].sort((a, b) => new Date(b.at) - new Date(a.at));
@@ -1405,6 +1498,9 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
           <span className="muted mono" style={{ fontSize: 12 }}>{task.id}</span>
         </span>
         <span className="grow" />
+        <button className="btn btn-ghost btn-sm" onClick={copyTask} title="Copy full task details as markdown — paste into any AI for a summary">
+          {copied ? <><I.check size={13} /> Copied</> : <><I.copy size={13} /> Copy task</>}
+        </button>
         <window.StatusPill status={task.status} />
       </div>
 
@@ -1732,4 +1828,4 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
   );
 }
 
-Object.assign(window, { TasksScreen, TaskDetail });
+Object.assign(window, { TasksScreen, TaskDetail, taskToMarkdown });
