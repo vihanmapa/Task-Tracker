@@ -5,7 +5,8 @@
   "description": "FM Navigate Execution Hub — static app, precompiled for GitHub Pages",
   "scripts": {
     "build": "node build.mjs",
-    "serve": "python3 dist/serve.py 4173"
+    "serve": "python3 dist/serve.py 4173",
+    "verify:rbac": "node scripts/verify-rbac-parity.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.23.0"
