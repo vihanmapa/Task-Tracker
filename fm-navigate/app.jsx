@@ -1117,6 +1117,7 @@ function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, onExport, onImport
         </div>
 
         <UsersManager />
+        <window.RolesPermissionsManager />
 
         <div className="card card-pad">
           <div className="section-eyebrow mb12">Data · {taskCount} task{taskCount === 1 ? '' : 's'}</div>
