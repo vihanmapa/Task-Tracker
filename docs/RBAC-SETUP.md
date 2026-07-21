@@ -167,3 +167,65 @@ Deferred to later phases — intentionally, to stay simple:
 The contract that stays stable: the app always asks
 `RBAC.can(role, resource, action)`. The implementation behind it can grow into a
 permissions table, teams, or orgs without touching the UI.
+
+---
+
+# Phase 2 — table-driven Roles & Permissions
+
+Blueprint: `docs/TDD-ROLES-PERMISSIONS.md` rev 0.3 (approved). Phase 2 moves
+the permission rules out of code and into Supabase tables; owners edit them at
+runtime in **Settings → Roles & Permissions**.
+
+## Apply
+
+Re-run `supabase/schema.sql` in the SQL editor (idempotent — the Phase 2
+section at the bottom creates/seeds the new tables and swaps the policies).
+Re-running later never clobbers runtime permission edits: only a role with
+zero grant rows is re-seeded, and catalog/templates are migration-owned.
+
+What it adds:
+
+| Piece | Purpose |
+| --- | --- |
+| `permissions` | The catalog (41 keys, grouped, layered). Migration-only, append-only. |
+| `role_templates` + `template_permissions` | Factory settings per template — "Reset to template" restores these. |
+| `roles` | 12 seeded system roles, incl. new `executive`, `senior_business_analyst`, `ba_intern`, `associate_developer`. |
+| `role_permissions` | Current grants — the only runtime-editable store. |
+| `authorize(permission)` | RLS primitive: looks the caller's `jwt_role()` up in `role_permissions` at query time. Permission toggles apply on the **next request**, no re-login. Role changes still need a token refresh. |
+| `profiles.job_title` | Display-only business title ("Managing Director"). Grants nothing — security roles are separate. |
+
+Guardrails (all DB-enforced): owner grants immutable, system roles
+undeletable/unrenamable, last-active-owner protection unchanged, every
+grant/revoke audited to `activity_log` as `permission_granted` /
+`permission_revoked`.
+
+## What the admin matrix can actually change (enforcement boundary)
+
+The catalog carries the full 41-key target shape, but Phase 2 only **wires 12
+keys** end-to-end. The admin screen makes exactly those editable; every other
+key is shown read-only with a **Planned** badge, because toggling it would have
+no effect. The wired set is the `permissions.enforced` column (set canonically
+by this SQL) and is code-audited, not assumed. Standard: a key is enforced only
+with a real user-visible effect — **DB-only enforcement doesn't count**, which
+is why `comments.write`/`comments.moderate` stay Planned (the RLS is live but
+`public.comments` is unused; comments live in the workspace blob). See
+`docs/TDD-ROLES-PERMISSIONS.md` §2.1 for the full table and rationale. When a
+Planned key's control lands later, flip it to `enforced = true` in the same
+migration slot — no catalog churn.
+
+## Client behaviour
+
+`permissions.js` fetches the matrix per sign-in and refetches on realtime
+grant changes. If the Phase 2 tables aren't there (SQL not applied yet) the
+client falls back to the hardcoded Phase-1 matrix — both deploy orders are
+safe. Parity between the two is asserted by `npm run verify:rbac`.
+
+## Verify after applying
+
+1. `npm run verify:rbac` still green (static parity).
+2. Sign in as a QA-role account → task work saves; Settings shows no admin cards.
+3. As owner: Settings → Roles & Permissions → toggle `Work tasks` off for
+   QA Engineer → the QA user's UI flips read-only within seconds (no
+   re-login) and any in-flight save is rejected by RLS. Toggle back.
+4. `activity_log` shows the `permission_revoked` / `permission_granted` pair.
+5. Reset to template on a customised role restores the seeded set.

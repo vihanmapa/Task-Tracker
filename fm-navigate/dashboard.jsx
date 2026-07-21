@@ -1,5 +1,16 @@
 /* ============================================================
-   FM Navigate — Founder Dashboard (hero screen)
+   FM Navigate — Dashboard (widget composition engine)
+   ------------------------------------------------------------
+   TDD §7.3: dashboards are neither permissions nor fixed layouts —
+   they are COMPOSITIONS of widgets, and every widget declares the
+   permissions it `requires`. Rendered dashboard = composition minus
+   the widgets the signed-in role fails. So a role that loses
+   deliverables.read loses the Deliverables widget automatically —
+   dashboard visibility can never drift from data visibility.
+
+   Phase 2 ships the engine with one composition (the current layout)
+   as the every-role default; per-role compositions become data in
+   Phase 3 — configuration, not a rewrite.
    ============================================================ */
 const { useState: useStateDash, useMemo: useMemoDash, useEffect: useEffectDash } = React;
 
@@ -17,9 +28,21 @@ function KpiTile({ label, value, foot, footTone, accent, icon, spark, onClick })
   );
 }
 
+// composition slot -> ordered widget keys. Keyed by primary role with a
+// 'default' fallback; Phase 2 defines only the default (role-specific
+// compositions are Phase-3 content work — the engine doesn't change).
+const DASH_COMPOSITIONS = {
+  default: {
+    top:   ['kpi_row'],
+    left:  ['deliverables', 'attention', 'in_progress'],
+    right: ['ask_ai', 'due_soon', 'recent'],
+  },
+};
+
 function Dashboard({ tasks, deliverables = [], onOpen, onOpenDeliverable, onCompose, onAsk, onNav, density, canEdit = true, currentUser = 'richard' }) {
   const I = window.I;
   const H = window.dlvHelpers;
+  const { can, role } = useAuth();
   const wkStart = window.startOfWeek(window.TODAY), wkEnd = window.endOfWeek(window.TODAY);
   const inWeek = (iso) => iso && new Date(iso) >= wkStart && new Date(iso) <= wkEnd;
 
@@ -95,6 +118,226 @@ function Dashboard({ tasks, deliverables = [], onOpen, onOpenDeliverable, onComp
   const greet = hour < 12 ? 'Good morning' : hour < 18 ? 'Good afternoon' : 'Good evening';
   const firstName = (window.USERS[currentUser]?.name || 'there').split(' ')[0];
 
+  /* ---- widget registry ----
+     key -> { requires: [[resource, action], …], node }. A widget renders
+     only when the role holds EVERY required permission. */
+  const WIDGETS = {
+    kpi_row: {
+      requires: [['tasks', 'read']],
+      node: (
+        <div className="kpi-grid">
+          <KpiTile label={<>{<I.inbox size={13} />}Active tasks</>} value={m.active.length} accent="var(--accent)"
+            foot={<><I.trend size={13} className="trend-up" /><span className="trend-up">+2</span> vs last week</>}
+            spark={<window.Spark data={[8,9,10,11,10,12,m.active.length]} />} onClick={() => onNav('tasks')} />
+          <KpiTile label={<>{<I.block size={13} />}Blocked</>} value={m.blocked.length} accent="var(--st-blocked)"
+            foot={m.blocked.length ? <span style={{ color: 'var(--neg)' }}>Needs unblocking</span> : 'All clear'}
+            spark={<window.Spark data={[1,1,2,2,3,2,m.blocked.length]} color="var(--st-blocked)" />} onClick={() => onNav('tasks')} />
+          <KpiTile label={<>{<I.calendar size={13} />}Due this week</>} value={m.dueWeek.length} accent="var(--st-waiting)"
+            foot={`${m.overdue.length} overdue`} footTone={m.overdue.length ? 'var(--neg)' : null}
+            spark={<window.Spark data={[3,4,5,4,5,6,m.dueWeek.length]} color="var(--st-waiting)" />} onClick={() => onNav('tasks')} />
+          <KpiTile label={<>{<I.check size={13} />}Completed</>} value={m.completedWeek.length} accent="var(--st-completed)"
+            foot="this week" spark={<window.Spark data={[2,3,3,5,4,6,m.completedWeek.length]} color="var(--st-completed)" />} onClick={() => onNav('summary')} />
+          <KpiTile label={<>{<I.flame size={13} />}Critical</>} value={m.critical.length} accent="var(--pr-critical)"
+            foot="open · high stakes" spark={<window.Spark data={[1,2,2,2,3,2,m.critical.length]} color="var(--pr-critical)" />} onClick={() => onNav('tasks')} />
+          <KpiTile label={<>{<I.trend size={13} />}Avg progress</>} value={`${m.avgProgress}%`} accent="var(--st-inprogress)"
+            foot={`${m.updatesWeek} update${m.updatesWeek === 1 ? '' : 's'} this week`}
+            spark={<window.Spark data={[20,35,40,52,58,65,m.avgProgress]} color="var(--st-inprogress)" />} onClick={() => onNav('tasks')} />
+        </div>
+      ),
+    },
+
+    deliverables: {
+      requires: [['deliverables', 'read']],
+      node: dlv.roots.length > 0 && (
+        <div className="card">
+          <div className="card-head">
+            <span style={{ color: 'var(--accent)', display: 'grid', placeItems: 'center' }}><I.flag size={16} /></span>
+            <span className="card-title">Deliverables</span>
+            <span className="card-title-sub">{dlv.avg}% avg · {dlv.atRisk} at risk</span>
+            <span className="grow" />
+            <button className="btn btn-subtle btn-sm" onClick={() => onNav('deliverables')}>View all</button>
+          </div>
+          <div style={{ padding: '4px 0' }}>
+            {dlv.roots.slice(0, 5).map(({ d, r, atRisk, overdue }) => (
+              <div key={d.id} className="att-item" onClick={() => onOpenDeliverable && onOpenDeliverable(d.id)} style={{ alignItems: 'center' }}>
+                <div className="att-main">
+                  <div className="row between center gap12">
+                    <div className="att-title grow" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</div>
+                    <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{r.progress}%</span>
+                  </div>
+                  <div style={{ marginTop: 8 }}><window.Progress value={r.progress} /></div>
+                  <div className="att-meta" style={{ marginTop: 8 }}>
+                    <span className="muted" style={{ fontSize: 11.5 }}>{r.done}/{r.total} tasks</span>
+                    {r.subCount > 0 && <><span className="faint">·</span><span className="muted" style={{ fontSize: 11.5 }}>{r.subCount} sub</span></>}
+                    {r.blocked > 0 && <><span className="faint">·</span><span style={{ color: 'var(--st-blocked)', fontSize: 11.5, fontWeight: 600 }}>{r.blocked} blocked</span></>}
+                    {overdue && <><span className="faint">·</span><span style={{ color: 'var(--neg)', fontSize: 11.5, fontWeight: 600 }}>overdue</span></>}
+                    {!atRisk && d.status === 'Delivered' && <><span className="faint">·</span><span style={{ color: 'var(--st-completed)', fontSize: 11.5, fontWeight: 600 }}>delivered</span></>}
+                  </div>
+                </div>
+                <I.chevR size={16} className="faint" />
+              </div>
+            ))}
+          </div>
+        </div>
+      ),
+    },
+
+    attention: {
+      requires: [['tasks', 'read']],
+      node: (
+        <div className="card">
+          <div className="card-head">
+            <span style={{ color: 'var(--neg)', display: 'grid', placeItems: 'center' }}><I.alert size={17} /></span>
+            <span className="card-title">Needs your attention</span>
+            <span className="card-title-sub">{m.attention.length} items</span>
+            <span className="grow" />
+            <button className="btn btn-subtle btn-sm" onClick={() => onNav('tasks')}>View all</button>
+          </div>
+          <div>
+            {m.attention.length === 0 && <div className="empty">Nothing needs attention. Everything is moving.</div>}
+            {m.attention.slice(0, 5).map(({ task, reason, sev }) => {
+              const flag = sev >= 3 ? 'var(--neg)' : sev === 2 ? 'var(--pr-critical)' : 'var(--st-waiting)';
+              return (
+                <div key={task.id} className="att-item" onClick={() => onOpen(task.id)}>
+                  <div className="att-flag" style={{ background: flag }} />
+                  <div className="att-main">
+                    <div className="att-title">{task.title}</div>
+                    <div className="att-meta">
+                      <span className="att-reason" style={{ color: flag, fontWeight: 600 }}>{reason}</span>
+                      <span className="faint">·</span>
+                      <window.CatChip category={task.category} />
+                    </div>
+                  </div>
+                  <window.PriorityTag priority={task.priority} />
+                  <I.chevR size={16} className="faint" />
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      ),
+    },
+
+    in_progress: {
+      requires: [['tasks', 'read']],
+      node: (
+        <div className="card">
+          <div className="card-head">
+            <span style={{ color: 'var(--st-inprogress)', display: 'grid', placeItems: 'center' }}><I.spark size={16} /></span>
+            <span className="card-title">In progress now</span>
+            <span className="card-title-sub">What Vihan is working on</span>
+            <span className="grow" />
+            <window.Avatar user="vihan" size={24} />
+          </div>
+          <div style={{ padding: '6px 0' }}>
+            {m.inProgress.map(t => (
+              <div key={t.id} className="att-item" onClick={() => onOpen(t.id)} style={{ alignItems: 'center' }}>
+                <div className="att-main">
+                  <div className="row between center gap12">
+                    <div className="att-title grow" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</div>
+                    <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{t.progress}%</span>
+                  </div>
+                  <div style={{ marginTop: 8 }}><window.Progress value={t.progress} /></div>
+                  <div className="att-meta" style={{ marginTop: 8 }}>
+                    <window.PriorityTag priority={t.priority} />
+                    <span className="faint">·</span>
+                    <window.DueTag iso={t.dueDate} />
+                    <span className="faint">·</span>
+                    <window.CatChip category={t.category} />
+                  </div>
+                </div>
+              </div>
+            ))}
+            {m.inProgress.length === 0 && <div className="empty">Nothing actively in progress.</div>}
+          </div>
+        </div>
+      ),
+    },
+
+    ask_ai: {
+      requires: [['tasks', 'read']],
+      node: (
+        <div className="rail-ai">
+          <div className="row gap8 center mb12">
+            <span style={{ color: 'var(--accent)' }}><I.spark size={17} /></span>
+            <span className="card-title">Ask the assistant</span>
+          </div>
+          <div className="muted" style={{ fontSize: 12.5, lineHeight: 1.5 }}>Answers grounded only in your live task data.</div>
+          {['What is Vihan working on?', 'What is blocked and why?', "What's due this week?", 'Summarize project status'].map(q => (
+            <button key={q} className="rail-suggest" onClick={() => onAsk(q)}>{q}</button>
+          ))}
+        </div>
+      ),
+    },
+
+    due_soon: {
+      requires: [['tasks', 'read']],
+      node: (
+        <div className="card">
+          <div className="card-head">
+            <span style={{ color: 'var(--st-waiting)', display: 'grid', placeItems: 'center' }}><I.calendar size={16} /></span>
+            <span className="card-title">Due soon</span>
+          </div>
+          <div>
+            {m.dueSoon.map(t => {
+              const r = window.relDue(t.dueDate);
+              const tone = r.tone === 'over' ? 'var(--neg)' : r.tone === 'soon' ? 'var(--st-waiting)' : 'var(--text-3)';
+              return (
+                <div key={t.id} className="feed-item" onClick={() => onOpen(t.id)} style={{ cursor: 'pointer' }}>
+                  <div style={{ width: 44, flexShrink: 0, textAlign: 'center' }}>
+                    <div className="mono" style={{ fontSize: 16, fontWeight: 700, color: tone, lineHeight: 1 }}>{new Date(t.dueDate).getDate()}</div>
+                    <div className="faint mono" style={{ fontSize: 9.5, textTransform: 'uppercase' }}>{new Date(t.dueDate).toLocaleDateString('en-US', { month: 'short' })}</div>
+                  </div>
+                  <div className="grow" style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</div>
+                    <div className="row gap8 center mt4">
+                      <span style={{ color: tone, fontSize: 11.5, fontWeight: 600 }}>{r.text}</span>
+                      <window.StatusPill status={t.status} dot={false} />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+            {m.dueSoon.length === 0 && <div className="empty" style={{ padding: '20px 16px', fontSize: 12.5 }}>Nothing due soon.</div>}
+          </div>
+        </div>
+      ),
+    },
+
+    recent: {
+      requires: [['tasks', 'read']],
+      node: (
+        <div className="card">
+          <div className="card-head">
+            <span style={{ color: 'var(--st-completed)', display: 'grid', placeItems: 'center' }}><I.check size={16} /></span>
+            <span className="card-title">Recently completed</span>
+          </div>
+          <div>
+            {m.recent.map(t => (
+              <div key={t.id} className="feed-item" onClick={() => onOpen(t.id)} style={{ cursor: 'pointer' }}>
+                <div className="feed-dot" style={{ background: 'var(--st-completed)' }} />
+                <div className="grow" style={{ minWidth: 0 }}>
+                  <div className="feed-text" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</div>
+                  <div className="feed-time">Completed {window.fmtRelTime(t.completedAt)}</div>
+                </div>
+              </div>
+            ))}
+            {m.recent.length === 0 && <div className="empty" style={{ padding: '20px 16px', fontSize: 12.5 }}>Nothing completed yet.</div>}
+          </div>
+        </div>
+      ),
+    },
+  };
+
+  const composition = DASH_COMPOSITIONS[role] || DASH_COMPOSITIONS.default;
+  const allowed = (key) => {
+    const w = WIDGETS[key];
+    return !!w && w.requires.every(([resource, action]) => can(resource, action));
+  };
+  const renderSlot = (keys) => keys.filter(allowed).map(k => (
+    <React.Fragment key={k}>{WIDGETS[k].node}</React.Fragment>
+  ));
+
   return (
     <div className="page-pad fade-in">
       {/* hello */}
@@ -118,192 +361,12 @@ function Dashboard({ tasks, deliverables = [], onOpen, onOpenDeliverable, onComp
         <button className="btn btn-subtle btn-sm" onClick={onAsk} style={{ flexShrink: 0 }}>Ask AI <I.arrowR size={14} /></button>
       </div>
 
-      {/* KPI row */}
-      <div className="kpi-grid">
-        <KpiTile label={<>{<I.inbox size={13} />}Active tasks</>} value={m.active.length} accent="var(--accent)"
-          foot={<><I.trend size={13} className="trend-up" /><span className="trend-up">+2</span> vs last week</>}
-          spark={<window.Spark data={[8,9,10,11,10,12,m.active.length]} />} onClick={() => onNav('tasks')} />
-        <KpiTile label={<>{<I.block size={13} />}Blocked</>} value={m.blocked.length} accent="var(--st-blocked)"
-          foot={m.blocked.length ? <span style={{ color: 'var(--neg)' }}>Needs unblocking</span> : 'All clear'}
-          spark={<window.Spark data={[1,1,2,2,3,2,m.blocked.length]} color="var(--st-blocked)" />} onClick={() => onNav('tasks')} />
-        <KpiTile label={<>{<I.calendar size={13} />}Due this week</>} value={m.dueWeek.length} accent="var(--st-waiting)"
-          foot={`${m.overdue.length} overdue`} footTone={m.overdue.length ? 'var(--neg)' : null}
-          spark={<window.Spark data={[3,4,5,4,5,6,m.dueWeek.length]} color="var(--st-waiting)" />} onClick={() => onNav('tasks')} />
-        <KpiTile label={<>{<I.check size={13} />}Completed</>} value={m.completedWeek.length} accent="var(--st-completed)"
-          foot="this week" spark={<window.Spark data={[2,3,3,5,4,6,m.completedWeek.length]} color="var(--st-completed)" />} onClick={() => onNav('summary')} />
-        <KpiTile label={<>{<I.flame size={13} />}Critical</>} value={m.critical.length} accent="var(--pr-critical)"
-          foot="open · high stakes" spark={<window.Spark data={[1,2,2,2,3,2,m.critical.length]} color="var(--pr-critical)" />} onClick={() => onNav('tasks')} />
-        <KpiTile label={<>{<I.trend size={13} />}Avg progress</>} value={`${m.avgProgress}%`} accent="var(--st-inprogress)"
-          foot={`${m.updatesWeek} update${m.updatesWeek === 1 ? '' : 's'} this week`}
-          spark={<window.Spark data={[20,35,40,52,58,65,m.avgProgress]} color="var(--st-inprogress)" />} onClick={() => onNav('tasks')} />
-      </div>
+      {renderSlot(composition.top)}
 
       {/* main grid */}
       <div className="dash-grid">
-        <div className="dash-col">
-          {/* deliverables */}
-          {dlv.roots.length > 0 && (
-            <div className="card">
-              <div className="card-head">
-                <span style={{ color: 'var(--accent)', display: 'grid', placeItems: 'center' }}><I.flag size={16} /></span>
-                <span className="card-title">Deliverables</span>
-                <span className="card-title-sub">{dlv.avg}% avg · {dlv.atRisk} at risk</span>
-                <span className="grow" />
-                <button className="btn btn-subtle btn-sm" onClick={() => onNav('deliverables')}>View all</button>
-              </div>
-              <div style={{ padding: '4px 0' }}>
-                {dlv.roots.slice(0, 5).map(({ d, r, atRisk, overdue }) => (
-                  <div key={d.id} className="att-item" onClick={() => onOpenDeliverable && onOpenDeliverable(d.id)} style={{ alignItems: 'center' }}>
-                    <div className="att-main">
-                      <div className="row between center gap12">
-                        <div className="att-title grow" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</div>
-                        <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{r.progress}%</span>
-                      </div>
-                      <div style={{ marginTop: 8 }}><window.Progress value={r.progress} /></div>
-                      <div className="att-meta" style={{ marginTop: 8 }}>
-                        <span className="muted" style={{ fontSize: 11.5 }}>{r.done}/{r.total} tasks</span>
-                        {r.subCount > 0 && <><span className="faint">·</span><span className="muted" style={{ fontSize: 11.5 }}>{r.subCount} sub</span></>}
-                        {r.blocked > 0 && <><span className="faint">·</span><span style={{ color: 'var(--st-blocked)', fontSize: 11.5, fontWeight: 600 }}>{r.blocked} blocked</span></>}
-                        {overdue && <><span className="faint">·</span><span style={{ color: 'var(--neg)', fontSize: 11.5, fontWeight: 600 }}>overdue</span></>}
-                        {!atRisk && d.status === 'Delivered' && <><span className="faint">·</span><span style={{ color: 'var(--st-completed)', fontSize: 11.5, fontWeight: 600 }}>delivered</span></>}
-                      </div>
-                    </div>
-                    <I.chevR size={16} className="faint" />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* needs attention */}
-          <div className="card">
-            <div className="card-head">
-              <span style={{ color: 'var(--neg)', display: 'grid', placeItems: 'center' }}><I.alert size={17} /></span>
-              <span className="card-title">Needs your attention</span>
-              <span className="card-title-sub">{m.attention.length} items</span>
-              <span className="grow" />
-              <button className="btn btn-subtle btn-sm" onClick={() => onNav('tasks')}>View all</button>
-            </div>
-            <div>
-              {m.attention.length === 0 && <div className="empty">Nothing needs attention. Everything is moving.</div>}
-              {m.attention.slice(0, 5).map(({ task, reason, sev }) => {
-                const flag = sev >= 3 ? 'var(--neg)' : sev === 2 ? 'var(--pr-critical)' : 'var(--st-waiting)';
-                return (
-                  <div key={task.id} className="att-item" onClick={() => onOpen(task.id)}>
-                    <div className="att-flag" style={{ background: flag }} />
-                    <div className="att-main">
-                      <div className="att-title">{task.title}</div>
-                      <div className="att-meta">
-                        <span className="att-reason" style={{ color: flag, fontWeight: 600 }}>{reason}</span>
-                        <span className="faint">·</span>
-                        <window.CatChip category={task.category} />
-                      </div>
-                    </div>
-                    <window.PriorityTag priority={task.priority} />
-                    <I.chevR size={16} className="faint" />
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* in progress now */}
-          <div className="card">
-            <div className="card-head">
-              <span style={{ color: 'var(--st-inprogress)', display: 'grid', placeItems: 'center' }}><I.spark size={16} /></span>
-              <span className="card-title">In progress now</span>
-              <span className="card-title-sub">What Vihan is working on</span>
-              <span className="grow" />
-              <window.Avatar user="vihan" size={24} />
-            </div>
-            <div style={{ padding: '6px 0' }}>
-              {m.inProgress.map(t => (
-                <div key={t.id} className="att-item" onClick={() => onOpen(t.id)} style={{ alignItems: 'center' }}>
-                  <div className="att-main">
-                    <div className="row between center gap12">
-                      <div className="att-title grow" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</div>
-                      <span className="mono" style={{ fontSize: 11.5, color: 'var(--text-3)' }}>{t.progress}%</span>
-                    </div>
-                    <div style={{ marginTop: 8 }}><window.Progress value={t.progress} /></div>
-                    <div className="att-meta" style={{ marginTop: 8 }}>
-                      <window.PriorityTag priority={t.priority} />
-                      <span className="faint">·</span>
-                      <window.DueTag iso={t.dueDate} />
-                      <span className="faint">·</span>
-                      <window.CatChip category={t.category} />
-                    </div>
-                  </div>
-                </div>
-              ))}
-              {m.inProgress.length === 0 && <div className="empty">Nothing actively in progress.</div>}
-            </div>
-          </div>
-        </div>
-
-        {/* right rail */}
-        <div className="dash-col">
-          {/* ask ai */}
-          <div className="rail-ai">
-            <div className="row gap8 center mb12">
-              <span style={{ color: 'var(--accent)' }}><I.spark size={17} /></span>
-              <span className="card-title">Ask the assistant</span>
-            </div>
-            <div className="muted" style={{ fontSize: 12.5, lineHeight: 1.5 }}>Answers grounded only in your live task data.</div>
-            {['What is Vihan working on?', 'What is blocked and why?', "What's due this week?", 'Summarize project status'].map(q => (
-              <button key={q} className="rail-suggest" onClick={() => onAsk(q)}>{q}</button>
-            ))}
-          </div>
-
-          {/* due soon */}
-          <div className="card">
-            <div className="card-head">
-              <span style={{ color: 'var(--st-waiting)', display: 'grid', placeItems: 'center' }}><I.calendar size={16} /></span>
-              <span className="card-title">Due soon</span>
-            </div>
-            <div>
-              {m.dueSoon.map(t => {
-                const r = window.relDue(t.dueDate);
-                const tone = r.tone === 'over' ? 'var(--neg)' : r.tone === 'soon' ? 'var(--st-waiting)' : 'var(--text-3)';
-                return (
-                  <div key={t.id} className="feed-item" onClick={() => onOpen(t.id)} style={{ cursor: 'pointer' }}>
-                    <div style={{ width: 44, flexShrink: 0, textAlign: 'center' }}>
-                      <div className="mono" style={{ fontSize: 16, fontWeight: 700, color: tone, lineHeight: 1 }}>{new Date(t.dueDate).getDate()}</div>
-                      <div className="faint mono" style={{ fontSize: 9.5, textTransform: 'uppercase' }}>{new Date(t.dueDate).toLocaleDateString('en-US', { month: 'short' })}</div>
-                    </div>
-                    <div className="grow" style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</div>
-                      <div className="row gap8 center mt4">
-                        <span style={{ color: tone, fontSize: 11.5, fontWeight: 600 }}>{r.text}</span>
-                        <window.StatusPill status={t.status} dot={false} />
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-              {m.dueSoon.length === 0 && <div className="empty" style={{ padding: '20px 16px', fontSize: 12.5 }}>Nothing due soon.</div>}
-            </div>
-          </div>
-
-          {/* recently completed */}
-          <div className="card">
-            <div className="card-head">
-              <span style={{ color: 'var(--st-completed)', display: 'grid', placeItems: 'center' }}><I.check size={16} /></span>
-              <span className="card-title">Recently completed</span>
-            </div>
-            <div>
-              {m.recent.map(t => (
-                <div key={t.id} className="feed-item" onClick={() => onOpen(t.id)} style={{ cursor: 'pointer' }}>
-                  <div className="feed-dot" style={{ background: 'var(--st-completed)' }} />
-                  <div className="grow" style={{ minWidth: 0 }}>
-                    <div className="feed-text" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{t.title}</div>
-                    <div className="feed-time">Completed {window.fmtRelTime(t.completedAt)}</div>
-                  </div>
-                </div>
-              ))}
-              {m.recent.length === 0 && <div className="empty" style={{ padding: '20px 16px', fontSize: 12.5 }}>Nothing completed yet.</div>}
-            </div>
-          </div>
-        </div>
+        <div className="dash-col">{renderSlot(composition.left)}</div>
+        <div className="dash-col">{renderSlot(composition.right)}</div>
       </div>
     </div>
   );

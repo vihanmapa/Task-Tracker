@@ -55,7 +55,9 @@ function registerIdentity(profile) {
   window.USERS[key] = {
     id: key,
     name: profile.name || profile.email || 'You',
-    role: (window.RBAC.ROLE_LABELS && window.RBAC.ROLE_LABELS[profile.role]) || 'Member',
+    // Display line under a person's name: their JOB TITLE (organizational,
+    // display-only — grants nothing), falling back to the role label.
+    role: profile.job_title || (window.RBAC.ROLE_LABELS && window.RBAC.ROLE_LABELS[profile.role]) || 'Member',
     color: identityColor(key),
     initials: identityInitials(profile.name, profile.email),
     avatar_url: profile.avatar_url || null,
@@ -108,7 +110,31 @@ function AuthProvider({ children }) {
     if (!shared || !profile) return;
     registerIdentity(profile);
   }, [shared, profile && profile.id, profile && profile.name,
-      profile && profile.avatar_url, profile && profile.role]);
+      profile && profile.avatar_url, profile && profile.role,
+      profile && profile.job_title]);
+
+  // Load the table-driven permission matrix (Phase 2) once per sign-in, and
+  // refetch on live grant changes so an owner's toggle reaches this user
+  // within seconds — no re-login. RBAC.load() falls back to the hardcoded
+  // Phase-1 DEFAULTS when the tables aren't available, so this is safe in
+  // every deploy order; rbacVersion re-renders the tree either way so every
+  // canEdit/canExecute consumer picks up the new answers.
+  const [rbacVersion, setRbacVersion] = useState(0);
+  useEffect(() => {
+    if (!shared) return;
+    // Signed out (or between accounts): drop any in-memory matrix so the next
+    // account can't inherit it, then stop — can() falls back to DEFAULTS.
+    if (!authUser) { window.RBAC.reset(); setRbacVersion(v => v + 1); return; }
+    let alive = true;
+    // New identity: clear the previous account's matrix before the first fetch
+    // so nothing stale is served while this account's grants are in flight.
+    window.RBAC.reset();
+    const uid = authUser.id;
+    const refresh = () => window.RBAC.load(ds, uid).then(() => { if (alive) setRbacVersion(v => v + 1); });
+    refresh();
+    const off = ds.subscribeRolePermissions ? ds.subscribeRolePermissions(refresh) : null;
+    return () => { alive = false; off && off(); };
+  }, [shared, authUser && authUser.id]);
 
   // Register EVERY team profile (RLS lets any signed-in user read the
   // directory) so owner pickers can assign anyone — not just the legacy seed
@@ -125,7 +151,7 @@ function AuthProvider({ children }) {
     return () => { alive = false; };
   }, [shared, authUser && authUser.id]);
 
-  const signOut = useCallback(() => ds.signOut().then(() => { setAuthUser(null); setProfile(null); }), []);
+  const signOut = useCallback(() => ds.signOut().then(() => { window.RBAC.reset(); setAuthUser(null); setProfile(null); }), []);
 
   const value = useMemo(() => {
     // Local-only mode has no backend/roles → full-access owner. Shared mode:
@@ -178,7 +204,7 @@ function AuthProvider({ children }) {
       peopleVersion,
       setAuthUser, // for LoginScreen to push the user immediately on sign-in
     };
-  }, [shared, authUser, profile, signOut, peopleVersion]);
+  }, [shared, authUser, profile, signOut, peopleVersion, rbacVersion]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
