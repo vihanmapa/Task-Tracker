@@ -50,6 +50,13 @@ if (phase2.length < 1000) fail('Phase 2 section not found in schema.sql');
 const catalogSection = section(phase2, 'insert into public.permissions', 'on conflict (key)');
 const CATALOG = new Set([...catalogSection.matchAll(/\(\s*'([a-z_]+\.[a-z_]+)'/g)].map(m => m[1]));
 
+// ENFORCED set: the key list in `update public.permissions set enforced = key in (...)`.
+const enforcedSection = section(phase2, 'update public.permissions set enforced = key in', ');');
+const ENFORCED = new Set([...enforcedSection.matchAll(/'([a-z_]+\.[a-z_]+)'/g)].map(m => m[1]));
+
+// The keys RLS actually gates (authorize('<key>') calls anywhere in schema.sql).
+const RLS_ENFORCED = new Set([...sql.matchAll(/authorize\('([a-z_]+\.[a-z_]+)'\)/g)].map(m => m[1]));
+
 // roles: (slug, label, template, is_system, sort)
 const rolesSection = section(phase2, 'insert into public.roles', 'on conflict (slug)');
 const ROLE_TEMPLATE = {};
@@ -101,6 +108,30 @@ const failures = [];
 for (const [from, to] of Object.entries(RBAC.ALIASES)) {
   if (!CATALOG.has(to)) failures.push(`ALIASES['${from}'] → '${to}' is not in the seeded catalog`);
 }
+
+// ---- Enforcement-boundary integrity (Phase 2 honest-set guarantees) ----
+// Every enforced key is a real catalog key.
+for (const k of ENFORCED) if (!CATALOG.has(k)) failures.push(`enforced key '${k}' is not in the catalog`);
+// Every alias target is enforced — aliases exist only for LIVE can() call
+// sites, so an alias pointing at a Planned key would be an editable-but-dead
+// (or worse, a live-but-Planned-labelled) switch.
+for (const [from, to] of Object.entries(RBAC.ALIASES)) {
+  if (!ENFORCED.has(to)) failures.push(`ALIASES['${from}'] → '${to}' targets a non-enforced key (should be in the enforced set)`);
+}
+// Every key RLS gates must be enforced — an authorize()'d key the admin UI
+// showed as Planned would let an owner think a live rule is inert.
+for (const k of RLS_ENFORCED) if (!ENFORCED.has(k)) failures.push(`RLS gates '${k}' but it is not marked enforced`);
+// The documented Phase-2 wired set, as an independent cross-check that the SQL
+// enforced list didn't drift. Keep in sync with TDD §2.1.
+const EXPECTED_ENFORCED = [
+  'tasks.read', 'tasks.execute', 'tasks.assign', 'tasks.prioritize', 'tasks.delete',
+  'deliverables.read', 'weekly.read', 'kpi.read', 'reports.read',
+  'admin.workspace', 'admin.permissions', 'users.assign_roles',
+  'comments.write', 'comments.moderate',
+];
+const expSet = new Set(EXPECTED_ENFORCED);
+for (const k of EXPECTED_ENFORCED) if (!ENFORCED.has(k)) failures.push(`expected enforced key '${k}' missing from schema.sql enforced set`);
+for (const k of ENFORCED) if (!expSet.has(k)) failures.push(`schema.sql marks '${k}' enforced but it is not in the documented wired set (TDD §2.1)`);
 // Every seeded grant must reference a catalog key (FK would catch in-DB;
 // this catches it before anyone runs the SQL).
 for (const [t, keys] of Object.entries(tmplGrants)) {
@@ -186,4 +217,4 @@ if (failures.length) {
   process.exit(1);
 }
 console.log(`✓ RBAC parity holds: ${LEGACY_ROLES.length} legacy roles × ${UI_CHECKS.length} UI checks identical in fallback and matrix mode`);
-console.log(`  catalog ${CATALOG.size} keys · ${Object.keys(ROLE_TEMPLATE).length} seeded roles · ${grantRows.length} seeded grants · aliases valid`);
+console.log(`  catalog ${CATALOG.size} keys · ${ENFORCED.size} enforced (${CATALOG.size - ENFORCED.size} Planned) · ${Object.keys(ROLE_TEMPLATE).length} seeded roles · ${grantRows.length} seeded grants · aliases + RLS keys enforced`);

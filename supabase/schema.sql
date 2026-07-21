@@ -404,8 +404,17 @@ create table if not exists public.permissions (
   layer       text not null,         -- capability layer (system|administration|governance|execution|collaboration|reporting|ai)
   label       text not null,
   description text,
-  sort_order  int not null default 100
+  sort_order  int not null default 100,
+  -- ENFORCED = this key has a real end-to-end effect TODAY (a client gate in
+  -- fm-navigate/, an RLS authorize() call below, or both). The rest are in the
+  -- catalog as the forward-compatible target shape but nothing checks them yet;
+  -- the admin UI shows them read-only and labelled "Planned". Set canonically
+  -- by the UPDATE after the catalog seed — the wired set lives in ONE place.
+  enforced    boolean not null default false
 );
+-- Deploy-order safety: if an earlier Phase-2 run created this table without
+-- the column, add it now (default false; the UPDATE below sets the real value).
+alter table public.permissions add column if not exists enforced boolean not null default false;
 
 create table if not exists public.template_permissions (
   template_slug  text not null references public.role_templates(slug) on delete cascade,
@@ -486,6 +495,32 @@ insert into public.permissions (key, grp, layer, label, sort_order) values
 on conflict (key) do update
   set grp = excluded.grp, layer = excluded.layer,
       label = excluded.label, sort_order = excluded.sort_order;
+
+-- ENFORCED set (Phase 2, code-audited 2026-07-17). Exactly the keys with a
+-- real end-to-end effect today; everything else is Planned (catalog-only).
+--   Client-gated (fm-navigate/ can() call sites):
+--     tasks.read           nav item + every dashboard widget filter
+--     tasks.execute        canExecute — task work + RLS workspace/storage write
+--     tasks.assign         canAssign — owner field
+--     tasks.prioritize     canPrioritize — priority field
+--     tasks.delete         canDeleteTask — delete control
+--     deliverables.read    nav item + Deliverables dashboard widget
+--     weekly.read          nav item (This Week)
+--     kpi.read             nav item (KPI Scorecard)
+--     reports.read         nav item (Weekly Summary)
+--     admin.workspace      canEdit — governance surfaces (import, New task, deliverable/week/KPI edits)
+--     admin.permissions    Roles & Permissions admin card + RLS on role_permissions
+--     users.assign_roles   Users admin card + RLS on profiles
+--   DB-only (RLS authorize(), no dedicated client gate):
+--     comments.write       comment insert
+--     comments.moderate    edit/delete others' comments
+-- Any key NOT listed here is deliberately unenforced (see §Planned in the TDD).
+update public.permissions set enforced = key in (
+  'tasks.read', 'tasks.execute', 'tasks.assign', 'tasks.prioritize', 'tasks.delete',
+  'deliverables.read', 'weekly.read', 'kpi.read', 'reports.read',
+  'admin.workspace', 'admin.permissions', 'users.assign_roles',
+  'comments.write', 'comments.moderate'
+);
 
 -- ---------- 2.2 Templates (factory settings, migration-owned) ----------
 insert into public.role_templates (slug, label) values

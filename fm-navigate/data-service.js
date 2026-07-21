@@ -536,11 +536,12 @@
         });
     },
 
-    // The permission catalog (grouped in the admin UI). Rejects on error.
+    // The permission catalog (grouped in the admin UI). select('*') so the
+    // `enforced` flag rides along and a column add never 400s. Rejects on error.
     listPermissionCatalog: function () {
       var c = client();
       if (!c) return Promise.reject(new Error('no client'));
-      return c.from('permissions').select('key,grp,layer,label,description,sort_order').order('sort_order', { ascending: true })
+      return c.from('permissions').select('*').order('sort_order', { ascending: true })
         .then(function (r) {
           if (r.error) throw new Error(r.error.message);
           return r.data || [];

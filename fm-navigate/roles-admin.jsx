@@ -67,8 +67,14 @@ function RolesPermissionsManager() {
 
   const ownerLocked = selected === 'owner';
 
-  const toggle = (permKey, granted) => {
-    if (ownerLocked || busy) return;
+  // A permission is editable only if it has a real end-to-end effect today
+  // (permissions.enforced, set canonically in schema.sql). Planned keys stay
+  // visible for transparency but their checkboxes are disabled — toggling them
+  // would change nothing, so the UI must never pretend otherwise.
+  const isEnforced = (p) => p.enforced === true;
+
+  const toggle = (permKey, granted, enforced) => {
+    if (ownerLocked || busy || !enforced) return;
     setErr('');
     const gk = grantKey(selected, permKey);
     const prev = grants;
@@ -132,7 +138,8 @@ function RolesPermissionsManager() {
       )}
 
       {!loading && groups.map(([grp, perms]) => {
-        const granted = perms.filter(p => grants.has(grantKey(selected, p.key))).length;
+        const editable = perms.filter(isEnforced);
+        const granted = editable.filter(p => grants.has(grantKey(selected, p.key))).length;
         const isCollapsed = collapsed[grp];
         return (
           <div key={grp} style={{ borderBottom: '1px solid var(--border)' }}>
@@ -142,18 +149,25 @@ function RolesPermissionsManager() {
                 <I.chevR size={14} style={{ transform: isCollapsed ? 'none' : 'rotate(90deg)', transition: 'transform 0.12s' }} />
                 {grp}
               </span>
-              <span className="muted" style={{ fontSize: 12 }}>{granted} of {perms.length}</span>
+              <span className="muted" style={{ fontSize: 12 }}>{granted} of {editable.length}</span>
             </button>
             {!isCollapsed && (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '2px 16px', paddingBottom: 10 }}>
                 {perms.map(p => {
                   const on = grants.has(grantKey(selected, p.key));
+                  const enforced = isEnforced(p);
+                  const disabled = ownerLocked || busy || !enforced;
                   return (
-                    <label key={p.key} className="row gap8 center" title={p.key}
-                      style={{ fontSize: 13, padding: '4px 0', cursor: ownerLocked ? 'default' : 'pointer', opacity: ownerLocked && !on ? 0.5 : 1 }}>
-                      <input type="checkbox" checked={on} disabled={ownerLocked || busy}
-                        onChange={() => toggle(p.key, on)} />
+                    <label key={p.key} className="row gap8 center"
+                      title={enforced ? p.key : p.key + ' — planned; not enforced yet, so this switch has no effect'}
+                      style={{ fontSize: 13, padding: '4px 0', cursor: disabled ? 'default' : 'pointer', opacity: enforced ? (ownerLocked && !on ? 0.5 : 1) : 0.55 }}>
+                      <input type="checkbox" checked={on} disabled={disabled}
+                        onChange={() => toggle(p.key, on, enforced)} />
                       <span style={{ minWidth: 0 }}>{p.label}</span>
+                      {!enforced && (
+                        <span className="chip" style={{ fontSize: 9.5, padding: '0 5px', flexShrink: 0, opacity: 0.8 }}
+                          title="In the catalog as a future target; nothing enforces it yet">Planned</span>
+                      )}
                     </label>
                   );
                 })}
@@ -166,8 +180,9 @@ function RolesPermissionsManager() {
       {err && <div style={{ color: 'var(--st-blocked)', fontSize: 12.5, marginTop: 10 }}>{err}</div>}
       {!loading && (
         <div className="muted" style={{ fontSize: 11.5, marginTop: 12, lineHeight: 1.5 }}>
-          Changes are enforced by the database on the next request and reach signed-in users live — no re-login.
-          Every grant and revoke is recorded in the audit log.
+          Editable permissions take effect on the next request and reach signed-in users live — no re-login — and every
+          grant or revoke is recorded in the audit log. Permissions marked <b>Planned</b> are shown for transparency but
+          are not wired to any control or rule yet, so their switches are disabled and toggling them would change nothing.
         </div>
       )}
     </div>

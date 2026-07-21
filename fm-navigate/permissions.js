@@ -69,9 +69,11 @@
     // delivery role the governance UI.
     'workspace.write': 'admin.workspace',
     'tasks.write': 'tasks.execute',       // canExecute — work any task
-    'tasks.edit_fields': 'tasks.edit',
     'users.write': 'users.assign_roles',
     'workspace.read': 'tasks.read',
+    // NB: no 'tasks.edit_fields' alias — canEditFields is derived from
+    // canEdit/canExecute in app.jsx, nothing calls can('tasks','edit_fields'),
+    // so tasks.edit stays Planned (unwired) until a dedicated gate exists.
   };
 
   /* The Phase-1 matrix, kept verbatim as the FALLBACK (plus read-only
