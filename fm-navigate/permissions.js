@@ -5,10 +5,10 @@
    The whole app still asks `RBAC.can(role, resource, action)`; what
    changed is the backing store behind that one call:
 
-     1. MATRIX MODE (normal): RBAC.load(dataService) fetches the
+     1. MATRIX MODE (normal): RBAC.load(dataService, uid) fetches the
         `roles` catalog and the caller's grants from `role_permissions`
-        once per sign-in (plus realtime refetches). can() answers from
-        that in-memory matrix. Permission toggles made by an owner in
+        once per sign-in (plus realtime refetches), caching per-uid. can()
+        answers from that in-memory matrix. Permission toggles made by an owner in
         Settings → Roles & Permissions reach the UI within seconds —
         and the DATABASE enforces them on the very next request.
      2. FALLBACK MODE: if the Phase-2 tables don't exist yet (SQL not
