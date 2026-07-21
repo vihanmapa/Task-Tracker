@@ -201,13 +201,16 @@ grant/revoke audited to `activity_log` as `permission_granted` /
 
 ## What the admin matrix can actually change (enforcement boundary)
 
-The catalog carries the full 41-key target shape, but Phase 2 only **wires 14
+The catalog carries the full 41-key target shape, but Phase 2 only **wires 12
 keys** end-to-end. The admin screen makes exactly those editable; every other
 key is shown read-only with a **Planned** badge, because toggling it would have
 no effect. The wired set is the `permissions.enforced` column (set canonically
-by this SQL) and is code-audited, not assumed. See
+by this SQL) and is code-audited, not assumed. Standard: a key is enforced only
+with a real user-visible effect — **DB-only enforcement doesn't count**, which
+is why `comments.write`/`comments.moderate` stay Planned (the RLS is live but
+`public.comments` is unused; comments live in the workspace blob). See
 `docs/TDD-ROLES-PERMISSIONS.md` §2.1 for the full table and rationale. When a
-Planned key's control/RLS lands later, flip it to `enforced = true` in the same
+Planned key's control lands later, flip it to `enforced = true` in the same
 migration slot — no catalog churn.
 
 ## Client behaviour

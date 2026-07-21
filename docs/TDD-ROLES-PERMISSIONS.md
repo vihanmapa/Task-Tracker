@@ -7,7 +7,7 @@
 
 **rev 0.2:** Authorization Architecture (§3) with sequence diagrams, capability layers, Business Rules (§8), `tasks.write → tasks.execute` rename + alias map, dashboards demoted from permissions to views, navigation derived from permissions (decision record), feature flags / departments / object roles scoped as future concepts.
 **rev 0.3 (review round 2):** job titles separated from security roles (`executive` role, "Managing Director" becomes a `profiles.job_title`); dedicated `role_templates` / `template_permissions` tables replace the jsonb column; permissions/actions/audit-events distinction (§3.4); dashboards redefined as permission-filtered widget compositions (§7.3); `role_permissions` read narrowed to own-role (non-admins); "Domain ownership" renamed Object Roles; condition-based permissions added to open questions; feature flags moved to Appendix A.
-**rev 0.4 (implementation):** honest enforcement boundary added (§2.1) — the catalog ships the full target shape but only 14 keys are wired end-to-end in Phase 2; the rest are marked `enforced = false` and shown read-only ("Planned") in the admin UI. Also records the two implementation-time security fixes: per-user matrix cache isolation (§7.1) and the `reset_role_to_template` self-lockout fix (§6.4).
+**rev 0.4 (implementation):** honest enforcement boundary added (§2.1) — the catalog ships the full target shape but only **12** keys are wired end-to-end in Phase 2; the rest are marked `enforced = false` and shown read-only ("Planned") in the admin UI. Audit standard: DB-only enforcement is not sufficient — `comments.write`/`comments.moderate` are Planned because `public.comments` is unused (comments live in the workspace blob). Also records the two implementation-time security fixes: per-user matrix cache isolation (§7.1) and the `reset_role_to_template` self-lockout fix (§6.4).
 
 ---
 
@@ -20,7 +20,13 @@ checkbox, because toggling an unwired key would change nothing and the UI must
 not pretend otherwise. The wired set is the `enforced = true` column, set
 canonically in `supabase/schema.sql`, and is code-audited — not assumed.
 
-**Enforced today (14):**
+**Audit standard (what counts as "enforced"):** a key qualifies only if it has
+a **real end-to-end, user-visible effect** — a control a user can reach whose
+allow/deny actually changes persisted behaviour. **DB-only enforcement is not
+sufficient**: RLS on a table the client never reads or writes does not make a
+key live, because denying it changes nothing anyone can observe.
+
+**Enforced today (12):**
 
 | Key | Wired by |
 |---|---|
@@ -35,29 +41,36 @@ canonically in `supabase/schema.sql`, and is code-audited — not assumed.
 | `reports.read` | nav item (Weekly Summary) |
 | `admin.workspace` | `canEdit` — governance surfaces (import, New task in topbar, deliverable/week/KPI edits) |
 | `admin.permissions` | Roles & Permissions admin card + RLS on `role_permissions` |
-| `users.assign_roles` | Users admin card + RLS on `profiles` (role/status changes) |
-| `comments.write` | RLS `authorize('comments.write')` — comment insert |
-| `comments.moderate` | RLS `authorize('comments.moderate')` — edit/delete others' comments |
+| `users.assign_roles` | Users admin card + RLS on `profiles` (role/status changes land) |
 
-**Planned / not enforced (27):** `tasks.create`, `tasks.edit`, `tasks.link`,
+**Planned / not enforced (29):** `tasks.create`, `tasks.edit`, `tasks.link`,
 `tasks.approve`; all non-read `deliverables.*`; `weekly.write_own`,
 `weekly.write_team`, `weekly.approve`; `kpi.write`, `kpi.approve`;
-`reports.generate`, `reports.export`; `comments.read`; `users.read`,
-`users.invite`, `users.disable`, `users.delete`; `admin.backups`,
-`admin.restore`, `admin.settings`, `admin.audit_log`; `dashboard.executive`,
-`dashboard.view_all`.
+`reports.generate`, `reports.export`; **`comments.write`, `comments.moderate`,
+`comments.read`**; `users.read`, `users.invite`, `users.disable`,
+`users.delete`; `admin.backups`, `admin.restore`, `admin.settings`,
+`admin.audit_log`; `dashboard.executive`, `dashboard.view_all`.
 
 Rationale for the split: today task creation/field edits are gated by the
 coarse `canEdit`/`canExecute` flags (not by dedicated `tasks.create`/`.edit`
 checks); deliverables/weekly/KPI writes are gated by `admin.workspace`, not by
 their own keys; reads other than the five nav-driving ones gate nothing
 (reads are open to any signed-in user); and the invite/disable/delete/backup/
-restore/audit/dashboard surfaces have no control or RLS behind them yet. Each
-becomes `enforced = true` in the SAME migration slot when its wiring lands —
-no catalog churn, no UI rewrite. This is the honest expression of the Phase-1
-limit already documented in §2: the workspace is one jsonb blob, so the DB can
-only gate the coarse `tasks.execute` write; the finer keys wait for
-normalisation.
+restore/audit/dashboard surfaces have no control or RLS behind them yet.
+
+**`comments.write` / `comments.moderate` are Planned despite having live RLS.**
+The policies on `public.comments` exist, but that table is **unused** by the
+app: the comment UI (`app.jsx` `addComment`) writes into the workspace blob
+(`task.comments`, gated by `tasks.execute`) and nothing calls
+`ds.addComment` / `listComments`. Denying `comments.write` therefore does not
+stop anyone commenting — the switch would be inert — so by the audit standard
+above it stays Planned until a UI actually uses `public.comments`.
+
+Each Planned key becomes `enforced = true` in the SAME migration slot when its
+wiring lands — no catalog churn, no UI rewrite. This is the honest expression
+of the Phase-1 limit already documented in §2: the workspace is one jsonb blob,
+so the DB can only gate the coarse `tasks.execute` write; the finer keys wait
+for normalisation.
 
 ---
 

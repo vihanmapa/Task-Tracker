@@ -134,16 +134,26 @@ for (const k of ENFORCED) if (!CATALOG.has(k)) failures.push(`enforced key '${k}
 for (const [from, to] of Object.entries(RBAC.ALIASES)) {
   if (!ENFORCED.has(to)) failures.push(`ALIASES['${from}'] → '${to}' targets a non-enforced key (should be in the enforced set)`);
 }
-// Every key RLS gates must be enforced — an authorize()'d key the admin UI
-// showed as Planned would let an owner think a live rule is inert.
-for (const k of RLS_ENFORCED) if (!ENFORCED.has(k)) failures.push(`RLS gates '${k}' but it is not marked enforced`);
+// RLS on a table the CLIENT never uses does not make a key live (audit
+// standard, 2026-07-21). comments.write/moderate gate public.comments, which
+// the app doesn't touch — task comments live in the workspace blob. So RLS
+// keys must be enforced EXCEPT this documented dead-table set; and those two
+// must stay Planned (locks the decision — re-marking them enforced without
+// wiring a real UI path fails here).
+const DEAD_TABLE_RLS = new Set(['comments.write', 'comments.moderate']);
+for (const k of RLS_ENFORCED) {
+  if (DEAD_TABLE_RLS.has(k)) continue;
+  if (!ENFORCED.has(k)) failures.push(`RLS gates '${k}' but it is not marked enforced`);
+}
+for (const k of DEAD_TABLE_RLS) {
+  if (ENFORCED.has(k)) failures.push(`'${k}' is marked enforced but gates the UNUSED public.comments table — must stay Planned until a UI uses it`);
+}
 // The documented Phase-2 wired set, as an independent cross-check that the SQL
 // enforced list didn't drift. Keep in sync with TDD §2.1.
 const EXPECTED_ENFORCED = [
   'tasks.read', 'tasks.execute', 'tasks.assign', 'tasks.prioritize', 'tasks.delete',
   'deliverables.read', 'weekly.read', 'kpi.read', 'reports.read',
   'admin.workspace', 'admin.permissions', 'users.assign_roles',
-  'comments.write', 'comments.moderate',
 ];
 const expSet = new Set(EXPECTED_ENFORCED);
 for (const k of EXPECTED_ENFORCED) if (!ENFORCED.has(k)) failures.push(`expected enforced key '${k}' missing from schema.sql enforced set`);

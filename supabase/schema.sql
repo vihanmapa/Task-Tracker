@@ -496,9 +496,12 @@ on conflict (key) do update
   set grp = excluded.grp, layer = excluded.layer,
       label = excluded.label, sort_order = excluded.sort_order;
 
--- ENFORCED set (Phase 2, code-audited 2026-07-17). Exactly the keys with a
--- real end-to-end effect today; everything else is Planned (catalog-only).
---   Client-gated (fm-navigate/ can() call sites):
+-- ENFORCED set (Phase 2, code-audited 2026-07-17, revised 2026-07-21).
+-- STANDARD: a key is enforced only if it has a real end-to-end, user-visible
+-- effect today — a control the user can hit whose allow/deny actually changes
+-- persisted behaviour. RLS on a table the client never reads/writes does NOT
+-- qualify (denying it changes nothing a user can observe).
+--   Client-gated (fm-navigate/ can() call sites), 11:
 --     tasks.read           nav item + every dashboard widget filter
 --     tasks.execute        canExecute — task work + RLS workspace/storage write
 --     tasks.assign         canAssign — owner field
@@ -509,17 +512,23 @@ on conflict (key) do update
 --     kpi.read             nav item (KPI Scorecard)
 --     reports.read         nav item (Weekly Summary)
 --     admin.workspace      canEdit — governance surfaces (import, New task, deliverable/week/KPI edits)
---     admin.permissions    Roles & Permissions admin card + RLS on role_permissions
---     users.assign_roles   Users admin card + RLS on profiles
---   DB-only (RLS authorize(), no dedicated client gate):
---     comments.write       comment insert
---     comments.moderate    edit/delete others' comments
--- Any key NOT listed here is deliberately unenforced (see §Planned in the TDD).
+--     admin.permissions    Roles & Permissions admin card (+ RLS on role_permissions)
+--   Client-gated + DB-enforced, 1:
+--     users.assign_roles   Users admin card + RLS on profiles (role/status writes land)
+--
+-- DELIBERATELY PLANNED despite having RLS: comments.write / comments.moderate.
+-- The RLS policies on public.comments are live, but that TABLE IS UNUSED — the
+-- comment UI (app.jsx addComment) writes into the workspace blob (task.comments)
+-- gated by canExecute (tasks.execute), and nothing calls ds.addComment/
+-- listComments. So denying comments.write does not stop anyone commenting; the
+-- switch would be inert. They become enforced when a UI actually uses
+-- public.comments (a normalisation-era change).
+--
+-- Any key NOT listed here is Planned (see TDD §2.1).
 update public.permissions set enforced = key in (
   'tasks.read', 'tasks.execute', 'tasks.assign', 'tasks.prioritize', 'tasks.delete',
   'deliverables.read', 'weekly.read', 'kpi.read', 'reports.read',
-  'admin.workspace', 'admin.permissions', 'users.assign_roles',
-  'comments.write', 'comments.moderate'
+  'admin.workspace', 'admin.permissions', 'users.assign_roles'
 );
 
 -- ---------- 2.2 Templates (factory settings, migration-owned) ----------
@@ -869,6 +878,11 @@ create policy "task-attachments delete (role)"
   using (bucket_id = 'task-attachments' and public.authorize('tasks.execute'));
 
 -- Comments: capability-driven instead of "not viewer" / "is owner".
+-- NB: public.comments is currently UNUSED by the app — task comments live in
+-- the workspace blob (task.comments, gated by tasks.execute). These policies
+-- are kept ready for when a UI adopts this table, but until then comments.write
+-- / comments.moderate are marked Planned (not enforced) in §2.1, because
+-- toggling them changes nothing a user can observe.
 drop policy if exists "comments insert (non-viewer)" on public.comments;
 create policy "comments insert (non-viewer)"
   on public.comments for insert to authenticated
