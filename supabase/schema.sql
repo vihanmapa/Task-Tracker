@@ -750,17 +750,37 @@ create trigger log_permission_change
   after insert or delete on public.role_permissions
   for each row execute function public.log_permission_change();
 
--- Reset a role to its template's factory settings. SECURITY INVOKER: RLS on
--- role_permissions (2.8) already restricts writes to admin.permissions
--- holders; the explicit check just gives a clear error message.
+-- Reset a role to its template's factory settings.
+--
+-- SECURITY DEFINER (not INVOKER): the caller may be resetting their OWN role,
+-- whose template need not include admin.permissions. Under INVOKER the DELETE
+-- strips the caller's admin.permissions mid-statement, and the per-row RLS
+-- WITH CHECK on the follow-up INSERT (authorize('admin.permissions')) then
+-- evaluates false and aborts — leaving the role stranded with zero grants
+-- (self-lockout). As DEFINER the delete+insert run with the function owner's
+-- rights, so they complete atomically regardless of the caller's live grants.
+--
+-- Because DEFINER bypasses RLS, this function is the ONLY gate: it authorizes
+-- the CALLER explicitly up front via authorize() (which reads the caller's JWT
+-- claim + live grants — unaffected by DEFINER), refuses the immutable owner
+-- role, and validates the role exists. search_path is locked so the trusted
+-- body can't be hijacked by a caller-controlled path. auth.uid() still resolves
+-- to the caller for the audit trail.
 create or replace function public.reset_role_to_template(p_role text)
-returns void language plpgsql as $$
+returns void
+language plpgsql
+security definer
+set search_path = public, pg_temp
+as $$
 begin
   if not public.authorize('admin.permissions') then
-    raise exception 'not permitted';
+    raise exception 'not permitted' using errcode = '42501';
   end if;
   if p_role = 'owner' then
     raise exception 'the owner role''s permissions are immutable';
+  end if;
+  if not exists (select 1 from public.roles where slug = p_role) then
+    raise exception 'unknown role: %', p_role using errcode = '22023';
   end if;
   delete from public.role_permissions where role_slug = p_role;
   insert into public.role_permissions (role_slug, permission_key, updated_by)
@@ -769,6 +789,15 @@ begin
     join public.template_permissions tp on tp.template_slug = r.template_slug
    where r.slug = p_role;
 end $$;
+
+-- DEFINER function must not be callable by anon; only signed-in users, and the
+-- body re-checks admin.permissions. (System backstop against total lockout:
+-- the owner role is immutable and can't be reset, and last-active-owner
+-- protection guarantees an owner always exists — so admin.permissions can
+-- never be reset out of existence system-wide; a non-owner admin who resets
+-- their own role out of it is always recoverable by an owner.)
+revoke execute on function public.reset_role_to_template(text) from public, anon;
+grant execute on function public.reset_role_to_template(text) to authenticated;
 
 -- ---------- 2.8 RLS on the new tables ----------
 alter table public.roles enable row level security;

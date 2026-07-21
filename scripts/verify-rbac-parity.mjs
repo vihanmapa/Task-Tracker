@@ -57,6 +57,19 @@ const ENFORCED = new Set([...enforcedSection.matchAll(/'([a-z_]+\.[a-z_]+)'/g)].
 // The keys RLS actually gates (authorize('<key>') calls anywhere in schema.sql).
 const RLS_ENFORCED = new Set([...sql.matchAll(/authorize\('([a-z_]+\.[a-z_]+)'\)/g)].map(m => m[1]));
 
+// reset_role_to_template must be hardened against the self-lockout: DEFINER +
+// locked search_path + up-front authorize() + owner refusal + execute revoked
+// from anon. Static assertions over the function body.
+const rpc = section(sql, 'create or replace function public.reset_role_to_template', '$$;');
+const rpcChecks = [
+  [/security\s+definer/i.test(rpc), 'reset_role_to_template is SECURITY DEFINER'],
+  [/set\s+search_path\s*=\s*public,\s*pg_temp/i.test(rpc), 'reset_role_to_template locks search_path'],
+  [rpc.indexOf("authorize('admin.permissions')") < rpc.indexOf('delete from public.role_permissions'), 'authorize() runs before the delete'],
+  [/p_role\s*=\s*'owner'/.test(rpc), 'reset_role_to_template refuses the owner role'],
+  [/revoke execute on function public\.reset_role_to_template\(text\) from public, anon/.test(sql), 'execute revoked from public/anon'],
+  [/grant execute on function public\.reset_role_to_template\(text\) to authenticated/.test(sql), 'execute granted to authenticated'],
+];
+
 // roles: (slug, label, template, is_system, sort)
 const rolesSection = section(phase2, 'insert into public.roles', 'on conflict (slug)');
 const ROLE_TEMPLATE = {};
@@ -108,6 +121,9 @@ const failures = [];
 for (const [from, to] of Object.entries(RBAC.ALIASES)) {
   if (!CATALOG.has(to)) failures.push(`ALIASES['${from}'] → '${to}' is not in the seeded catalog`);
 }
+
+// ---- reset_role_to_template hardening (self-lockout fix) ----
+for (const [ok, msg] of rpcChecks) if (!ok) failures.push('RPC: ' + msg + ' — FAILED');
 
 // ---- Enforcement-boundary integrity (Phase 2 honest-set guarantees) ----
 // Every enforced key is a real catalog key.
