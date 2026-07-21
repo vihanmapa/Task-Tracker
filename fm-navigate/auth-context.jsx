@@ -121,9 +121,16 @@ function AuthProvider({ children }) {
   // canEdit/canExecute consumer picks up the new answers.
   const [rbacVersion, setRbacVersion] = useState(0);
   useEffect(() => {
-    if (!shared || !authUser) return;
+    if (!shared) return;
+    // Signed out (or between accounts): drop any in-memory matrix so the next
+    // account can't inherit it, then stop — can() falls back to DEFAULTS.
+    if (!authUser) { window.RBAC.reset(); setRbacVersion(v => v + 1); return; }
     let alive = true;
-    const refresh = () => window.RBAC.load(ds).then(() => { if (alive) setRbacVersion(v => v + 1); });
+    // New identity: clear the previous account's matrix before the first fetch
+    // so nothing stale is served while this account's grants are in flight.
+    window.RBAC.reset();
+    const uid = authUser.id;
+    const refresh = () => window.RBAC.load(ds, uid).then(() => { if (alive) setRbacVersion(v => v + 1); });
     refresh();
     const off = ds.subscribeRolePermissions ? ds.subscribeRolePermissions(refresh) : null;
     return () => { alive = false; off && off(); };
@@ -144,7 +151,7 @@ function AuthProvider({ children }) {
     return () => { alive = false; };
   }, [shared, authUser && authUser.id]);
 
-  const signOut = useCallback(() => ds.signOut().then(() => { setAuthUser(null); setProfile(null); }), []);
+  const signOut = useCallback(() => ds.signOut().then(() => { window.RBAC.reset(); setAuthUser(null); setProfile(null); }), []);
 
   const value = useMemo(() => {
     // Local-only mode has no backend/roles → full-access owner. Shared mode:

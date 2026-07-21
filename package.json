@@ -6,7 +6,7 @@
   "scripts": {
     "build": "node build.mjs",
     "serve": "python3 dist/serve.py 4173",
-    "verify:rbac": "node scripts/verify-rbac-parity.mjs"
+    "verify:rbac": "node scripts/verify-rbac-parity.mjs && node scripts/verify-rbac-isolation.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.23.0"

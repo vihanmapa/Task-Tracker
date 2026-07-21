@@ -165,7 +165,13 @@
     },
   };
 
-  var LS_KEY = 'fm_rbac_matrix';
+  // localStorage cache is SCOPED PER AUTHENTICATED USER. A global key would let
+  // account B's failed refetch fall back to account A's cached matrix (A may be
+  // an admin who fetched the FULL matrix) — an account-isolation break. Keying
+  // by uid means B can only ever read B's own cache; A's cache is invisible to B.
+  var LS_PREFIX = 'fm_rbac_matrix:';
+  var LEGACY_LS_KEY = 'fm_rbac_matrix'; // pre-isolation global key — purged on load
+  function lsKey(uid) { return uid ? LS_PREFIX + uid : null; }
 
   // role slug → Set(permission keys). null until load() succeeds; while null
   // every can() call answers from DEFAULTS (fallback mode). A user who isn't
@@ -173,6 +179,9 @@
   // other roles' sets stay empty, which is fine: can() is only ever asked
   // about the signed-in role.
   var _matrix = null;
+  // The uid the in-memory _matrix belongs to, so a stale matrix from a previous
+  // account is never served after an account switch (SPA — no reload between).
+  var _matrixUid = null;
 
   function _applyMatrix(rolesRows, grantRows) {
     var m = {};
@@ -217,12 +226,29 @@
     return !!wildcard && wildcard.indexOf(action) !== -1;
   }
 
-  /* Fetch the matrix. Resolves true when matrix mode is active (fresh fetch
-     or localStorage cache), false when staying on DEFAULTS. Never rejects.
-     Safe to call repeatedly — realtime refetches route through here too. */
-  function load(ds) {
+  // Wipe in-memory permission state. Call on sign-out and on account change so
+  // one account's matrix can never be read by the next (SPA has no reload
+  // between accounts). After reset, can() answers from DEFAULTS until reload.
+  function reset() {
+    _matrix = null;
+    _matrixUid = null;
+    RBAC.ROLES = ROLES;
+    RBAC.ROLE_LABELS = ROLE_LABELS;
+  }
+
+  /* Fetch the matrix for the authenticated user `uid`. Resolves true when
+     matrix mode is active (fresh fetch or that user's own cache), false when
+     staying on DEFAULTS. Never rejects. Safe to call repeatedly — realtime
+     refetches route through here too. The cache is per-uid so a failed fetch
+     can only ever restore the SAME account's last-known matrix. */
+  function load(ds, uid) {
     if (!ds || ds.backend !== 'supabase') return Promise.resolve(false);
     if (typeof ds.listRoles !== 'function') return Promise.resolve(false);
+    // A matrix in memory that belongs to a different account must not survive
+    // into this load — drop it up front so nothing stale is served mid-fetch.
+    if (_matrixUid && _matrixUid !== uid) reset();
+    try { localStorage.removeItem(LEGACY_LS_KEY); } catch (_) {} // purge pre-isolation global cache
+    var key = lsKey(uid);
     return Promise.all([ds.listRoles(), ds.listRolePermissions()])
       .then(function (res) {
         var roles = res[0], grants = res[1];
@@ -231,16 +257,19 @@
         // state (a role stripped of everything) and must stay deny-all.
         if (!roles || !roles.length) throw new Error('rbac tables unavailable');
         _applyMatrix(roles, grants || []);
-        try { localStorage.setItem(LS_KEY, JSON.stringify({ roles: roles, grants: grants || [] })); } catch (_) {}
+        _matrixUid = uid;
+        if (key) { try { localStorage.setItem(key, JSON.stringify({ roles: roles, grants: grants || [] })); } catch (_) {} }
         return true;
       })
       .catch(function () {
-        // Flaky reload: last-known matrix beats silently reverting the UI to
-        // Phase-1 defaults. The DB enforces the real rules either way.
+        // Flaky reload: THIS account's last-known matrix beats silently
+        // reverting the UI to Phase-1 defaults. Never another account's cache
+        // (key is uid-scoped) — the DB enforces the real rules either way.
         try {
-          var cached = JSON.parse(localStorage.getItem(LS_KEY) || 'null');
+          var cached = key ? JSON.parse(localStorage.getItem(key) || 'null') : null;
           if (cached && cached.roles && cached.roles.length) {
             _applyMatrix(cached.roles, cached.grants || []);
+            _matrixUid = uid;
             return true;
           }
         } catch (_) {}
@@ -255,8 +284,11 @@
     DEFAULTS: DEFAULTS,
     can: can,
     load: load,
+    reset: reset,
     // true when can() is answering from the live table-driven matrix
     isLive: function () { return !!_matrix; },
+    // the uid the in-memory matrix belongs to (null when none) — for tests
+    matrixUid: function () { return _matrixUid; },
   };
 
   window.RBAC = RBAC;
