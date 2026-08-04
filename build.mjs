@@ -28,7 +28,7 @@ const PLAIN_JS = ['config.js', 'permissions.js', 'data-service.js', 'kpi-data.js
 const JSX = [
   'icons.jsx', 'components.jsx', 'auth-context.jsx', 'ai-service.jsx', 'tweaks-panel.jsx',
   'dashboard.jsx', 'ai-compose.jsx', 'tasks.jsx', 'deliverables.jsx',
-  'kpi.jsx', 'weekly.jsx', 'screens.jsx', 'roles-admin.jsx', 'app.jsx',
+  'kpi.jsx', 'weekly.jsx', 'monthly.jsx', 'screens.jsx', 'roles-admin.jsx', 'app.jsx',
 ];
 
 // React bootstrap (was the inline text/babel block at the end of index.html).
