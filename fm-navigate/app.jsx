@@ -30,6 +30,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 const NAV = [
   { key: 'dashboard',    label: 'Dashboard', icon: 'grid' },
   { key: 'week',         label: 'This Week', icon: 'calendar', visible: can => can('weekly', 'read') },
+  { key: 'month',        label: 'This Month', icon: 'summary', visible: can => can('reports', 'read') },
   { key: 'kpi',          label: 'KPI Scorecard', icon: 'trend', visible: can => can('kpi', 'read') },
   { key: 'deliverables', label: 'Deliverables', icon: 'target', visible: can => can('deliverables', 'read') },
   { key: 'tasks',        label: 'Tasks',     icon: 'list', visible: can => can('tasks', 'read') },
@@ -828,7 +829,7 @@ function App() {
   const selectedTask = useMemoA(() => tasks.find(t => t.id === selected), [tasks, selected]);
   const selectedDeliverable = useMemoA(() => deliverables.find(d => d.id === dlvSelected), [deliverables, dlvSelected]);
 
-  const titleMap = { dashboard: 'Dashboard', week: 'This Week', kpi: 'KPI Scorecard', tasks: 'Tasks', deliverables: 'Deliverables', dlvDetail: 'Deliverable', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
+  const titleMap = { dashboard: 'Dashboard', week: 'This Week', month: 'This Month', kpi: 'KPI Scorecard', tasks: 'Tasks', deliverables: 'Deliverables', dlvDetail: 'Deliverable', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
 
   // ---- auth gate: login is required before anything renders ----
   if (shared && authUser === undefined) {
@@ -970,6 +971,9 @@ function App() {
         )}
         {route === 'week' && (
           <window.WeeklyWorkspace weeks={weeks} onSaveWeek={saveWeek} onPatchWeek={patchWeek} onDeleteWeek={deleteWeek} tasks={tasks} deliverables={deliverables} canEdit={canEdit} onOpenTask={openTask} />
+        )}
+        {route === 'month' && (
+          <window.MonthlyWorkspace tasks={tasks} deliverables={deliverables} onOpenTask={openTask} />
         )}
         {route === 'summary' && <window.WeeklySummary tasks={tasks} onOpen={openTask} />}
         {route === 'ask' && <window.AskAI tasks={tasks} initialQuestion={askQ} clearInitial={() => setAskQ(null)} />}

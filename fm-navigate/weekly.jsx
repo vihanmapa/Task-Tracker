@@ -34,13 +34,18 @@ function makeWeek(forDate, carriedFrom = null) {
 }
 const PRANK = { Critical: 0, High: 1, Medium: 2, Low: 3 };
 
-/* ---------------- derived weekly activity (reporting layer) ----------------
+/* ---------------- derived activity for a date range (reporting layer) ------
    A week stores INTENT (objectives, taskIds). What actually HAPPENED is
    derived on the fly from each task's dated progressLog / activity /
    completedAt — no manual week assignment, so a long-running task shows up
-   in every week it actually moved. Pure function of its inputs; nothing
-   here is persisted. */
-function deriveWeekActivity(week, tasks, deliverables) {
+   in every period it actually moved. Pure function of its inputs; nothing
+   here is persisted.
+
+   `range` is any { startDate, endDate, taskIds } object — a stored week, or a
+   synthetic one (This Month builds a calendar-month range with no taskIds,
+   so every row comes back as unplanned). */
+function deriveRangeActivity(range, tasks, deliverables) {
+  const week = range;
   const s = new Date(week.startDate), e = new Date(week.endDate);
   const within = (iso) => { if (!iso) return false; const d = new Date(iso); return d >= s && d <= e; };
   // normalised, time-sorted log for one task; a completion without a matching
@@ -60,8 +65,8 @@ function deriveWeekActivity(week, tasks, deliverables) {
     const logs = logsOf(t);
     const inLogs = logs.filter(l => within(l.at));
     const statusChanges = (t.activity || []).filter(a => (a.type === 'status' || a.type === 'completed') && within(a.at));
-    const completedInWeek = within(t.completedAt);
-    if (!inLogs.length && !statusChanges.length && !completedInWeek) continue;
+    const completedInRange = within(t.completedAt);
+    if (!inLogs.length && !statusChanges.length && !completedInRange) continue;
     // checklist items delivered via in-week logs — resolved by id at read time
     // (renamed items show current title, deleted items drop out), deduped
     // across logs; manually ticked items have no log link so never appear here
@@ -73,12 +78,12 @@ function deriveWeekActivity(week, tasks, deliverables) {
       notes: inLogs.map(l => l.note).filter(Boolean),
       delivered,
       updates: inLogs.length,
-      completedInWeek,
+      completedInRange,
       started: statusChanges.some(a => /^Not Started → /.test(a.detail || '')),
       planned: planned.has(t.id),
     });
   }
-  rows.sort((a, b) => (b.completedInWeek - a.completedInWeek) || (b.delta - a.delta) || (b.updates - a.updates));
+  rows.sort((a, b) => (b.completedInRange - a.completedInRange) || (b.delta - a.delta) || (b.updates - a.updates));
 
   // planned vs actual
   const plannedTasks = [...planned].map(id => tasks.find(t => t.id === id)).filter(Boolean);
@@ -107,12 +112,14 @@ function deriveWeekActivity(week, tasks, deliverables) {
     rows, unplanned, dlvRows, plannedTasks,
     plannedCompleted, plannedPartial, plannedUntouched,
     tasksStarted: rows.filter(r => r.started).length,
-    tasksCompleted: rows.filter(r => r.completedInWeek).length,
+    tasksCompleted: rows.filter(r => r.completedInRange).length,
     // executive headline — average progress gained per task that moved
     overallDelta: rows.length ? Math.round(rows.reduce((s2, r) => s2 + r.delta, 0) / rows.length) : 0,
   };
 }
-window.deriveWeekActivity = deriveWeekActivity;
+window.deriveRangeActivity = deriveRangeActivity;
+// legacy name kept for existing call sites (ai-service.jsx)
+window.deriveWeekActivity = deriveRangeActivity;
 
 /* delta badge for a derived activity row */
 function DeltaTag({ delta, completed }) {
@@ -151,7 +158,7 @@ function ActivityRow({ r, onOpenTask, unplanned }) {
           </div>
         )}
       </div>
-      <DeltaTag delta={r.delta} completed={r.completedInWeek} />
+      <DeltaTag delta={r.delta} completed={r.completedInRange} />
     </div>
   );
 }
@@ -454,8 +461,8 @@ function WeeklyWorkspace({ weeks, onSaveWeek, onPatchWeek, onDeleteWeek, tasks, 
   const isCurrent = week.id === currentId;
 
   // derived reporting layer — what actually happened this week, from dated
-  // progress logs (see deriveWeekActivity above); never manually assigned
-  const derived = deriveWeekActivity(week, tasks, deliverables);
+  // progress logs (see deriveRangeActivity above); never manually assigned
+  const derived = deriveRangeActivity(week, tasks, deliverables);
   const plannedRows = derived.rows.filter(r => r.planned);
 
   // "What should I work on next?" — high priority / due today first, blocked sinks.
