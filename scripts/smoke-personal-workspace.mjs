@@ -5,11 +5,12 @@
    Loads the REAL built bundle (dist/app.bundle.js) against a stubbed
    Supabase client and drives it as two different people:
 
-     · a MEMBER — the self-signup default — who must land in a personal
-       workspace: their own tasks, no People item, no organization-wide
-       nav, no assignee picker;
+     · a MEMBER of the organization — who must see only work ASSIGNED to
+       them: no People item, no organization-wide nav, no assignee picker;
      · a PRODUCT MANAGER — who holds tasks.view_all — who must land in the
-       management dashboard with People, workload, and an assignee picker.
+       management dashboard with People, workload, and an assignee picker;
+     · a PUBLIC self-registered account — who has a personal workspace and
+       must see nothing of the organization at all.
 
    What this proves that the SQL suite cannot: the shipped bundle actually
    boots (the concatenated-globals build is easy to break), the widget
@@ -63,6 +64,8 @@ const ORG = '00000000-0000-0000-0000-000000000001';
 const MEMBER = '11111111-1111-1111-1111-111111111111';
 const OTHER = '22222222-2222-2222-2222-222222222222';
 const MANAGER = '33333333-3333-3333-3333-333333333333';
+const PUBLIC_USER = '99999999-9999-9999-9999-999999999999';
+const PERSONAL_ORG = '00000000-0000-0000-0000-0000000000p9'.replace('p', 'b');
 
 const today = new Date(); today.setHours(17, 0, 0, 0);
 const yesterday = new Date(today); yesterday.setDate(yesterday.getDate() - 1);
@@ -77,6 +80,11 @@ const ALL_TASKS = [
   { id: 'T-3', organization_id: ORG, title: 'Somebody else private task', status: 'In Progress', priority: 'Low',
     progress: 70, reporter_id: OTHER, assignee_id: OTHER, due_date: null,
     created_at: '2026-08-03T09:00:00.000Z', updated_at: '2026-08-12T09:00:00.000Z' },
+  // Raised by the member, since reassigned away. Reporter is not scope, so
+  // this must be as invisible to them as anything else of Otto's.
+  { id: 'T-4', organization_id: ORG, title: 'Task I raised then handed over', status: 'In Progress',
+    priority: 'Medium', progress: 30, reporter_id: MEMBER, assignee_id: OTHER, due_date: null,
+    created_at: '2026-08-04T09:00:00.000Z', updated_at: '2026-08-13T09:00:00.000Z' },
 ];
 
 const GRANTS = {
@@ -92,8 +100,16 @@ const check = (cond, msg) => { console.log((cond ? '  ok  ' : ' FAIL ') + msg); 
 /* The stub applies the SAME row scoping the database would, so the page only
    ever RECEIVES what its role may see. A UI that then leaked something would
    have had to invent it. */
-function stubScript(role, uid) {
-  const visible = role === 'product_manager' ? ALL_TASKS : ALL_TASKS.filter(t => t.assignee_id === uid || t.reporter_id === uid);
+function stubScript(role, uid, opts) {
+  opts = opts || {};
+  // Scope the stub the way the DATABASE now does: management sees everything
+  // in the organization, everyone else sees what is ASSIGNED to them. Reporter
+  // grants nothing (ADR 0007), so a task this user merely raised is absent —
+  // if the UI displayed one it could only have invented it.
+  const pool = opts.tasks || ALL_TASKS;
+  const visible = role === 'product_manager'
+    ? pool
+    : pool.filter(t => t.assignee_id === uid);
   return `
 window.__queries = [];
 (function () {
@@ -101,11 +117,13 @@ window.__queries = [];
   const ROLE = ${JSON.stringify(role)};
   const TASKS = ${JSON.stringify(visible)};
   const GRANTS = ${JSON.stringify(GRANTS)};
-  const PROFILES = [
-    { id: ${JSON.stringify(MEMBER)}, email: 'member@example.com', name: 'Mia Member', role: 'member', status: 'active' },
-    { id: ${JSON.stringify(OTHER)}, email: 'other@example.com', name: 'Otto Other', role: 'member', status: 'active' },
-    { id: ${JSON.stringify(MANAGER)}, email: 'manager@example.com', name: 'Mona Manager', role: 'product_manager', status: 'active' },
-  ];
+  // RLS scopes the directory to people who share an organization, so a public
+  // account genuinely receives only itself.
+  const PROFILES = ${JSON.stringify(opts.profiles || [
+    { id: MEMBER, email: 'member@example.com', name: 'Mia Member', role: 'member', status: 'active' },
+    { id: OTHER, email: 'other@example.com', name: 'Otto Other', role: 'member', status: 'active' },
+    { id: MANAGER, email: 'manager@example.com', name: 'Mona Manager', role: 'product_manager', status: 'active' },
+  ])};
   const ROLES = [
     { slug: 'owner', label: 'Owner', sort_order: 10 },
     { slug: 'product_manager', label: 'Product Manager', sort_order: 30 },
@@ -119,7 +137,8 @@ window.__queries = [];
     tasks: TASKS,
     task_checklist_items: [], task_progress: [], task_resources: [], task_comments: [], task_activity: [],
     profiles: PROFILES,
-    organization_members: [{ organization_id: ${JSON.stringify(ORG)}, user_id: UID, joined_at: '2026-01-01' }],
+    organizations: ${JSON.stringify(opts.organizations || [{ id: ORG, kind: 'team', name: 'FM Navigate', created_at: '2026-01-01' }])},
+    organization_members: ${JSON.stringify(opts.members || [{ organization_id: ORG, user_id: uid, joined_at: '2026-01-01' }])},
     roles: ROLES,
     role_permissions: grantRows.filter(g => ROLE === 'owner' || g.role_slug === ROLE),
     workspace: [{ id: 'main', tasks: { version: 2, metadata: {}, data: { tasks: [], deliverables: [], weeks: [], kpiScores: {} } }, updated_at: '2026-08-01' }],
@@ -187,7 +206,7 @@ function launchOptions() {
   return opts;
 }
 
-async function run(role, uid) {
+async function run(role, uid, opts) {
   const browser = await chromium.launch(launchOptions());
   const page = await browser.newPage();
   const errors = [];
@@ -205,7 +224,7 @@ async function run(role, uid) {
   await page.route('**/cdn.jsdelivr.net/**', r => r.fulfill({ contentType: 'text/javascript', body: '' }));
   await page.route('**/fonts.googleapis.com/**', r => r.fulfill({ contentType: 'text/css', body: '' }));
   await page.route('**/supabase-js@**', r =>
-    r.fulfill({ contentType: 'text/javascript', body: stubScript(role, uid) }));
+    r.fulfill({ contentType: 'text/javascript', body: stubScript(role, uid, opts) }));
 
   await page.goto(base, { waitUntil: 'networkidle' });
   try {
@@ -238,6 +257,8 @@ console.log('\nmember — personal workspace');
   check(!/Work by person/i.test(body), 'no management workload widget');
   check(body.includes('Write my status report'), 'their own task is listed');
   check(!body.includes('Somebody else private task'), "another person's task is nowhere on the page");
+  check(!body.includes('Task I raised then handed over'),
+    'a task they merely REPORTED is nowhere on the page either  ← ADR 0007');
 
   // Their scope is what the SERVER returned; the page must not be asking for
   // more and filtering afterwards.
@@ -249,6 +270,8 @@ console.log('\nmember — personal workspace');
   await page.waitForTimeout(300);
   const list = await page.textContent('.main');
   check(!list.includes('Somebody else private task'), "the task list shows no other person's work");
+  check(!list.includes('Task I raised then handed over'),
+    'the task list does not resurrect reported-but-reassigned work');
 
   // Composer: a standard user gets no assignee control at all.
   await page.click('.topbar button:has-text("New task")');
@@ -298,6 +321,46 @@ console.log('\nproduct manager — management oversight');
   check(/Mia Member's tasks/.test(drill), 'drilling into a person filters the task list to them');
   check(drill.includes('Write my status report'), "the drill-down shows that person's work");
   check(!drill.includes('Somebody else private task'), 'the drill-down shows only that person');
+
+  await browser.close();
+}
+
+/* ---------- 3. A public self-registered account sees no organization ---------- */
+console.log('\npublic signup — an account, not a membership');
+{
+  // Exactly what the database hands this user after signup: their own personal
+  // workspace, themselves in the directory, and one task of their own. No
+  // Evbex organization, no Evbex people, no Evbex tasks — so if any of it
+  // appeared on the page, the client would have had to invent it.
+  const personalTask = {
+    id: 'T-P1', organization_id: PERSONAL_ORG, title: 'My own private task',
+    status: 'Not Started', priority: 'Medium', progress: 0,
+    reporter_id: PUBLIC_USER, assignee_id: PUBLIC_USER, due_date: null,
+    created_at: '2026-08-05T09:00:00.000Z', updated_at: '2026-08-05T09:00:00.000Z',
+  };
+  const { browser, page, errors } = await run('member', PUBLIC_USER, {
+    tasks: [personalTask],
+    organizations: [{ id: PERSONAL_ORG, kind: 'personal', name: "Pat Public's Workspace", created_at: '2026-08-05' }],
+    members: [{ organization_id: PERSONAL_ORG, user_id: PUBLIC_USER, joined_at: '2026-08-05' }],
+    profiles: [{ id: PUBLIC_USER, email: 'pat@example.com', name: 'Pat Public', role: 'member', status: 'active' }],
+  });
+  const nav = await page.$$eval('.nav-item', els => els.map(e => e.textContent.trim()));
+  const body = await page.textContent('.main');
+
+  check(errors.length === 0, 'the app boots for a brand-new public account' + (errors[0] ? ` (${errors[0]})` : ''));
+  check(body.includes('My own private task'), 'their personal task is there — the tracker works');
+  check(!body.includes('Write my status report') && !body.includes('Somebody else private task'),
+    'no Evbex task appears anywhere on the page');
+  check(!body.includes('Mia Member') && !body.includes('Mona Manager'),
+    'no Evbex person appears anywhere on the page');
+  check(nav.some(n => n.startsWith('My Tasks')), 'they get a personal task workspace');
+  check(!nav.some(n => n.startsWith('People')), 'no People screen');
+  check(!nav.some(n => n.startsWith('Deliverables')) && !nav.some(n => n.startsWith('KPI')),
+    'no organization governance screens');
+
+  // The org a new task would be created in must be their OWN workspace.
+  const org = await page.evaluate(() => window.dataService.myOrganizationId());
+  check(org === PERSONAL_ORG, 'new tasks would be created in their personal workspace');
 
   await browser.close();
 }

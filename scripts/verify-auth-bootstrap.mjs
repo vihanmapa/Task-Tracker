@@ -91,16 +91,24 @@ check(/if\s*\(shared\s*&&\s*!ready\)|!ready\s*\)\s*\{?\s*return/.test(appJsx) ||
 console.log('\ntask scope — the UI mirror answers exactly like the policies');
 
 // The SQL predicates, as shipped.
-const readOk = sql.slice(sql.indexOf('function public.task_read_ok'), sql.indexOf('function public.task_write_ok'));
-const writeOk = sql.slice(sql.indexOf('function public.task_write_ok'), sql.indexOf('function public.parent_task_readable'));
-for (const [name, body, cap] of [['task_read_ok', readOk, 'tasks.read'], ['task_write_ok', writeOk, 'tasks.execute']]) {
+const defOf = (name) => {
+  const i = sql.indexOf(`create or replace function public.${name}(`);
+  return sql.slice(i, sql.indexOf('$$;', i));
+};
+for (const [name, cap] of [['task_read_ok', 'tasks.read'], ['task_write_ok', 'tasks.execute']]) {
+  const body = defOf(name);
   check(body.includes(`authorize('${cap}')`), `${name} requires ${cap}`);
   check(body.includes('is_org_member(p_org)'), `${name} checks the organization boundary`);
-  check(body.includes('p_assignee = auth.uid()') && body.includes('p_reporter = auth.uid()'),
-    `${name} accepts the assignee and the reporter`);
+  check(body.includes('p_assignee = auth.uid()'), `${name} accepts the assignee`);
   check(body.includes("authorize('tasks.view_all')"), `${name} accepts management scope`);
+  // ADR 0007: reporter is metadata. Its absence here is the whole correction,
+  // so assert the absence rather than trusting a comment.
+  check(!/p_reporter|reporter_id/.test(body), `${name} does NOT grant access via reporter`);
   check(!/\btrue\b/.test(body.replace(/returns boolean/g, '')), `${name} has no unconditional true branch`);
 }
+// The policies must pass only the two arguments the predicate now takes.
+check(!/task_read_ok\([^)]*reporter_id/.test(sql) && !/task_write_ok\([^)]*reporter_id/.test(sql),
+  'no task policy still passes reporter_id into a scope predicate');
 
 const ME = '11111111-1111-1111-1111-111111111111';
 const OTHER = '22222222-2222-2222-2222-222222222222';
@@ -116,7 +124,14 @@ const noReads = { ...standard, canRead: false, canExecute: false };
 
 check(taskScope.canRead(mine, standard) === true, 'standard user reads their own task');
 check(taskScope.canRead(delegatedToMe, standard) === true, 'standard user reads a task delegated to them');
-check(taskScope.canRead(raisedByMe, standard) === true, 'standard user reads a task they raised');
+check(taskScope.canRead(raisedByMe, standard) === false,
+  'standard user CANNOT read a task they raised but no longer own  ← ADR 0007');
+check(taskScope.canWrite(raisedByMe, standard) === false,
+  'standard user CANNOT execute a task they raised but no longer own');
+check(taskScope.canRead(raisedByMe, management) === true,
+  'management still reads it — through view_all, not through reporter');
+check(taskScope.isMine(raisedByMe, standard) === false,
+  '"mine" means assigned to me, never reported by me');
 check(taskScope.canRead(theirs, standard) === false, "standard user CANNOT read another person's task");
 check(taskScope.canRead(theirs, management) === true, 'management reads any task');
 check(taskScope.canRead(mine, noReads) === false, 'without tasks.read nothing is readable (fail closed)');
@@ -143,10 +158,63 @@ check(taskScope.canDelete(mine, standard) === false, 'standard user cannot delet
 check(taskScope.canDelete(theirs, management) === true, 'management deletes within scope');
 
 const all = [mine, delegatedToMe, raisedByMe, theirs];
-check(taskScope.visible(all, standard).length === 3, 'personal view shows own + delegated + raised, never others');
+check(taskScope.visible(all, standard).length === 2,
+  'personal view shows only what is ASSIGNED to me (own + delegated to me)');
+check(taskScope.visible(all, standard).every(t => t.assigneeId === ME),
+  'nothing in the personal view is somebody else\'s work');
 check(taskScope.visible(all, management).length === 4, 'management view shows everything');
 check(taskScope.mine(all, standard).map(t => t.id).join(',') === 'T-1,T-2',
   'My Tasks = assigned to me (a task I delegated away is not on my list)');
+
+/* ---------- 3b. Signup does not join an existing organization ---------- */
+console.log('\nsignup — an account is not a membership (ADR 0008)');
+
+// LAST definition wins at runtime — schema.sql defines a minimal Phase-1
+// version early and replaces it in Phase 3. Assert on the effective one.
+const hnuStart = sql.lastIndexOf('create or replace function public.handle_new_user');
+const handleNewUser = sql.slice(hnuStart, sql.indexOf('drop trigger if exists on_auth_user_created', hnuStart));
+check(hnuStart > sql.indexOf('-- ---------- 3.7 Self-registration'),
+  'the effective handle_new_user is the Phase-3 one');
+check(!/default_org_id\(\)/.test(handleNewUser),
+  'handle_new_user never joins the primary organization');
+check(/kind[^,]*,\s*owner_user_id|'personal'/.test(handleNewUser),
+  'handle_new_user creates the account its OWN personal workspace instead');
+check(/v_role text := 'member'/.test(handleNewUser),
+  "the role is hardcoded to 'member', not read from client metadata");
+check(!/raw_user_meta_data->>'role'|raw_user_meta_data->>'organization/.test(handleNewUser),
+  'no privilege field is ever read from the signup payload');
+check(/raw_user_meta_data->>'name'/.test(handleNewUser),
+  'only the display name comes from the client');
+
+const addMember = sql.slice(sql.indexOf('create or replace function public.add_organization_member'),
+  sql.indexOf('revoke execute on function public.add_organization_member'));
+check(addMember.indexOf("authorize('users.assign_roles')") < addMember.indexOf('insert into public.organization_members'),
+  'add_organization_member authorizes BEFORE it writes');
+check(/set search_path = public, pg_temp/.test(addMember),
+  'add_organization_member locks its search_path');
+check(!/create policy[^;]*on public\.organization_members for insert/.test(sql),
+  'organization_members has no INSERT policy — the RPC is the only way in');
+
+/* ---------- 3c. Every SECURITY DEFINER function is locked down ---------- */
+console.log('\nSECURITY DEFINER audit');
+for (const m of sql.matchAll(/create or replace function (public\.[a-z_]+)\(([^)]*)\)[\s\S]*?\$(?:fn|do|)\$/g)) {
+  const decl = m[0];
+  if (!/security definer/i.test(decl)) continue;
+  const fn = m[1];
+  check(/set search_path = public(, pg_temp)?/.test(decl), `${fn} locks its search_path`);
+}
+// Anything DEFINER that mutates or reads privileged data must not be callable
+// by anon, and the mutating ones must authorize first.
+for (const fn of ['migrate_workspace_tasks', 'verify_task_migration', 'archive_workspace_tasks',
+                  'restore_workspace_tasks', 'add_organization_member', 'remove_organization_member']) {
+  check(new RegExp(`revoke execute on function public\\.${fn}\\([^)]*\\) from public, anon`).test(sql),
+    `${fn} is revoked from anon`);
+  const body = sql.slice(sql.indexOf(`create or replace function public.${fn}`));
+  check(/if not public\.authorize\('[a-z_.]+'\) then/.test(body.slice(0, 900)),
+    `${fn} authorizes before doing anything`);
+}
+check(/revoke execute on function public\.map_legacy_user\(text\) from public, anon, authenticated/.test(sql),
+  'map_legacy_user is not callable by any client (no account-probing oracle)');
 
 /* ---------- 4. UI enforces "no assignee picker for standard users" ---------- */
 console.log('\ntask forms — the assignee control exists only with tasks.assign');

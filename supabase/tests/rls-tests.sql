@@ -117,12 +117,25 @@ update public.profiles set role = 'product_manager' where id = '33333333-3333-33
 update public.profiles set role = 'owner'           where id = '44444444-4444-4444-4444-444444444444';
 alter table public.profiles enable trigger protect_profile_privileges;
 
--- Xavier belongs to Acme ONLY.
-delete from public.organization_members where user_id = '55555555-5555-5555-5555-555555555555';
+-- Signup now creates ONLY a personal workspace (ADR 0008), so the Evbex
+-- members this suite needs are admitted deliberately — which is also the first
+-- exercise of the invite/approve path.
+insert into public.organization_members (organization_id, user_id)
+select public.default_org_id(), id from public.profiles
+ where id in ('11111111-1111-1111-1111-111111111111',
+              '22222222-2222-2222-2222-222222222222',
+              '33333333-3333-3333-3333-333333333333',
+              '44444444-4444-4444-4444-444444444444')
+on conflict do nothing;
+
+-- Xavier belongs to Acme ONLY (plus his own personal workspace).
 insert into public.organization_members (organization_id, user_id)
 values ('00000000-0000-0000-0000-0000000000aa', '55555555-5555-5555-5555-555555555555')
 on conflict do nothing;
--- Acme needs a profile row visible to Xavier for the FK on assignee.
+
+-- Eve is the PUBLIC self-registered account: she gets a personal workspace and
+-- is never admitted to Evbex. Section A2 proves what that does and does not
+-- give her.
 
 -- ============================================================
 -- A. Self-registration safety
@@ -130,10 +143,22 @@ on conflict do nothing;
 select tests.check('signup: new account gets the member role',
   (select role from public.profiles where id = '11111111-1111-1111-1111-111111111111') = 'member');
 
-select tests.check('signup: new account joins the primary organization',
-  exists (select 1 from public.organization_members
-           where user_id = '11111111-1111-1111-1111-111111111111'
-             and organization_id = public.default_org_id()));
+select tests.check('signup: new account does NOT join the primary organization',
+  not exists (select 1 from public.organization_members m
+               join public.organizations o on o.id = m.organization_id
+              where m.user_id = '66666666-6666-6666-6666-666666666666'
+                and o.kind = 'team'));
+
+select tests.check('signup: new account gets its OWN personal workspace',
+  exists (select 1 from public.organizations o
+            join public.organization_members m on m.organization_id = o.id
+           where o.kind = 'personal' and o.owner_user_id = '66666666-6666-6666-6666-666666666666'
+             and m.user_id = '66666666-6666-6666-6666-666666666666'));
+
+select tests.check('signup: the personal workspace has exactly one member',
+  (select count(*) from public.organization_members m
+     join public.organizations o on o.id = m.organization_id
+    where o.kind = 'personal' and o.owner_user_id = '66666666-6666-6666-6666-666666666666') = 1);
 
 select tests.check('signup: client-submitted role is IGNORED (no Owner escalation)',
   (select role from public.profiles where id = '66666666-6666-6666-6666-666666666666') = 'member');
@@ -142,6 +167,12 @@ select tests.check('signup: client-submitted organization is IGNORED',
   not exists (select 1 from public.organization_members
                where user_id = '66666666-6666-6666-6666-666666666666'
                  and organization_id = '00000000-0000-0000-0000-0000000000aa'));
+
+select tests.check('signup: client-submitted management flag grants nothing',
+  not exists (select 1 from public.role_permissions rp
+               join public.profiles p on p.role = rp.role_slug
+              where p.id = '66666666-6666-6666-6666-666666666666'
+                and rp.permission_key in ('tasks.view_all', 'users.assign_roles')));
 
 select tests.check('signup: display name is taken from metadata',
   (select name from public.profiles where id = '11111111-1111-1111-1111-111111111111') = 'Alice');
@@ -156,6 +187,77 @@ select tests.check('member role can run a personal workspace',
   (select count(*) from public.role_permissions
     where role_slug = 'member'
       and permission_key in ('tasks.read','tasks.create','tasks.execute')) = 3);
+
+-- ============================================================
+-- A2. A public account is an ACCOUNT, not a membership (ADR 0008)
+-- ============================================================
+-- Eve registered through the public form. She has a working personal task
+-- tracker and no reach whatsoever into Evbex. Both halves matter: the product
+-- promises "anyone can have their own tracker", and the security model
+-- promises "creating an account is not joining a company".
+set role authenticated;
+select public.test_sign_in('66666666-6666-6666-6666-666666666666');
+
+select tests.expect_rows('public signup: sees ONLY its own personal workspace',
+  $q$select id from public.organizations$q$, 1);
+select tests.check('public signup: that workspace is a personal one it owns',
+  (select kind = 'personal' and owner_user_id = auth.uid() from public.organizations limit 1));
+select tests.check('public signup: is NOT a member of the primary organization',
+  public.is_org_member(public.default_org_id()) = false);
+
+select tests.expect_allowed('public signup: can create a task in its OWN workspace', $q$
+  insert into public.tasks (id, organization_id, title, reporter_id, assignee_id, created_by, updated_by)
+  select 'T-P1', o.id, 'My own private task', auth.uid(), auth.uid(), auth.uid(), auth.uid()
+    from public.organizations o where o.owner_user_id = auth.uid()
+$q$);
+select tests.expect_rows('public signup: sees its own personal task',
+  $q$select id from public.tasks where id = 'T-P1'$q$, 1);
+
+select tests.expect_denied('public signup: cannot create a task in Evbex', $q$
+  insert into public.tasks (id, organization_id, title, reporter_id, assignee_id, created_by, updated_by)
+  values ('T-P2', public.default_org_id(), 'Sneaking in', auth.uid(), auth.uid(), auth.uid(), auth.uid())
+$q$);
+select tests.expect_denied('public signup: cannot join Evbex', $q$
+  insert into public.organization_members (organization_id, user_id)
+  values (public.default_org_id(), auth.uid())
+$q$);
+select tests.expect_denied('public signup: cannot invite itself via the admin RPC', $q$
+  select public.add_organization_member(public.default_org_id(), auth.uid())
+$q$);
+select tests.expect_rows('public signup: Evbex members are INVISIBLE',
+  $q$select id from public.profiles where id <> auth.uid()$q$, 0);
+select tests.expect_rows('public signup: Evbex membership rows are INVISIBLE',
+  $q$select user_id from public.organization_members where organization_id = public.default_org_id()$q$, 0);
+select tests.expect_rows('public signup: the workspace document is INVISIBLE',
+  $q$select id from public.workspace$q$, 0);
+
+-- …and the deliberate admission path does work, for an administrator.
+reset role;
+select public.test_sign_out();
+set role authenticated;
+select public.test_sign_in('44444444-4444-4444-4444-444444444444');   -- owner
+select tests.expect_allowed('admin can admit a user to a team organization', $q$
+  select public.add_organization_member(public.default_org_id(), '66666666-6666-6666-6666-666666666666')
+  from generate_series(1, 1)
+$q$);
+select tests.check('admission is audited',
+  exists (select 1 from public.activity_log where action = 'organization_member_added'));
+select tests.expect_denied('nobody can add members to a personal workspace', $q$
+  select public.add_organization_member(
+    (select id from public.organizations where kind = 'personal' limit 1),
+    '11111111-1111-1111-1111-111111111111')
+$q$);
+
+set role authenticated;
+select public.test_sign_in('66666666-6666-6666-6666-666666666666');
+select tests.check('after admission the user IS an Evbex member',
+  public.is_org_member(public.default_org_id()));
+
+-- Undo, so the rest of the suite sees Eve as the outsider she started as.
+reset role;
+delete from public.organization_members
+ where organization_id = public.default_org_id()
+   and user_id = '66666666-6666-6666-6666-666666666666';
 
 -- ============================================================
 -- B. Standard user — Alice
@@ -236,6 +338,8 @@ $q$);
 select public.test_sign_in('11111111-1111-1111-1111-111111111111');
 select tests.expect_rows('standard: sees ONLY own tasks',
   $q$select id from public.tasks$q$, 1);
+select tests.check('standard: the personal workspace exists alongside Evbex membership',
+  (select count(*) from public.organizations) = 2);
 select tests.expect_rows('standard: another user''s task is INVISIBLE',
   $q$select id from public.tasks where id = 'T-B1'$q$, 0);
 select tests.expect_rows('standard: another user''s progress log is INVISIBLE',
@@ -296,6 +400,10 @@ select tests.check('management: holds tasks.assign',   public.authorize('tasks.a
 
 select tests.expect_rows('management: sees EVERY task in the organization',
   $q$select id from public.tasks$q$, 2);
+-- …and NOT the personal workspaces of people outside it: management scope is
+-- bounded by the organization, always.
+select tests.expect_rows('management: a public user''s personal task is still invisible',
+  $q$select id from public.tasks where id = 'T-P1'$q$, 0);
 select tests.expect_rows('management: sees another user''s progress log',
   $q$select id from public.task_progress where task_id = 'T-B1'$q$, 1);
 select tests.expect_rows('management: sees another user''s comments',
@@ -351,6 +459,86 @@ select tests.check('pre-migration attachments still follow the document gate',
   public.attachment_readable('T-NOT-MIGRATED/x/0-file.png') = true);
 
 -- ============================================================
+-- C2. Reporter is metadata, not authorization (ADR 0007)
+-- ============================================================
+-- The exact lifecycle the review asked about: Alice raises a task for herself,
+-- works it, a manager reassigns it to Bob — and from that moment it is Bob's
+-- work. Alice stays on the record as reporter forever and loses every right
+-- over it, because "I raised this" is not a standing grant.
+set role authenticated;
+select public.test_sign_in('11111111-1111-1111-1111-111111111111');
+
+select tests.expect_allowed('reporter lifecycle: Alice creates a self-task', $q$
+  insert into public.tasks (id, organization_id, title, reporter_id, assignee_id, created_by, updated_by, status)
+  values ('T-R1', public.default_org_id(), 'Alice raised this herself',
+          auth.uid(), auth.uid(), auth.uid(), auth.uid(), 'In Progress')
+$q$);
+select tests.expect_rows('reporter lifecycle: 1. she can read it while assigned to her',
+  $q$select id from public.tasks where id = 'T-R1'$q$, 1);
+select tests.expect_allowed('reporter lifecycle: 2. she can execute it while assigned to her', $q$
+  update public.tasks set progress = 25 where id = 'T-R1'
+$q$);
+
+-- 3. Management reassigns it to Bob.
+select public.test_sign_in('33333333-3333-3333-3333-333333333333');
+select tests.expect_allowed('reporter lifecycle: 3. management reassigns it to Bob', $q$
+  update public.tasks set assignee_id = '22222222-2222-2222-2222-222222222222' where id = 'T-R1'
+$q$);
+
+-- 4/5. Bob now owns it outright.
+select public.test_sign_in('22222222-2222-2222-2222-222222222222');
+select tests.expect_rows('reporter lifecycle: 4. the new assignee can read it',
+  $q$select id from public.tasks where id = 'T-R1'$q$, 1);
+select tests.expect_allowed('reporter lifecycle: 5. the new assignee can execute it', $q$
+  update public.tasks set progress = 60 where id = 'T-R1'
+$q$);
+
+-- 6/7/8. Alice is still the reporter, and that buys her nothing.
+reset role;
+select tests.check('reporter lifecycle: 6. Alice remains the recorded reporter',
+  (select reporter_id from public.tasks where id = 'T-R1') = '11111111-1111-1111-1111-111111111111');
+
+set role authenticated;
+select public.test_sign_in('11111111-1111-1111-1111-111111111111');
+select tests.expect_rows('reporter lifecycle: 7. reporter can NO LONGER read it',
+  $q$select id from public.tasks where id = 'T-R1'$q$, 0);
+select tests.expect_denied('reporter lifecycle: 8. reporter can NO LONGER execute it', $q$
+  update public.tasks set progress = 5 where id = 'T-R1'
+$q$);
+select tests.expect_rows('reporter lifecycle: its progress log is invisible to the reporter',
+  $q$select id from public.task_progress where task_id = 'T-R1'$q$, 0);
+select tests.expect_denied('reporter lifecycle: reporter cannot comment on it either', $q$
+  insert into public.task_comments (id, task_id, user_id, body) values ('cm-r1', 'T-R1', auth.uid(), 'still mine?')
+$q$);
+select tests.expect_denied('reporter lifecycle: reporter cannot claim it back', $q$
+  update public.tasks set assignee_id = auth.uid() where id = 'T-R1'
+$q$);
+
+-- 9/10/11. Management scope is the ONLY thing that sees across people, and it
+-- is a runtime grant, not a property of who raised what.
+select public.test_sign_in('33333333-3333-3333-3333-333333333333');
+select tests.expect_rows('reporter lifecycle: 9. management (view_all) can read it',
+  $q$select id from public.tasks where id = 'T-R1'$q$, 1);
+
+select public.test_sign_in('44444444-4444-4444-4444-444444444444');
+select tests.expect_allowed('reporter lifecycle: revoke tasks.view_all from Product Manager', $q$
+  delete from public.role_permissions where role_slug = 'product_manager' and permission_key = 'tasks.view_all'
+$q$);
+select public.test_sign_in('33333333-3333-3333-3333-333333333333');
+select tests.expect_rows('reporter lifecycle: 10. without view_all, cross-user sight is gone at once',
+  $q$select id from public.tasks where id = 'T-R1'$q$, 0);
+select tests.check('reporter lifecycle: 10b. …even though they raised other tasks',
+  (select count(*) from public.tasks where reporter_id = auth.uid()) = 0);
+
+select public.test_sign_in('44444444-4444-4444-4444-444444444444');
+select tests.expect_allowed('reporter lifecycle: grant it back', $q$
+  insert into public.role_permissions (role_slug, permission_key) values ('product_manager', 'tasks.view_all')
+$q$);
+select public.test_sign_in('33333333-3333-3333-3333-333333333333');
+select tests.expect_rows('reporter lifecycle: 11. restoring view_all restores visibility',
+  $q$select id from public.tasks where id = 'T-R1'$q$, 1);
+
+-- ============================================================
 -- D. Tenant boundary — Xavier (Acme), and the owner
 -- ============================================================
 select public.test_sign_in('55555555-5555-5555-5555-555555555555');
@@ -368,7 +556,7 @@ select public.test_sign_in('44444444-4444-4444-4444-444444444444');
 select tests.check('owner: retains administration (users.assign_roles)',
   public.authorize('users.assign_roles') and public.authorize('admin.permissions'));
 select tests.expect_rows('owner: sees every task in their OWN organization',
-  $q$select id from public.tasks$q$, 3);
+  $q$select id from public.tasks$q$, 4);
 select tests.expect_rows('owner: does NOT see another organization''s tasks',
   $q$select id from public.tasks where organization_id = '00000000-0000-0000-0000-0000000000aa'$q$, 0);
 select tests.expect_allowed('owner: may change a role', $q$
@@ -386,7 +574,7 @@ $q$);
 -- request — no re-login, no code change. Then it is revoked again.
 select public.test_sign_in('22222222-2222-2222-2222-222222222222');
 select tests.expect_rows('before grant: member sees only own task',
-  $q$select id from public.tasks$q$, 1);
+  $q$select id from public.tasks$q$, 2);
 
 select public.test_sign_in('44444444-4444-4444-4444-444444444444');
 select tests.expect_allowed('owner grants tasks.view_all to the member role', $q$
@@ -395,7 +583,7 @@ $q$);
 
 select public.test_sign_in('22222222-2222-2222-2222-222222222222');
 select tests.expect_rows('after grant: the same member now sees organization tasks',
-  $q$select id from public.tasks$q$, 2);
+  $q$select id from public.tasks$q$, 3);
 
 select public.test_sign_in('44444444-4444-4444-4444-444444444444');
 select tests.expect_allowed('owner revokes tasks.view_all again', $q$
@@ -403,7 +591,7 @@ select tests.expect_allowed('owner revokes tasks.view_all again', $q$
 $q$);
 select public.test_sign_in('22222222-2222-2222-2222-222222222222');
 select tests.expect_rows('after revoke: member is back to personal scope',
-  $q$select id from public.tasks$q$, 1);
+  $q$select id from public.tasks$q$, 2);
 
 -- ============================================================
 -- F. Audit trail
@@ -536,9 +724,63 @@ select tests.check('migration: verification reports every count matching',
 select tests.check('migration: the workspace document was NOT modified',
   (select jsonb_array_length(tasks #> '{data,tasks}') from public.workspace where id = 'main') = 3);
 
-select tests.check('pruning: refuses without a green verification, dry-run first',
-  public.prune_migrated_tasks_from_document(false) like 'dry run:%'
+-- ---- the legacy copy must stop being a second route to other people's tasks ----
+-- While the document still carries task payload it is management-only, so a
+-- delivery role holding deliverables.read cannot read everyone's work out of
+-- the blob. Archiving then empties it and gives those roles the document back.
+select public.test_sign_in('11111111-1111-1111-1111-111111111111');
+select tests.expect_rows('legacy blob: a standard user cannot read the document at all',
+  $q$select id from public.workspace$q$, 0);
+
+select public.test_sign_in('44444444-4444-4444-4444-444444444444');
+select tests.check('archive: dry run reports without moving anything',
+  public.archive_workspace_tasks(false) like 'dry run:%'
   and (select jsonb_array_length(tasks #> '{data,tasks}') from public.workspace where id = 'main') = 3);
+
+-- Two statements on purpose: a subquery in the SAME statement as the function
+-- call would read the pre-call snapshot and quietly pass for the wrong reason.
+select tests.check('archive: commit reports the move',
+  public.archive_workspace_tasks(true) like 'archived%');
+select tests.check('archive: the shared document no longer carries task data',
+  (select jsonb_array_length(tasks #> '{data,tasks}') from public.workspace where id = 'main') = 0);
+
+-- Read back as the table owner: `authenticated` has no privilege on the
+-- archive at all (not even a policy to evaluate), which is itself the point.
+reset role;
+select tests.check('archive: the payload is preserved, not destroyed',
+  (select task_count from public.workspace_task_archive where workspace_id = 'main'
+    order by id desc limit 1) = 3
+  and (select jsonb_array_length(payload) from public.workspace_task_archive
+        where workspace_id = 'main' order by id desc limit 1) = 3);
+
+select tests.check('archive: the move is audited',
+  exists (select 1 from public.activity_log where action = 'workspace_tasks_archived'));
+
+select tests.check('archive: the archive table has no policy for ordinary clients',
+  (select count(*) from pg_policies where tablename = 'workspace_task_archive') = 0);
+
+set role authenticated;
+select public.test_sign_in('44444444-4444-4444-4444-444444444444');
+
+select tests.check('archive: rollback can put it back',
+  public.restore_workspace_tasks(false) like 'dry run: would restore 3%');
+
+select public.test_sign_in('11111111-1111-1111-1111-111111111111');
+select tests.expect_denied('archive: a standard user cannot archive', $q$
+  select public.archive_workspace_tasks(true)
+$q$);
+select tests.expect_denied('archive: a standard user cannot restore', $q$
+  select public.restore_workspace_tasks(true)
+$q$);
+select tests.expect_denied('archive: a standard user cannot read the archive', $q$
+  select payload from public.workspace_task_archive
+$q$);
+
+-- With the document emptied of tasks, non-management roles get the governance
+-- content back — the point of archiving rather than tightening the gate.
+select public.test_sign_in('33333333-3333-3333-3333-333333333333');
+select tests.expect_rows('archive: the document is readable again once task-free',
+  $q$select id from public.workspace$q$, 2);
 
 -- A migrated task is subject to exactly the same RLS as a native one.
 select public.test_sign_in('22222222-2222-2222-2222-222222222222');
