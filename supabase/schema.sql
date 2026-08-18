@@ -1687,6 +1687,10 @@ create policy "legacy_user_map read (authenticated)"
   on public.legacy_user_map for select to authenticated using (true);
 grant select on public.legacy_user_map to authenticated;
 
+-- Migration-internal only. It is SECURITY DEFINER and takes arbitrary text, so
+-- leaving it callable would hand any signed-in user a probe for "is this string
+-- a real account?". migrate_workspace_tasks is itself DEFINER and owned by the
+-- same role, so it can still call this after the grants below.
 create or replace function public.map_legacy_user(p_key text)
 returns uuid language plpgsql stable security definer set search_path = public, pg_temp as $$
 declare v uuid;
@@ -1700,6 +1704,9 @@ begin
   select user_id into v from public.legacy_user_map where legacy_key = p_key;
   return v;
 end $$;
+
+-- Not callable from a client; the migration calls it as its owner.
+revoke execute on function public.map_legacy_user(text) from public, anon, authenticated;
 
 -- ---------- 3.9 Workspace document → normalized tasks ----------
 -- Deterministic, idempotent, non-destructive, DRY-RUN BY DEFAULT.
@@ -1955,7 +1962,24 @@ drop policy if exists "workspace read (authenticated)" on public.workspace;
 drop policy if exists "workspace read (document scope)" on public.workspace;
 create policy "workspace read (document scope)"
   on public.workspace for select to authenticated
-  using (public.authorize('deliverables.read'));
+  using (
+    public.authorize('deliverables.read')
+    -- …AND the document must not still be carrying task data. deliverables.read
+    -- is the right gate for the document's REMAINING content (deliverables,
+    -- weekly plans, KPI); it is the wrong gate for tasks, and a Business
+    -- Analyst holding it would otherwise read everybody's tasks straight out
+    -- of the legacy blob while the normalized tables correctly refuse them.
+    --
+    -- So the rule is about what the row CONTAINS, not just who is asking:
+    -- while task payload is present the whole document is management-only.
+    -- Running archive_workspace_tasks() (§3.11) empties it and restores normal
+    -- access for everyone — which is why that step belongs immediately after
+    -- migration verification in the runbook, not "some time later".
+    and (
+      public.authorize('tasks.view_all')
+      or jsonb_array_length(coalesce(tasks #> '{data,tasks}', '[]'::jsonb)) = 0
+    )
+  );
 
 drop policy if exists "workspace write (role)" on public.workspace;
 create policy "workspace write (role)"
@@ -1976,6 +2000,12 @@ create policy "workspace write (role)"
 create or replace function public.attachment_task_id(p_name text)
 returns text language sql immutable as $$ select split_part(p_name, '/', 1) $$;
 
+-- The legacy branch below applies ONLY before the migration has run. Once any
+-- task row exists, an attachment whose path names no known task is an orphan,
+-- and an orphan must not be a way around the task rules: it needs management
+-- scope. Otherwise a role holding deliverables.read could read attachments by
+-- guessing a path that happens not to resolve — the exact class of hole this
+-- correction round is closing on the workspace document.
 create or replace function public.attachment_readable(p_name text)
 returns boolean language plpgsql stable security definer set search_path = public, pg_temp as $$
 declare v_task text := public.attachment_task_id(p_name);
@@ -2023,47 +2053,119 @@ create policy "task-attachments delete (role)"
   on storage.objects for delete to authenticated
   using (bucket_id = 'task-attachments' and public.attachment_writable(name));
 
--- ---------- 3.11 Optional: retire the document's task copy ----------
--- After the migration is verified AND the normalized path has been used in
--- production for a while, the document still holds a full copy of every task.
--- It is no longer read by the app, but it is still data at rest, so an
--- operator may choose to retire it.
+-- ---------- 3.11 Retiring the document's task copy (archive, not delete) ----
+-- After migration the document still holds a full copy of every task. That
+-- copy is the rollback source, so it is not deleted — but it must not sit in
+-- the shared document either, because the document is read by roles that have
+-- no business seeing other people's tasks (§3.10a makes such a document
+-- management-only, which is safe but takes Deliverables/Weekly/KPI away from
+-- everyone else until this runs).
 --
--- DESTRUCTIVE and therefore: never automatic, never called by any client,
--- owner-gated, refuses to run unless verify_task_migration() is green, and
--- dry-run by default. TAKE A BACKUP FIRST (Settings → Data → Export).
--- Doing this also gives up the "just stop reading the new tables" rollback,
--- which is why it is a separate, later, deliberate step.
-create or replace function public.prune_migrated_tasks_from_document(p_commit boolean default false)
-returns text language plpgsql security definer set search_path = public, pg_temp as $$
+-- So: MOVE it. The payload goes to an administrator-only archive table and the
+-- shared document's task array is emptied. Rollback stays possible in two
+-- independent ways — the operator's export, and restore_workspace_tasks() —
+-- while ordinary workspace reads stop carrying anybody's tasks.
+--
+-- Explicit, separately invoked, dry-run by default, owner-gated, and it
+-- REFUSES to run unless verify_task_migration() is green. Never automatic and
+-- never called by any client.
+create table if not exists public.workspace_task_archive (
+  id           bigserial primary key,
+  workspace_id text not null,
+  archived_at  timestamptz not null default now(),
+  archived_by  uuid references auth.users(id) on delete set null,
+  task_count   int not null,
+  payload      jsonb not null
+);
+
+alter table public.workspace_task_archive enable row level security;
+-- No policy for `authenticated` AT ALL: the archive is reachable only through
+-- the SECURITY DEFINER functions below, both of which authorize first. A
+-- table with RLS enabled and no policy denies everyone, which is the point.
+revoke all on public.workspace_task_archive from anon, authenticated;
+
+create or replace function public.archive_workspace_tasks(p_commit boolean default false)
+returns text language plpgsql security definer set search_path = public, pg_temp as $fn$
 declare
-  v_bad int;
-  v_n   int;
+  v_bad   int;
+  v_tasks jsonb;
+  v_n     int;
 begin
   if not public.authorize('admin.restore') then
     raise exception 'not permitted' using errcode = '42501';
   end if;
+
   select count(*) into v_bad from public.verify_task_migration()
    where not matches and metric <> 'unmapped_owners';
   if v_bad > 0 then
-    raise exception 'migration verification is not green (% mismatching metric(s)) — refusing to prune', v_bad;
+    raise exception 'migration verification is not green (% mismatching metric(s)) — refusing to archive', v_bad;
   end if;
-  select jsonb_array_length(coalesce(tasks #> '{data,tasks}', '[]'::jsonb)) into v_n
-    from public.workspace where id = 'main';
+
+  select coalesce(w.tasks #> '{data,tasks}', '[]'::jsonb) into v_tasks
+    from public.workspace w where w.id = 'main';
+  v_n := jsonb_array_length(coalesce(v_tasks, '[]'::jsonb));
+
   if not p_commit then
-    return format('dry run: would remove %s task entries from the workspace document', v_n);
+    return format('dry run: would archive %s task entries out of the workspace document', v_n);
   end if;
+
+  insert into public.workspace_task_archive (workspace_id, archived_by, task_count, payload)
+  values ('main', auth.uid(), v_n, v_tasks);
+
   update public.workspace
      set tasks = jsonb_set(tasks, '{data,tasks}', '[]'::jsonb),
          updated_at = now()
    where id = 'main';
-  return format('removed %s task entries from the workspace document', v_n);
-end $$;
 
-revoke execute on function public.prune_migrated_tasks_from_document(boolean) from public, anon;
-grant  execute on function public.prune_migrated_tasks_from_document(boolean) to authenticated;
+  insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+  values (auth.uid(), 'workspace_tasks_archived', 'workspace', 'main',
+          jsonb_build_object('task_count', v_n));
 
--- ---------- 3.10 Realtime ----------
+  return format('archived %s task entries; the shared document no longer carries task data', v_n);
+end $fn$;
+
+revoke execute on function public.archive_workspace_tasks(boolean) from public, anon;
+grant  execute on function public.archive_workspace_tasks(boolean) to authenticated;
+
+-- The rollback half. Puts the most recent archived payload back into the
+-- document, so "stop reading the new tables" remains a complete rollback even
+-- after archiving. Owner-gated and dry-run by default, like its counterpart.
+create or replace function public.restore_workspace_tasks(p_commit boolean default false)
+returns text language plpgsql security definer set search_path = public, pg_temp as $fn$
+declare
+  v_row public.workspace_task_archive%rowtype;
+begin
+  if not public.authorize('admin.restore') then
+    raise exception 'not permitted' using errcode = '42501';
+  end if;
+
+  select * into v_row from public.workspace_task_archive
+   where workspace_id = 'main' order by archived_at desc, id desc limit 1;
+  if v_row.id is null then
+    return 'nothing archived for workspace main — nothing to restore';
+  end if;
+
+  if not p_commit then
+    return format('dry run: would restore %s task entries archived at %s',
+                  v_row.task_count, v_row.archived_at);
+  end if;
+
+  update public.workspace
+     set tasks = jsonb_set(tasks, '{data,tasks}', v_row.payload),
+         updated_at = now()
+   where id = 'main';
+
+  insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+  values (auth.uid(), 'workspace_tasks_restored', 'workspace', 'main',
+          jsonb_build_object('task_count', v_row.task_count, 'archived_at', v_row.archived_at));
+
+  return format('restored %s task entries into the workspace document', v_row.task_count);
+end $fn$;
+
+revoke execute on function public.restore_workspace_tasks(boolean) from public, anon;
+grant  execute on function public.restore_workspace_tasks(boolean) to authenticated;
+
+-- ---------- 3.12 Realtime ----------
 -- RLS applies to realtime, so a standard user's subscription only ever yields
 -- rows they may read — no client is subscribed to an organization-wide stream.
 do $$ begin alter publication supabase_realtime add table public.tasks;
