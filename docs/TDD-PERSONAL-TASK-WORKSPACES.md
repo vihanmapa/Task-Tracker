@@ -18,7 +18,7 @@ Phase 3 adds the missing half:
 
 ```text
 RBAC            → may this user perform this capability?      (Phase 2, unchanged)
-Object relation → is this task theirs?                        (new: reporter/assignee)
+Object relation → is this task theirs?                        (new: assignee)
 Organization    → is this task even in their tenant?          (new: organizations)
 RLS             → enforces both, in Postgres                  (new: normalized tables)
 ```
@@ -90,18 +90,31 @@ SECURITY DEFINER helper:
 
 ```sql
 public.is_org_member(uuid) → boolean        -- membership for auth.uid()
-public.default_org_id()    → uuid           -- the seeded FM Navigate org
+public.shares_org_with(uuid) → boolean      -- backs the profile directory read
+public.default_org_id()    → uuid           -- the PRIMARY org; not used by signup
 ```
 
 `is_org_member` is DEFINER so policies never recurse into
 `organization_members`' own RLS, and so the check costs one index probe.
 
-**Assumption (documented):** the FM Navigate deployment is single-tenant. The
-default organization is seeded with the fixed uuid
-`00000000-0000-0000-0000-000000000001` (deterministic ⇒ the migration is
-idempotent), every existing profile is back-filled into it, and self-signup joins
-it. Multi-org onboarding (creating a *new* org at signup) is deliberately not
-built — but nothing in the schema assumes there is only one.
+**Revised by ADR 0008.** The primary (Evbex / FM Navigate) organization is
+seeded with the fixed uuid `00000000-0000-0000-0000-000000000001`
+(deterministic ⇒ idempotent), and every account that existed before this phase
+was back-filled into it **once**, behind a marker row.
+
+Self-signup does **not** join it. Every account instead gets its own
+organization with `kind = 'personal'`, and joining a team organization requires
+`add_organization_member()` — see §10.1. So there are now two kinds of
+organization:
+
+```sql
+organizations.kind = 'team'      -- Evbex; membership granted deliberately
+organizations.kind = 'personal'  -- one per account, its own private tracker
+```
+
+Multi-org *switching UI* is still not built; the schema supports it (everyone
+has at least two organizations now) and the client picks the team one when
+deciding where a new task belongs.
 
 ### 5.2 Profile visibility
 
@@ -172,7 +185,7 @@ nothing.
 
 | | meaning | who sets it |
 |---|---|---|
-| `reporter_id` | who created / raised the task | server-side = `auth.uid()` at insert; immutable |
+| `reporter_id` | who created / raised the task — **metadata, not scope** (ADR 0007) | server-side = `auth.uid()` at insert; immutable |
 | `assignee_id` | who is responsible for completing it | self at insert; changed only with `tasks.assign` |
 
 - Standard user creating a task: `reporter_id = assignee_id = auth.uid()` — the
@@ -227,18 +240,18 @@ Seeded to `executive`, `delivery_management` (Product Manager) and — via
 owner can hand `tasks.view_all` to any other role from Settings → Roles &
 Permissions with no deployment.
 
-### 8.2 The rules
+### 8.2 The rules (revised — ADR 0007)
 
 ```text
 READ    org member(task.org) AND authorize('tasks.read')
-        AND (assignee = me OR reporter = me OR authorize('tasks.view_all'))
+        AND (assignee = me OR authorize('tasks.view_all'))
 
 CREATE  org member(task.org) AND authorize('tasks.create')
         AND reporter = me AND created_by = me
         AND (assignee = me OR authorize('tasks.assign'))
 
 UPDATE  org member(task.org) AND authorize('tasks.execute')
-        AND (assignee = me OR reporter = me OR authorize('tasks.view_all'))
+        AND (assignee = me OR authorize('tasks.view_all'))
         + column rules (trigger): assignee needs tasks.assign,
                                   priority needs tasks.prioritize,
                                   org/reporter/id immutable
@@ -249,6 +262,14 @@ CHILD ROWS (checklist / progress / resources / comments / activity)
         inherit: readable iff the parent task row is readable,
                  writable iff the parent task row is writable
 ```
+
+**Reporter is deliberately absent from READ and UPDATE.** The first
+implementation included it, which meant a standard user kept read and execute
+rights over work that had since been handed to somebody else — permanently, and
+with no way for a manager to take it back. Who raised a task is a fact about its
+origin; seeing across people is `tasks.view_all`. Reporter is still recorded,
+still pinned to `auth.uid()` at insert, still immutable, still displayed. See
+ADR 0007.
 
 Child inheritance is written as `exists (select 1 from public.tasks t where
 t.id = task_id)` — inside a policy, Postgres applies `tasks`' own RLS to that
@@ -274,6 +295,9 @@ unit-tested against the same truth table the SQL implements.
 |---|---|---|
 | standard | SELECT own assigned task | allow |
 | standard | SELECT another user's task | **deny** |
+| standard | SELECT a task they RAISED but no longer own | **deny** (ADR 0007) |
+| standard | UPDATE a task they RAISED but no longer own | **deny** (ADR 0007) |
+| standard | read the audit log / comments / legacy map for another's task | **deny** (ADR 0009) |
 | standard | INSERT self-assigned | allow |
 | standard | INSERT assigned to another | **deny** |
 | standard | UPDATE own assigned | allow |
@@ -288,6 +312,9 @@ unit-tested against the same truth table the SQL implements.
 | management | reassign | allow |
 | management | change priority | allow |
 | any role incl. owner | anything in **another org** | **deny** |
+| public signup | anything belonging to the primary organization | **deny** (ADR 0008) |
+| public signup | create and work a task in their own personal workspace | allow |
+| administrator | admit a user to a team organization | allow |
 | owner | administration (roles, profiles, permissions) | unchanged |
 
 Run: `npm run verify:rls` (spins a throwaway Postgres, loads the real
@@ -309,8 +336,40 @@ now:
 1. creates the profile with `role = 'member'` — **hardcoded in the trigger**, never
    read from `raw_user_meta_data`;
 2. takes only `name` from client metadata (a display string, grants nothing);
-3. inserts the `organization_members` row for the default organization;
-4. leaves everything else at defaults.
+3. creates the account's **own personal workspace** (an organization with
+   `kind = 'personal'`) and makes it the only member;
+4. joins **no existing organization** (ADR 0008).
+
+### 10.1 Signup is not membership (ADR 0008)
+
+The first implementation auto-joined the primary organization here, which meant
+anyone who could reach the signup form became an Evbex workspace member — with
+a safe role, but able to see the organization's people, document and governance
+screens. Creating an account and joining a company are different facts.
+
+A personal workspace is an ordinary organization, so every task policy, the
+tenant boundary and the whole client work there unchanged — no second code path,
+no nullable `organization_id`, no special case in RLS. It is what keeps "anyone
+can have their own task tracker" true without handing anyone somebody else's
+work.
+
+Joining a team organization requires `add_organization_member(org, user)`:
+`authorize('users.assign_roles')` before any write, refuses an organization the
+caller is not in, refuses a personal workspace. `organization_members` has no
+INSERT policy at all, so that function is the only way in; an email invitation
+flow can later call it without moving the boundary.
+
+Two guards protect the existing installation:
+
+- the Evbex back-fill is **one-shot behind a marker row** (`schema_markers`).
+  `schema.sql` is re-runnable by design, and an unguarded
+  `insert … select from profiles` would have swept every public account into
+  Evbex the next time anyone applied the file;
+- every pre-existing account also gets a personal workspace, so the model is
+  uniform rather than split between old and new users.
+
+A user in both a team organization and their personal one creates tasks in the
+**team** one — staff work in Evbex, public users in their own tracker.
 
 The client sends exactly `{ name }`. Even a tampered client that posts
 `{role:'owner', organization_id:…, is_management:true}` changes nothing: the
@@ -495,6 +554,14 @@ statically asserts `auth-context.jsx` contains no `'viewer'` role fallback.
 - Direct PostgREST/REST tampering hits the same policies as the UI (tested).
 - The append-only `activity_log` has no UPDATE/DELETE policy — unchanged.
 - Deny-by-default everywhere: no policy grants `using (true)` on task data.
+- **No dual-source privacy (ADR 0009).** A task has several representations —
+  the tables, the legacy document, Storage objects, the audit log, the unused
+  generic comments table — and every one of them now answers the same question
+  the same way. The audit log is the cautionary tale: its `using (true)` was
+  correct when written and became a leak the moment Phase 3 started writing
+  task titles into it. New rule: any table that can hold a task id needs a
+  task-scoped policy *before* it holds one.
+- Reporter grants nothing (ADR 0007); signup grants no membership (ADR 0008).
 
 ## 20. Rollout
 
@@ -512,10 +579,11 @@ statically asserts `auth-context.jsx` contains no `'viewer'` role fallback.
 - **Client:** redeploy the previous build, or set
   `window.APP_CONFIG.TASKS_BACKEND = 'workspace'` — the workspace document was
   never modified by the migration, so the legacy path is still fully populated.
-- **Database:** `alter table public.tasks disable row level security` is *not* the
-  rollback; the rollback is simply "stop reading the normalized tables". Dropping
-  them (`supabase/rollback-phase3.sql`) is available but only destroys post-migration
-  work created in normalized mode — export first.
+- **Database:** the rollback is simply "stop reading the normalized tables".
+  After `archive_workspace_tasks()` has run, the document's task array is empty,
+  so restoring it is one further step: `restore_workspace_tasks(true)`, which
+  copies the archived payload back. Both are owner-gated and dry-run by default.
+  Nothing is ever deleted.
 - Phase 2 objects are untouched by a Phase-3 rollback.
 
 ## 22. Test strategy

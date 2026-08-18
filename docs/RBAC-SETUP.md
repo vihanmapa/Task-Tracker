@@ -245,10 +245,12 @@ run function, dry-run by default, and it never modifies the workspace document.
 | | before | after |
 |---|---|---|
 | where tasks live | `workspace('main').tasks` jsonb | `public.tasks` + 5 child tables |
-| who can see a task | anyone signed in | assignee, reporter, or `tasks.view_all` |
+| who can see a task | anyone signed in | the **assignee**, or `tasks.view_all` (ADR 0007) |
 | who can assign | app-side check only | `tasks.assign`, enforced by trigger |
 | tenant | implicit | `organization_id` on every task, checked on every operation |
-| signup | owner creates the account in Supabase | anyone can self-register → `member` |
+| signup | owner creates the account in Supabase | anyone can self-register → `member` **+ their own personal workspace, and no Evbex membership** (ADR 0008) |
+| joining Evbex | implicit | `add_organization_member()`, administrator-only |
+| the document's task copy | shared, readable | archived to an admin-only table (ADR 0009) |
 
 ## Steps
 
@@ -299,19 +301,41 @@ run function, dry-run by default, and it never modifies the workspace document.
    Every row's `matches` must be `true`. `unmapped_owners` is informational —
    those tasks appear in the management dashboard's **Unassigned** widget.
 
-8. **Deploy the client.** It probes for `public.tasks` and switches to the
+8. **Archive the document's task copy — do this now, not later.**
+   ```sql
+   select public.archive_workspace_tasks(false);   -- dry run
+   select public.archive_workspace_tasks(true);    -- commit
+   ```
+   This MOVES the legacy task payload into an administrator-only archive table
+   and empties the document's task array. Nothing is deleted;
+   `restore_workspace_tasks(true)` puts it back.
+
+   Why immediately: until this runs, the document still contains everybody's
+   tasks, so its policy makes it **management-only** — which is safe but takes
+   Deliverables / This Week / KPI away from every other role. Archiving both
+   closes the last cross-user read path and gives those screens back.
+   The function refuses to run unless step 7 is green.
+
+9. **Deploy the client.** It probes for `public.tasks` and switches to the
    normalized path on its own; no coordinated cutover.
 
 ## UAT
 
-1. Sign out → **Create account** → sign up. You land in a personal workspace:
-   *My Tasks*, no People/Deliverables/KPI/This Week in the nav.
+1. Sign out → **Create account** → sign up. You land in **your own** personal
+   workspace: *My Tasks*, no People/Deliverables/KPI/This Week in the nav — and
+   **no Evbex data of any kind**. Create a task; it lives in your workspace.
+   To make that account a colleague, an owner runs:
+   ```sql
+   select public.add_organization_member(public.default_org_id(), '<their uuid>');
+   ```
 2. Create a task. It has no assignee picker; you are both reporter and assignee.
 3. As a Product Manager: the dashboard shows *Work by person*, **People** is in
    the nav, and the task form has an assignee picker. Create a task for someone
    else and reassign it.
 4. Sign back in as the member: the delegated task is on their list; the other
    member's tasks are not, on any screen or URL.
+5. Reassign one of their tasks away from them (as management). It disappears
+   from their list entirely — being its reporter does not keep it (ADR 0007).
 5. `select action, entity_id from activity_log order by created_at desc limit 10;`
    → `task_created`, `task_assigned`, `task_reassigned`, `task_status_changed`.
 
@@ -325,13 +349,13 @@ and not a role name or a job title.
 
 ## Rollback
 
-- **Client:** redeploy the previous build. The workspace document still holds
-  every task — the migration never touched it — so the legacy path is intact.
-- **Database:** nothing to undo; the Phase-3 tables simply stop being read.
-  Phase 1–2 objects are untouched either way.
-- Rollback is only lost after the optional
-  `prune_migrated_tasks_from_document(true)`, which is why that is a separate,
-  later, deliberate step that refuses to run unless verification is green.
+- **Before step 8:** redeploy the previous client. The workspace document still
+  holds every task — the migration never touches it — so the legacy path is
+  intact and there is nothing to undo in the database.
+- **After step 8:** run `select public.restore_workspace_tasks(true);` to copy
+  the archived payload back into the document, then redeploy the previous
+  client. The archive is never deleted, so this stays available indefinitely.
+- Phase 1–2 objects are untouched in every case.
 
 ## Verify commands
 
