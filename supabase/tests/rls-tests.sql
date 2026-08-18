@@ -844,6 +844,44 @@ select tests.expect_rows('migration: the assignee sees their migrated task',
   $q$select id from public.tasks where id = 'T-501'$q$, 1);
 
 -- ============================================================
+-- Owner protection survives multi-tenancy
+-- ------------------------------------------------------------
+-- protect_profile_privileges refuses to demote the last active owner by
+-- counting the others. That count is an ordinary SELECT inside a SECURITY
+-- INVOKER trigger, so RLS scopes it to what the caller may see — which is the
+-- caller's own organization, and only because the profiles policies are
+-- org-scoped. While "profiles owner manage" was unscoped the count spanned
+-- every tenant, and another organization's owner satisfied it: Evbex's sole
+-- owner could demote themselves and leave the organization with nobody able
+-- to administer it. Verified — it succeeded before the scoping, and is
+-- refused after.
+reset role;   -- seeding a role needs table ownership; the checks below re-enter authenticated
+alter table public.profiles disable trigger protect_profile_privileges;
+update public.profiles set role = 'owner' where id = '55555555-5555-5555-5555-555555555555';
+alter table public.profiles enable trigger protect_profile_privileges;
+set role authenticated;
+
+select public.test_sign_in('44444444-4444-4444-4444-444444444444');
+select tests.check('owner protection: another tenant''s owner is not visible to this one',
+  (select count(*) from public.profiles
+    where role = 'owner' and status = 'active' and id <> auth.uid()) = 0);
+select tests.expect_denied('owner protection: the last owner of an org cannot demote themselves', $q$
+  update public.profiles set role = 'viewer' where id = auth.uid()
+$q$);
+select tests.expect_denied('owner protection: nor disable themselves', $q$
+  update public.profiles set status = 'disabled' where id = auth.uid()
+$q$);
+select tests.check('owner protection: the organization still has its owner',
+  (select role || '/' || status from public.profiles where id = auth.uid()) = 'owner/active');
+
+-- Put the fixture back so the assertions below see the seeded shape.
+reset role;
+alter table public.profiles disable trigger protect_profile_privileges;
+update public.profiles set role = 'member' where id = '55555555-5555-5555-5555-555555555555';
+alter table public.profiles enable trigger protect_profile_privileges;
+set role authenticated;
+
+-- ============================================================
 -- Re-apply safety (ADR 0008 — schema.sql is re-runnable by design)
 -- ------------------------------------------------------------
 -- verify-rls.mjs loads schema.sql twice before this file runs, so reaching
