@@ -229,3 +229,117 @@ safe. Parity between the two is asserted by `npm run verify:rbac`.
    re-login) and any in-flight save is rejected by RLS. Toggle back.
 4. `activity_log` shows the `permission_revoked` / `permission_granted` pair.
 5. Reset to template on a customised role restores the seeded set.
+
+---
+
+# Phase 3 — Personal task workspaces (rollout runbook)
+
+Design: `docs/TDD-PERSONAL-TASK-WORKSPACES.md`. Decision: ADR 0006.
+Everything below is in the same idempotent `supabase/schema.sql`.
+
+**Nothing here happens automatically.** The migration is an explicit, operator-
+run function, dry-run by default, and it never modifies the workspace document.
+
+## What changes
+
+| | before | after |
+|---|---|---|
+| where tasks live | `workspace('main').tasks` jsonb | `public.tasks` + 5 child tables |
+| who can see a task | anyone signed in | assignee, reporter, or `tasks.view_all` |
+| who can assign | app-side check only | `tasks.assign`, enforced by trigger |
+| tenant | implicit | `organization_id` on every task, checked on every operation |
+| signup | owner creates the account in Supabase | anyone can self-register → `member` |
+
+## Steps
+
+1. **Apply the SQL.** Supabase → SQL Editor → run `supabase/schema.sql`.
+   Re-running is safe. This adds Phase 3 alongside Phases 1–2; nothing is dropped.
+
+2. **Check the seed.** Expect 13 roles, 42 permissions, 14 enforced:
+   ```sql
+   select (select count(*) from roles) roles,
+          (select count(*) from permissions) perms,
+          (select count(*) from permissions where enforced) enforced,
+          (select count(*) from role_permissions) grants;
+   ```
+
+3. **Map the legacy owner keys** to real accounts. The pre-normalisation
+   document identifies people by workspace key (`vihan`, `richard`, `isuru`),
+   not by uuid. Anything you don't map migrates **unassigned** — never to the
+   wrong person — and keeps its original key in `tasks.legacy_owner`.
+   ```sql
+   insert into public.legacy_user_map (legacy_key, user_id)
+   select 'vihan', id from public.profiles where email = 'REPLACE@example.com'
+   on conflict (legacy_key) do update set user_id = excluded.user_id;
+   -- repeat for 'richard', 'isuru', and any 'email:someone@example.com' keys
+   select legacy_key, user_id from public.legacy_user_map;   -- confirm
+   ```
+
+4. **BACK UP THE WORKSPACE.** Settings → Data → Backup workspace → **Export**.
+   Required, not optional. Keep the file until step 8 passes.
+
+5. **Dry run** (signed in as an owner — the function refuses anyone else):
+   ```sql
+   select * from public.migrate_workspace_tasks(false);
+   ```
+   Read `document_tasks` (how many it found) and `unmapped_owners` (how many
+   would land unassigned). If `unmapped_owners` surprises you, go back to step 3.
+
+6. **Commit:**
+   ```sql
+   select * from public.migrate_workspace_tasks(true);
+   ```
+   Idempotent — every insert is keyed on the original task id, so a partial run
+   is safely resumable and a second run writes nothing.
+
+7. **Verify:**
+   ```sql
+   select * from public.verify_task_migration();
+   ```
+   Every row's `matches` must be `true`. `unmapped_owners` is informational —
+   those tasks appear in the management dashboard's **Unassigned** widget.
+
+8. **Deploy the client.** It probes for `public.tasks` and switches to the
+   normalized path on its own; no coordinated cutover.
+
+## UAT
+
+1. Sign out → **Create account** → sign up. You land in a personal workspace:
+   *My Tasks*, no People/Deliverables/KPI/This Week in the nav.
+2. Create a task. It has no assignee picker; you are both reporter and assignee.
+3. As a Product Manager: the dashboard shows *Work by person*, **People** is in
+   the nav, and the task form has an assignee picker. Create a task for someone
+   else and reassign it.
+4. Sign back in as the member: the delegated task is on their list; the other
+   member's tasks are not, on any screen or URL.
+5. `select action, entity_id from activity_log order by created_at desc limit 10;`
+   → `task_created`, `task_assigned`, `task_reassigned`, `task_status_changed`.
+
+## Widening management scope later — no deployment
+
+Settings → Roles & Permissions → the role → grant **View all tasks in the
+organization** (`tasks.view_all`). That user's next request sees the whole
+organization and their dashboard switches to the management composition.
+Revoking narrows it back the same way. This is why management is a permission
+and not a role name or a job title.
+
+## Rollback
+
+- **Client:** redeploy the previous build. The workspace document still holds
+  every task — the migration never touched it — so the legacy path is intact.
+- **Database:** nothing to undo; the Phase-3 tables simply stop being read.
+  Phase 1–2 objects are untouched either way.
+- Rollback is only lost after the optional
+  `prune_migrated_tasks_from_document(true)`, which is why that is a separate,
+  later, deliberate step that refuses to run unless verification is green.
+
+## Verify commands
+
+```
+npm run verify          # everything below, in order
+npm run verify:rbac     # Phase-2 parity + account isolation (static)
+npm run verify:auth     # bootstrap race, scope mirror, write planner
+npm run verify:rls      # task authorization against a real Postgres
+npm run build           # the precompiled bundle
+npm run verify:ui       # personal vs management UX in headless Chromium
+```

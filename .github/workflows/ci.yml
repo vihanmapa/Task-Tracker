@@ -1,7 +1,7 @@
-name: CI — build check
+name: CI — build + verify
 
-# Validates that the esbuild bundle builds on every PR. Does NOT deploy.
-# Deployment is handled separately by deploy.yml (push to main only).
+# Validates the bundle AND the authorization model on every PR.
+# Does NOT deploy — deployment is deploy.yml (push to main only).
 on:
   pull_request:
     branches: [main]
@@ -18,7 +18,39 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 22
-      - name: Install build deps (esbuild)
+      - name: Install deps
         run: npm install
       - name: Build precompiled bundle
         run: npm run build
+
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Install deps
+        run: npm install
+
+      # Static suites: RBAC seed↔client parity, account isolation, the auth
+      # bootstrap race, the task-scope mirror and the write planner.
+      - name: Verify RBAC
+        run: npm run verify:rbac
+      - name: Verify auth bootstrap + task scope
+        run: npm run verify:auth
+
+      # Task authorization runs against a REAL PostgreSQL loaded with the
+      # unmodified supabase/schema.sql, so the policies under test are the
+      # ones that ship. ubuntu-latest already has a server installed; the
+      # script skips loudly if it ever stops shipping one.
+      - name: Verify task authorization (real Postgres)
+        run: npm run verify:rls
+
+      # The browser smoke test needs the built bundle.
+      - name: Build
+        run: npm run build
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+      - name: Verify personal vs management UX
+        run: npm run verify:ui
