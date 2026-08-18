@@ -273,6 +273,19 @@ select tests.expect_denied('standard: cannot grant itself a permission', $q$
   insert into public.role_permissions (role_slug, permission_key) values ('member', 'tasks.view_all')
 $q$);
 
+-- ---- the legacy copies must not leak the same data ----
+select tests.expect_rows('standard: the legacy workspace document is INVISIBLE',
+  $q$select id from public.workspace$q$, 0);
+select tests.expect_denied('standard: cannot write the legacy workspace document', $q$
+  update public.workspace set tasks = '{}'::jsonb where id = 'main'
+$q$);
+select tests.check('standard: an attachment on another user''s task is unreadable',
+  public.attachment_readable('T-B1/pl-b1/0-evidence.png') = false);
+select tests.check('standard: an attachment on their OWN task is readable',
+  public.attachment_readable('T-A1/pl-a1/0-evidence.png') = true);
+select tests.check('standard: cannot write an attachment on another user''s task',
+  public.attachment_writable('T-B1/pl-b1/0-evidence.png') = false);
+
 -- ============================================================
 -- C. Management user — Mona (Product Manager: tasks.view_all + assign)
 -- ============================================================
@@ -327,6 +340,15 @@ select tests.expect_rows('assignee sees a task delegated to them',
 select public.test_sign_in('33333333-3333-3333-3333-333333333333');
 select tests.expect_rows('reporter keeps sight of a task they delegated away',
   $q$select id from public.tasks where id = 'T-M1' and reporter_id = auth.uid()$q$, 1);
+
+select tests.expect_rows('management: the workspace document is readable',
+  $q$select id from public.workspace$q$, 2);
+select tests.check('management: attachments follow task visibility',
+  public.attachment_readable('T-B1/pl-b1/0-evidence.png') = true);
+-- An attachment whose task has not been normalized yet follows the document's
+-- own gate, so pre-migration evidence stays reachable during the rollout.
+select tests.check('pre-migration attachments still follow the document gate',
+  public.attachment_readable('T-NOT-MIGRATED/x/0-file.png') = true);
 
 -- ============================================================
 -- D. Tenant boundary — Xavier (Acme), and the owner
@@ -513,6 +535,10 @@ select tests.check('migration: verification reports every count matching',
 
 select tests.check('migration: the workspace document was NOT modified',
   (select jsonb_array_length(tasks #> '{data,tasks}') from public.workspace where id = 'main') = 3);
+
+select tests.check('pruning: refuses without a green verification, dry-run first',
+  public.prune_migrated_tasks_from_document(false) like 'dry run:%'
+  and (select jsonb_array_length(tasks #> '{data,tasks}') from public.workspace where id = 'main') = 3);
 
 -- A migrated task is subject to exactly the same RLS as a native one.
 select public.test_sign_in('22222222-2222-2222-2222-222222222222');

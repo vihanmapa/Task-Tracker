@@ -1763,6 +1763,126 @@ end $$;
 revoke execute on function public.verify_task_migration() from public, anon;
 grant  execute on function public.verify_task_migration() to authenticated;
 
+-- ---------- 3.10 Closing the legacy read paths ----------
+-- Normalising tasks is only half the privacy story: the OLD copies are still
+-- reachable. Two of them, both closed here.
+--
+-- (a) The workspace document. Its SELECT policy was `using (true)` — any
+--     signed-in user could read the whole blob, tasks included. The document's
+--     remaining purpose is organization-wide governance content (deliverables,
+--     weekly plans, KPI scores), so its gate is now the capability that
+--     governs exactly that content. A personal-workspace Member holds none of
+--     it and therefore cannot read the document at all — which is what stops
+--     them reading everybody's tasks out of the legacy copy.
+--     Writing additionally still needs tasks.execute, unchanged for every
+--     delivery role, so the pre-migration client keeps working: you may write
+--     the document only if you can see the document.
+drop policy if exists "workspace read (authenticated)" on public.workspace;
+drop policy if exists "workspace read (document scope)" on public.workspace;
+create policy "workspace read (document scope)"
+  on public.workspace for select to authenticated
+  using (public.authorize('deliverables.read'));
+
+drop policy if exists "workspace write (role)" on public.workspace;
+create policy "workspace write (role)"
+  on public.workspace for update to authenticated
+  using (public.authorize('deliverables.read') and public.authorize('tasks.execute'))
+  with check (public.authorize('deliverables.read') and public.authorize('tasks.execute'));
+
+-- (b) Task attachments in Storage. The bucket was readable by every signed-in
+--     user, so progress-log evidence for someone else's task was one path
+--     guess (or one list call) away. Attachment paths start with the task id
+--     ("T-142/<entry>/<file>"), so access can follow the task itself.
+--
+--     SECURITY DEFINER so the "does this task exist?" probe is not itself
+--     filtered by RLS — otherwise a task the caller may NOT read would look
+--     like a task that does not exist and fall through to the legacy branch.
+--     That legacy branch is what keeps PRE-MIGRATION attachments reachable:
+--     until a task has a row, its files follow the document's own gate.
+create or replace function public.attachment_task_id(p_name text)
+returns text language sql immutable as $$ select split_part(p_name, '/', 1) $$;
+
+create or replace function public.attachment_readable(p_name text)
+returns boolean language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare v_task text := public.attachment_task_id(p_name);
+begin
+  if exists (select 1 from public.tasks where id = v_task) then
+    return public.parent_task_readable(v_task);
+  end if;
+  return public.authorize('deliverables.read');
+end $$;
+
+create or replace function public.attachment_writable(p_name text)
+returns boolean language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare v_task text := public.attachment_task_id(p_name);
+begin
+  if exists (select 1 from public.tasks where id = v_task) then
+    return public.parent_task_writable(v_task);
+  end if;
+  return public.authorize('deliverables.read') and public.authorize('tasks.execute');
+end $$;
+
+drop policy if exists "task-attachments read (authenticated)" on storage.objects;
+drop policy if exists "task-attachments read (task scope)" on storage.objects;
+create policy "task-attachments read (task scope)"
+  on storage.objects for select to authenticated
+  using (bucket_id = 'task-attachments' and public.attachment_readable(name));
+
+drop policy if exists "task-attachments write (role)" on storage.objects;
+create policy "task-attachments write (role)"
+  on storage.objects for insert to authenticated
+  with check (bucket_id = 'task-attachments' and public.attachment_writable(name));
+
+drop policy if exists "task-attachments update (role)" on storage.objects;
+create policy "task-attachments update (role)"
+  on storage.objects for update to authenticated
+  using (bucket_id = 'task-attachments' and public.attachment_writable(name));
+
+drop policy if exists "task-attachments delete (role)" on storage.objects;
+create policy "task-attachments delete (role)"
+  on storage.objects for delete to authenticated
+  using (bucket_id = 'task-attachments' and public.attachment_writable(name));
+
+-- ---------- 3.11 Optional: retire the document's task copy ----------
+-- After the migration is verified AND the normalized path has been used in
+-- production for a while, the document still holds a full copy of every task.
+-- It is no longer read by the app, but it is still data at rest, so an
+-- operator may choose to retire it.
+--
+-- DESTRUCTIVE and therefore: never automatic, never called by any client,
+-- owner-gated, refuses to run unless verify_task_migration() is green, and
+-- dry-run by default. TAKE A BACKUP FIRST (Settings → Data → Export).
+-- Doing this also gives up the "just stop reading the new tables" rollback,
+-- which is why it is a separate, later, deliberate step.
+create or replace function public.prune_migrated_tasks_from_document(p_commit boolean default false)
+returns text language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  v_bad int;
+  v_n   int;
+begin
+  if not public.authorize('admin.restore') then
+    raise exception 'not permitted' using errcode = '42501';
+  end if;
+  select count(*) into v_bad from public.verify_task_migration()
+   where not matches and metric <> 'unmapped_owners';
+  if v_bad > 0 then
+    raise exception 'migration verification is not green (% mismatching metric(s)) — refusing to prune', v_bad;
+  end if;
+  select jsonb_array_length(coalesce(tasks #> '{data,tasks}', '[]'::jsonb)) into v_n
+    from public.workspace where id = 'main';
+  if not p_commit then
+    return format('dry run: would remove %s task entries from the workspace document', v_n);
+  end if;
+  update public.workspace
+     set tasks = jsonb_set(tasks, '{data,tasks}', '[]'::jsonb),
+         updated_at = now()
+   where id = 'main';
+  return format('removed %s task entries from the workspace document', v_n);
+end $$;
+
+revoke execute on function public.prune_migrated_tasks_from_document(boolean) from public, anon;
+grant  execute on function public.prune_migrated_tasks_from_document(boolean) to authenticated;
+
 -- ---------- 3.10 Realtime ----------
 -- RLS applies to realtime, so a standard user's subscription only ever yields
 -- rows they may read — no client is subscribed to an organization-wide stream.
