@@ -1010,6 +1010,22 @@ create table if not exists public.organizations (
   created_at  timestamptz not null default now()
 );
 
+-- 'team'     — a real shared organization (Evbex / FM Navigate). Membership is
+--              granted deliberately: by invitation or by an administrator.
+-- 'personal' — the private workspace every account gets at signup so that
+--              "anyone can have their own task tracker" is true without anyone
+--              being handed access to somebody else's organization (ADR 0008).
+alter table public.organizations add column if not exists kind text not null default 'team';
+alter table public.organizations add column if not exists owner_user_id uuid references auth.users(id) on delete cascade;
+do $$ begin
+  alter table public.organizations add constraint organizations_kind_check
+    check (kind in ('team', 'personal'));
+exception when duplicate_object then null; end $$;
+-- One personal workspace per account, enforced by the database rather than by
+-- the trigger remembering to check.
+create unique index if not exists organizations_one_personal_per_user
+  on public.organizations (owner_user_id) where kind = 'personal';
+
 -- Membership is the ONE source of truth for "who is in which organization".
 -- Deliberately NOT a column on profiles as well — two stores would drift.
 create table if not exists public.organization_members (
@@ -1026,15 +1042,38 @@ insert into public.organizations (id, slug, name)
 values ('00000000-0000-0000-0000-000000000001', 'fm-navigate', 'FM Navigate')
 on conflict (id) do nothing;
 
+-- The PRIMARY (Evbex / FM Navigate) organization. Referenced by the one-shot
+-- back-fill and by the invite path — NOT by signup. A new account never joins
+-- this organization automatically (ADR 0008).
 create or replace function public.default_org_id()
 returns uuid language sql immutable as $$
   select '00000000-0000-0000-0000-000000000001'::uuid
 $$;
 
--- Back-fill: every EXISTING account belongs to the primary organization.
-insert into public.organization_members (organization_id, user_id)
-select public.default_org_id(), id from public.profiles
-on conflict do nothing;
+-- Back-fill: every account that existed BEFORE this phase belongs to the
+-- primary organization. ONE SHOT, guarded by a marker row.
+--
+-- This guard is load-bearing, not tidiness. schema.sql is re-runnable by
+-- design; an unguarded `insert … select from profiles` would sweep every
+-- public self-registered account into Evbex the next time anyone applied the
+-- file. The marker makes "existing users at rollout time" a fixed set.
+create table if not exists public.schema_markers (
+  key        text primary key,
+  applied_at timestamptz not null default now(),
+  note       text
+);
+
+do $$
+begin
+  if not exists (select 1 from public.schema_markers where key = 'phase3_backfill_primary_org') then
+    insert into public.organization_members (organization_id, user_id)
+    select public.default_org_id(), id from public.profiles
+    on conflict do nothing;
+    insert into public.schema_markers (key, note)
+    values ('phase3_backfill_primary_org',
+            'pre-Phase-3 accounts joined to the primary organization; never repeat');
+  end if;
+end $$;
 
 -- Is the caller a member of this organization? SECURITY DEFINER so policies
 -- never recurse into organization_members' own RLS, and so the check is one
@@ -1485,17 +1524,29 @@ create trigger log_task_event
 --   1. the profile, with role = 'member' — HARDCODED, never read from client
 --      metadata, so a tampered signup payload cannot request Owner/Executive/
 --      Product Manager/administrator/management/any other role;
---   2. membership of the primary organization;
---   3. nothing else. Least privilege: a member may run their own personal task
---      workspace and nothing more (see the personal_execution template).
+--   2. their OWN personal workspace, and membership of that and nothing else;
+--   3. nothing in any existing organization.
+--
+-- CREATING AN ACCOUNT IS NOT JOINING A COMPANY (ADR 0008). The previous
+-- version auto-joined the primary organization, which meant anyone who could
+-- reach the signup form became an Evbex workspace member. Account and
+-- membership are now separate facts: registration grants the first, and only
+-- an invitation or an administrator grants the second (§3.7b).
+--
+-- The personal workspace is what keeps "anyone can have their own task
+-- tracker" true. It is an ordinary organization with kind='personal', so every
+-- task policy, the tenant boundary and the whole client work there unchanged —
+-- no second code path, no special case in RLS.
 --
 -- Only `name` is taken from client metadata — a display string that grants
 -- nothing. Later self-service role changes are already blocked by
 -- protect_profile_privileges (requires users.assign_roles).
 create or replace function public.handle_new_user()
-returns trigger language plpgsql security definer set search_path = public, pg_temp as $$
+returns trigger language plpgsql security definer set search_path = public, pg_temp as $fn$
 declare
   v_role text := 'member';
+  v_name text := coalesce(nullif(new.raw_user_meta_data->>'name', ''), new.email, 'Member');
+  v_org  uuid;
 begin
   -- Deploy-order safety: if the Phase-2/3 role seed hasn't run yet, fall back
   -- to the always-present 'viewer' rather than failing the signup on the FK.
@@ -1504,22 +1555,119 @@ begin
   end if;
 
   insert into public.profiles (id, email, name, role)
-  values (new.id, new.email,
-          coalesce(nullif(new.raw_user_meta_data->>'name', ''), new.email),
-          v_role)
+  values (new.id, new.email, v_name, v_role)
   on conflict (id) do nothing;
 
-  insert into public.organization_members (organization_id, user_id)
-  values (public.default_org_id(), new.id)
-  on conflict do nothing;
+  -- The account's own workspace. Deterministic slug, so a replayed trigger is
+  -- a no-op rather than a duplicate.
+  insert into public.organizations (slug, name, kind, owner_user_id)
+  values ('personal-' || new.id::text,
+          left(v_name, 40) || '''s Workspace',
+          'personal', new.id)
+  on conflict (slug) do nothing;
+
+  select id into v_org from public.organizations where slug = 'personal-' || new.id::text;
+  if v_org is not null then
+    insert into public.organization_members (organization_id, user_id)
+    values (v_org, new.id)
+    on conflict do nothing;
+  end if;
 
   return new;
-end $$;
+end $fn$;
 
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users
   for each row execute function public.handle_new_user();
+
+-- ---------- 3.7b Joining a real organization ----------
+-- The ONLY way into a team organization. organization_members has no INSERT
+-- policy at all, so this SECURITY DEFINER function is not one path among
+-- several — it is the path, and it authorizes the caller before it writes.
+--
+-- Gated on users.assign_roles: the capability that already means "may decide
+-- what other people can do here". Deliberately NOT a new permission key —
+-- inventing one would add a switch to the admin screen for what is the same
+-- administrative act.
+--
+-- An invitation flow (email → accept) can be layered on later by having the
+-- acceptance step call exactly this function; the authorization boundary would
+-- not move.
+create or replace function public.add_organization_member(p_org uuid, p_user uuid)
+returns void language plpgsql security definer set search_path = public, pg_temp as $fn$
+begin
+  if not public.authorize('users.assign_roles') then
+    raise exception 'not permitted' using errcode = '42501';
+  end if;
+  -- An administrator may only admit people to an organization they are in
+  -- themselves; nobody hands out membership of a tenant they cannot see.
+  if not public.is_org_member(p_org) then
+    raise exception 'not a member of that organization' using errcode = '42501';
+  end if;
+  -- A personal workspace has exactly one member, forever.
+  if exists (select 1 from public.organizations where id = p_org and kind = 'personal') then
+    raise exception 'a personal workspace cannot take additional members' using errcode = '42501';
+  end if;
+  if not exists (select 1 from public.profiles where id = p_user) then
+    raise exception 'unknown user' using errcode = '22023';
+  end if;
+
+  insert into public.organization_members (organization_id, user_id)
+  values (p_org, p_user)
+  on conflict do nothing;
+
+  insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+  values (auth.uid(), 'organization_member_added', 'organization', p_org::text,
+          jsonb_build_object('user', p_user));
+end $fn$;
+
+revoke execute on function public.add_organization_member(uuid, uuid) from public, anon;
+grant  execute on function public.add_organization_member(uuid, uuid) to authenticated;
+
+create or replace function public.remove_organization_member(p_org uuid, p_user uuid)
+returns void language plpgsql security definer set search_path = public, pg_temp as $fn$
+begin
+  if not public.authorize('users.assign_roles') then
+    raise exception 'not permitted' using errcode = '42501';
+  end if;
+  if not public.is_org_member(p_org) then
+    raise exception 'not a member of that organization' using errcode = '42501';
+  end if;
+  if exists (select 1 from public.organizations where id = p_org and kind = 'personal') then
+    raise exception 'a personal workspace cannot be emptied' using errcode = '42501';
+  end if;
+
+  delete from public.organization_members where organization_id = p_org and user_id = p_user;
+
+  insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+  values (auth.uid(), 'organization_member_removed', 'organization', p_org::text,
+          jsonb_build_object('user', p_user));
+end $fn$;
+
+revoke execute on function public.remove_organization_member(uuid, uuid) from public, anon;
+grant  execute on function public.remove_organization_member(uuid, uuid) to authenticated;
+
+-- Back-fill: give every pre-existing account its personal workspace too, so
+-- the model is uniform. One shot, same marker discipline as the org back-fill.
+do $do$
+declare r record; v_org uuid;
+begin
+  if not exists (select 1 from public.schema_markers where key = 'phase3_personal_workspaces') then
+    for r in select id, coalesce(nullif(name, ''), email, 'Member') as nm from public.profiles loop
+      insert into public.organizations (slug, name, kind, owner_user_id)
+      values ('personal-' || r.id::text, left(r.nm, 40) || '''s Workspace', 'personal', r.id)
+      on conflict (slug) do nothing;
+      select id into v_org from public.organizations where slug = 'personal-' || r.id::text;
+      if v_org is not null then
+        insert into public.organization_members (organization_id, user_id)
+        values (v_org, r.id) on conflict do nothing;
+      end if;
+    end loop;
+    insert into public.schema_markers (key, note)
+    values ('phase3_personal_workspaces', 'personal workspace created for pre-Phase-3 accounts');
+  end if;
+end $do$;
 
 -- ---------- 3.8 Legacy owner mapping ----------
 -- The pre-normalisation document identified people by a workspace key

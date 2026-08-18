@@ -819,15 +819,25 @@
         .catch(function () { return false; });
     },
 
-    // The caller's organization. Multi-org is not built yet, so the first
-    // membership row is "their" organization; the column exists on every task
-    // regardless, which is what keeps the tenant boundary explicit.
+    /* The organization the user WORKS IN — where a new task is created.
+
+       Since signup stopped auto-joining anything (ADR 0008) everyone has at
+       least a personal workspace, and staff have that PLUS their real one. A
+       team organization always wins: an Evbex member creating a task means it
+       in Evbex, not in their private tracker. Someone with only a personal
+       workspace gets that, which is what makes "anyone can have their own task
+       tracker" work without membership anywhere.
+
+       Reads `organizations` rather than the membership rows because RLS
+       already scopes it to this user, and kind lives there. 'team' > 'personal'
+       lexically, so descending puts a real organization first. */
     myOrganizationId: function () {
       var c = client();
       if (!c) return Promise.resolve(null);
-      return c.from('organization_members').select('organization_id')
-        .order('joined_at', { ascending: true }).limit(1).maybeSingle()
-        .then(function (r) { return (r.error || !r.data) ? null : r.data.organization_id; })
+      return c.from('organizations').select('id,kind,created_at')
+        .order('kind', { ascending: false }).order('created_at', { ascending: true })
+        .limit(1).maybeSingle()
+        .then(function (r) { return (r.error || !r.data) ? null : r.data.id; })
         .catch(function () { return null; });
     },
 
