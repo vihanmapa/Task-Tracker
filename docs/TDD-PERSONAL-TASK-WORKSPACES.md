@@ -123,6 +123,25 @@ profile. It is now scoped to *self + same-organization members*, so an assignee
 picker can never surface another tenant's people. Self is always readable so a
 user with no membership row yet (mid-signup) can still load their own profile.
 
+**Profile administration is scoped the same way**, and scoping the read alone
+was not enough. The Phase-2 policy `profiles owner manage` is
+`for all using (authorize('users.assign_roles'))` with no organization
+predicate — correct while there was one tenant. Because Postgres ORs
+permissive policies together, that `ALL` policy also answers SELECT, so it
+defeated the scoped read above: an administrator of one organization could
+list every account on the platform (including every public signup's email),
+re-role another tenant's owner, and delete their profile row. Both clauses now
+carry the tenant predicate as well as the capability.
+
+That also restores **owner protection** under multi-tenancy.
+`protect_profile_privileges` refuses to demote the last active owner by
+counting the others, and that count is an ordinary SELECT inside a SECURITY
+INVOKER trigger — so RLS scopes it to the caller's own organization, but only
+once these policies are org-scoped. While the administration policy was
+unscoped the count spanned every tenant, and any other organization's owner
+satisfied it: an organization's sole owner could demote themselves and leave
+nobody able to administer it.
+
 ---
 
 ## 6. Task data model
