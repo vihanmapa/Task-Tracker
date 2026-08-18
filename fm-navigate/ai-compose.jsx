@@ -20,7 +20,15 @@ const STATUSES4 = ['Not Started', 'In Progress', 'Waiting', 'Blocked'];
 const toDateInput = (iso) => iso ? new Date(iso).toISOString().slice(0, 10) : '';
 const fromDateInput = (v) => v ? new Date(v + 'T17:00:00').toISOString() : null;
 
-function AIComposer({ onClose, onCreate, onCreateMany, linkTo }) {
+/* canAssign decides whether an ASSIGNEE control exists at all.
+
+   Without tasks.assign a user creates work for themselves and only for
+   themselves, so there is no picker to render — not a disabled one, not one
+   listing only themselves: no control, and the task is reported by and
+   assigned to them. The database enforces the same rule (the INSERT policy
+   requires assignee_id = auth.uid() without tasks.assign), so hiding the
+   control is a courtesy, not the boundary. */
+function AIComposer({ onClose, onCreate, onCreateMany, linkTo, canAssign = false, currentUser = null }) {
   const I = window.I;
   const [desc, setDesc] = useStateC('');
   const [phase, setPhase] = useStateC('input'); // input | parsing | review | batch
@@ -207,13 +215,23 @@ function AIComposer({ onClose, onCreate, onCreateMany, linkTo }) {
                   {STATUSES4.map(s => <option key={s}>{s}</option>)}
                 </select>
               </div>
-              <div className="field ai-filled">
-                <label className="field-label">Owner</label>
-                <select className="select" value={fields.ownerId || ''} onChange={e => set('ownerId', e.target.value)}>
-                  <option value="">— Me (default) —</option>
-                  {window.peopleOptions(fields.ownerId || null).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-                </select>
-              </div>
+              {canAssign ? (
+                <div className="field ai-filled">
+                  <label className="field-label">Assignee</label>
+                  <select className="select" value={fields.ownerId || ''} onChange={e => set('ownerId', e.target.value)}>
+                    <option value="">— Me (default) —</option>
+                    {window.peopleOptions(fields.ownerId || null).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                  </select>
+                </div>
+              ) : (
+                <div className="field">
+                  <label className="field-label">Assignee</label>
+                  <div className="row gap6 center" style={{ height: 38 }}>
+                    {currentUser && <window.Avatar user={currentUser} size={22} />}
+                    <span className="meta-v">You</span>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="field mb16 ai-filled">
@@ -274,10 +292,17 @@ function AIComposer({ onClose, onCreate, onCreateMany, linkTo }) {
                     <select className="select" value={r.status} onChange={e => setRow(i, 'status', e.target.value)} title="Status">
                       {STATUSES4.map(s => <option key={s}>{s}</option>)}
                     </select>
-                    <select className="select" value={r.ownerId || ''} onChange={e => setRow(i, 'ownerId', e.target.value)} title="Owner">
-                      <option value="">— Me —</option>
-                      {window.peopleOptions(r.ownerId || null).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-                    </select>
+                    {canAssign ? (
+                      <select className="select" value={r.ownerId || ''} onChange={e => setRow(i, 'ownerId', e.target.value)} title="Assignee">
+                        <option value="">— Me —</option>
+                        {window.peopleOptions(r.ownerId || null).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                      </select>
+                    ) : (
+                      <div className="row gap6 center" style={{ minWidth: 0 }} title="Assigned to you">
+                        {currentUser && <window.Avatar user={currentUser} size={20} />}
+                        <span className="muted" style={{ fontSize: 12 }}>You</span>
+                      </div>
+                    )}
                   </div>
                   {(r.dependencies?.length > 0 || r.risk) && (
                     <div className="muted" style={{ fontSize: 11.5, marginTop: 8, display: 'flex', gap: 12, flexWrap: 'wrap' }}>

@@ -22,13 +22,13 @@ const SRC = 'fm-navigate';
 const OUT = 'dist';
 
 // Plain-JS globals, in load/scope order (config -> data layer -> seed data).
-const PLAIN_JS = ['config.js', 'permissions.js', 'data-service.js', 'kpi-data.js', 'data.js'];
+const PLAIN_JS = ['config.js', 'permissions.js', 'auth-bootstrap.js', 'data-service.js', 'task-store.js', 'kpi-data.js', 'data.js'];
 
 // JSX files, in the same order index.html declared them.
 const JSX = [
   'icons.jsx', 'components.jsx', 'auth-context.jsx', 'ai-service.jsx', 'tweaks-panel.jsx',
   'dashboard.jsx', 'ai-compose.jsx', 'tasks.jsx', 'deliverables.jsx',
-  'kpi.jsx', 'weekly.jsx', 'monthly.jsx', 'screens.jsx', 'roles-admin.jsx', 'app.jsx',
+  'kpi.jsx', 'weekly.jsx', 'monthly.jsx', 'people.jsx', 'screens.jsx', 'roles-admin.jsx', 'app.jsx',
 ];
 
 // React bootstrap (was the inline text/babel block at the end of index.html).

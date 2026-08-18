@@ -29,11 +29,19 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
 // screens are read-open today, this only shapes the menu.
 const NAV = [
   { key: 'dashboard',    label: 'Dashboard', icon: 'grid' },
+  // Tasks reads "My Tasks" for someone whose scope IS their own work, and
+  // "Tasks" for someone who can see the organization's. Same screen, honest
+  // label — a standard user is never told they are looking at everything.
+  { key: 'tasks',        label: can => (can('tasks', 'view_all') ? 'Tasks' : 'My Tasks'),
+                         icon: 'list', visible: can => can('tasks', 'read') },
+  // People is the management drill-down (person → their work). It exists only
+  // for the capability that already grants cross-user visibility, so the menu
+  // can never offer a screen whose data the DB would refuse.
+  { key: 'people',       label: 'People',    icon: 'users', visible: can => can('tasks', 'view_all') },
   { key: 'week',         label: 'This Week', icon: 'calendar', visible: can => can('weekly', 'read') },
   { key: 'month',        label: 'This Month', icon: 'summary', visible: can => can('reports', 'read') },
   { key: 'kpi',          label: 'KPI Scorecard', icon: 'trend', visible: can => can('kpi', 'read') },
   { key: 'deliverables', label: 'Deliverables', icon: 'target', visible: can => can('deliverables', 'read') },
-  { key: 'tasks',        label: 'Tasks',     icon: 'list', visible: can => can('tasks', 'read') },
   { key: 'summary',      label: 'Weekly Summary', icon: 'summary', visible: can => can('reports', 'read') },
   { key: 'ask',          label: 'Ask AI',    icon: 'spark', visible: can => can('tasks', 'read') },
   { key: 'settings',     label: 'Settings',  icon: 'settings' },
@@ -113,13 +121,45 @@ function App() {
   // App is just a consumer now: identity, role, can()/canEdit, currentUser and
   // signOut all come from one place. The provider owns the Supabase session and
   // the cached profile (see auth-context.jsx).
-  const { authUser, profile, can, canEdit, canExecute, canAssign, canPrioritize, canDeleteTask, currentUser, roleLabel, signOut } = useAuth();
+  const { authUser, profile, can, canEdit, canExecute, canAssign, canPrioritize, canDeleteTask,
+          canViewAll, canCreateTask, organizationId, scopeCtx, currentUser, roleLabel, signOut,
+          ready, bootstrapStage } = useAuth();
+
+  /* ---- where tasks live ----
+     'normalized' = the Phase-3 tables (per-task RLS: a standard user only ever
+     receives their own rows). 'workspace' = the legacy jsonb document. Probed
+     at runtime, exactly like the RBAC matrix/fallback split, so this build is
+     safe to deploy before, during or after the SQL — there is no cutover
+     instant when client and schema must match.
+     See docs/TDD-PERSONAL-TASK-WORKSPACES.md §16. */
+  const [tasksMode, setTasksMode] = useStateA('unknown');
+  const tasksModeRef = useRefA('unknown');
+  tasksModeRef.current = tasksMode;
+  // The document's own task array, carried through UNTOUCHED in normalized
+  // mode: the migration doesn't delete it, so it stays a working rollback
+  // target, and normalized edits must never rewrite (or resurrect) it.
+  const docTasksRef = useRefA([]);
+  // Last snapshot known to be persisted — the baseline every write plan diffs
+  // against.
+  const prevTasksRef = useRefA([]);
+  const latestTasksRef = useRefA([]);
+
+  /* The workspace document is organization-wide governance content, and its
+     RLS gate is deliverables.read. A personal-workspace Member holds none of
+     it, so we must not even ATTEMPT the read: an RLS-filtered read returns
+     "no row", which the document loader would otherwise have to treat as a
+     real (empty) document. Asking only when we may read is both correct and
+     the honest way to avoid that ambiguity. */
+  const canUseDocument = !shared || can('deliverables', 'read');
 
   // Apply a loaded/realtime workspace document (v2: { metadata, data }) to state.
   const applyDoc = useCallbackA((doc) => {
     metaRef.current = doc.metadata || metaRef.current;
     const d = doc.data || {};
-    setTasks(Array.isArray(d.tasks) ? d.tasks : []);
+    docTasksRef.current = Array.isArray(d.tasks) ? d.tasks : [];
+    // In normalized mode the tables are the source of truth for tasks; the
+    // document's copy is legacy ballast and must not overwrite them.
+    if (tasksModeRef.current !== 'normalized') setTasks(docTasksRef.current);
     setDeliverables(Array.isArray(d.deliverables) ? d.deliverables : []);
     setWeeks(Array.isArray(d.weeks) ? d.weeks : []);
     setKpiScores(d.kpiScores && typeof d.kpiScores === 'object' ? d.kpiScores : {});
@@ -151,6 +191,39 @@ function App() {
       });
   };
 
+  /* ---- normalized task writes ----
+     Same discipline as the document save: debounced, single-flighted, honest
+     about failure. The diff is computed against the last PERSISTED snapshot,
+     so a rejected write (RLS refusing a field the UI shouldn't have offered)
+     leaves the baseline untouched and is retried rather than silently lost.
+     On failure we also refetch: the database is authoritative, and quietly
+     diverging local state is the one outcome worse than an error banner. */
+  const taskSavingRef = useRefA(false);
+  const taskResaveRef = useRefA(false);
+  const taskDebounceRef = useRefA(null);
+  const runTaskSaveRef = useRefA(null);
+  const reloadTasksRef = useRefA(null);
+  runTaskSaveRef.current = () => {
+    if (taskSavingRef.current) { taskResaveRef.current = true; return; }
+    const prev = prevTasksRef.current;
+    const next = latestTasksRef.current;
+    taskSavingRef.current = true;
+    setSaveStatus({ state: 'saving' });
+    window.taskStore.persist(ds, prev, next, { userId: currentUser, organizationId })
+      .then(r => {
+        taskSavingRef.current = false;
+        if (r.ok) {
+          prevTasksRef.current = next;
+          setSaveStatus({ state: 'saved', at: Date.now() });
+        } else {
+          console.warn('[app] task save refused', r.errors);
+          setSaveStatus({ state: 'error', reason: 'TASK_WRITE', error: r.errors.join(' · ') });
+          if (reloadTasksRef.current) reloadTasksRef.current();
+        }
+        if (taskResaveRef.current) { taskResaveRef.current = false; runTaskSaveRef.current(); }
+      });
+  };
+
   useEffectA(() => {
     try {
       localStorage.setItem('fm_tasks', JSON.stringify(tasks));
@@ -158,9 +231,19 @@ function App() {
       localStorage.setItem('fm_col_kpiScores', JSON.stringify(kpiScores));
       localStorage.setItem('fm_col_weeks', JSON.stringify(weeks));
     } catch (_) {}
-    if (skipSaveRef.current) { skipSaveRef.current = false; return; }
-    if (shared && (canEdit || canExecute)) {
-      latestDocRef.current = { metadata: metaRef.current, data: { tasks, deliverables, weeks, kpiScores } };
+    latestTasksRef.current = tasks;
+    if (skipSaveRef.current) { skipSaveRef.current = false; prevTasksRef.current = tasks; return; }
+    const normalized = tasksModeRef.current === 'normalized';
+    if (shared && normalized) {
+      if (taskDebounceRef.current) clearTimeout(taskDebounceRef.current);
+      taskDebounceRef.current = setTimeout(() => runTaskSaveRef.current(), 400);
+    }
+    if (shared && canUseDocument && (canEdit || canExecute)) {
+      // In normalized mode the document keeps its ORIGINAL task array: the
+      // tables own tasks now, and rewriting the legacy copy from here would
+      // both destroy the rollback target and resurrect deleted rows.
+      latestDocRef.current = { metadata: metaRef.current,
+        data: { tasks: normalized ? docTasksRef.current : tasks, deliverables, weeks, kpiScores } };
       if (debounceRef.current) clearTimeout(debounceRef.current);
       debounceRef.current = setTimeout(() => runSaveRef.current(), 400);
     }
@@ -203,8 +286,53 @@ function App() {
 
   // Initial remote load + realtime subscription — runs once signed in
   // (reads require an authenticated session). One document, one subscription.
+  /* Which task backend is available, then load from it. Runs once identity is
+     fully resolved (ready), so the probe and the reads carry the right role. */
   useEffectA(() => {
-    if (!shared || !authUser) return;
+    if (!shared || !authUser || !ready) return;
+    let alive = true;
+
+    const loadTasksFromTables = () => ds.loadTaskRows().then(res => {
+      if (!alive) return;
+      if (!res.ok) {
+        // A failed read is NOT "you have no tasks" — never let it become one.
+        console.warn('[app] task load failed', res.error);
+        setSaveStatus({ state: 'error', reason: 'LOAD_FAILED',
+          error: 'Could not load your tasks. Reload to retry — nothing was changed.' });
+        return;
+      }
+      const list = window.taskStore.hydrate(res);
+      skipSaveRef.current = true;            // applying a load must never echo back
+      prevTasksRef.current = list;
+      setTasks(list);
+    });
+    reloadTasksRef.current = () => { if (!taskSavingRef.current) loadTasksFromTables(); };
+
+    ds.detectTasksTable().then(hasTables => {
+      if (!alive) return;
+      tasksModeRef.current = hasTables ? 'normalized' : 'workspace';
+      setTasksMode(tasksModeRef.current);
+      if (hasTables) loadTasksFromTables();
+    });
+    return () => { alive = false; };
+  }, [shared, authUser && authUser.id, ready]);
+
+  // Live task changes. RLS scopes the stream to rows this user may read, so a
+  // standard user is never subscribed to the organization's work. The payload
+  // can't carry the children, so a change triggers a refetch (skipped while a
+  // save of our own is in flight — that would race our own echo).
+  useEffectA(() => {
+    if (!shared || !authUser || tasksMode !== 'normalized') return;
+    let timer = null;
+    const unsub = ds.subscribeTasks(() => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { if (reloadTasksRef.current) reloadTasksRef.current(); }, 600);
+    });
+    return () => { if (timer) clearTimeout(timer); unsub(); };
+  }, [shared, authUser && authUser.id, tasksMode]);
+
+  useEffectA(() => {
+    if (!shared || !authUser || !canUseDocument) return;
     ds.loadWorkspace().then(doc => {
       // A failed read must NEVER be treated as real (empty) data — applying it
       // would flip skipSaveRef and the very next tick would autosave a blank
@@ -228,13 +356,17 @@ function App() {
       applyDoc({ ...incoming, data: { ...incoming.data, tasks: fixed.tasks, deliverables: fixed.deliverables, weeks: fixed.weeks } });
     });
     return () => { unsub(); };
-  }, [shared, authUser && authUser.id]);
+  }, [shared, authUser && authUser.id, canUseDocument]);
 
   // ---- routing ----
   const [route, setRoute] = useStateA(() => pathToState().route);
   const [taskView, setTaskView] = useStateA('list');
   const [selected, setSelected] = useStateA(() => pathToState().selected);
   const [dlvSelected, setDlvSelected] = useStateA(() => pathToState().dlvSelected);
+  // Management drill-down: People → a person → their work. Filtering the Tasks
+  // screen rather than building a second task list keeps one implementation of
+  // sorting, grouping and the board.
+  const [personFilter, setPersonFilter] = useStateA(null);
   const [composer, setComposer] = useStateA(false);
   const [askQ, setAskQ] = useStateA(null);
   const [mobileNavOpen, setMobileNavOpen] = useStateA(false);
@@ -310,6 +442,7 @@ function App() {
 
   // ---- actions ----
   const openTask = useCallbackA((id) => { setSelected(id); setRoute('detail'); }, []);
+  const openPerson = useCallbackA((userId) => { setPersonFilter(userId); setSelected(null); setRoute('tasks'); }, []);
   const openDeliverable = useCallbackA((id) => { setDlvSelected(id); setRoute('dlvDetail'); }, []);
 
   // ---- Jira-style task permissions (single choke point) ----
@@ -317,17 +450,22 @@ function App() {
   // status). Descriptive fields are editable only on tasks they own or
   // created; owner/priority/delete stay with governance/lead roles. The UI
   // flags passed to screens only shape rendering — these checks decide.
+  // Legacy tasks recorded their creator only in the activity feed; normalized
+  // tasks carry reporterId. Prefer the column, fall back to the feed, so both
+  // shapes answer "who raised this?" the same way.
   const taskCreator = (t) => {
-    const c = (t.activity || []).find(a => a.type === 'created');
+    if (t && t.reporterId) return t.reporterId;
+    const c = ((t && t.activity) || []).find(a => a.type === 'created');
     return c ? c.userId : null;
   };
-  const isMyTask = useCallbackA((t) => !!t && (t.ownerId === currentUser || taskCreator(t) === currentUser), [currentUser]);
-  const fieldAllowed = useCallbackA((t, field) => {
-    if (field === 'ownerId') return canAssign;
-    if (field === 'priority') return canPrioritize;
-    if (field === 'status') return canExecute;
-    return canEdit || (canExecute && isMyTask(t));
-  }, [canEdit, canExecute, canAssign, canPrioritize, isMyTask]);
+  const isMyTask = useCallbackA(
+    (t) => !!t && (window.taskScope.isMine(t, scopeCtx) || taskCreator(t) === currentUser),
+    [scopeCtx, currentUser]);
+  // One choke point, mirroring protect_task_governance() in the database. The
+  // DB re-decides every one of these; this only shapes what we render.
+  const fieldAllowed = useCallbackA(
+    (t, field) => window.taskScope.fieldAllowed(t, field, scopeCtx),
+    [scopeCtx]);
 
   const moveTask = useCallbackA((id, status) => {
     if (!canExecute) return;
@@ -371,28 +509,35 @@ function App() {
       dueDate: data.dueDate || null, dependencies: data.dependencies || [], depTaskIds: data.depTaskIds || [],
       successCriteria: data.successCriteria || '', risk: data.risk || '', effort: data.effort || 'M',
       deliverableId: data.deliverableId || null,
-      ownerId: data.ownerId || currentUser, progress: data.status === 'Completed' ? 100 : data.status === 'In Progress' ? 10 : 0,
+      // REPORTER = whoever is creating it, always. ASSIGNEE = them too, unless
+      // they hold tasks.assign and picked someone else. A standard user has no
+      // assignee control at all, and a tampered one is refused by the INSERT
+      // policy (reporter_id = auth.uid() and assignee_id = auth.uid()).
+      reporterId: currentUser,
+      assigneeId: (canAssign && data.ownerId) ? data.ownerId : currentUser,
+      ownerId: (canAssign && data.ownerId) ? data.ownerId : currentUser,
+      progress: data.status === 'Completed' ? 100 : data.status === 'In Progress' ? 10 : 0,
       createdAt: now, updatedAt: now, completedAt: null,
       comments: [], progressLog: [], checklist: [], activity: [{ type: 'created', userId: currentUser, at: now }],
     };
-  }, [currentUser]);
+  }, [currentUser, canAssign]);
 
   const createTask = useCallbackA((data) => {
-    if (!canExecute) return;
+    if (!canCreateTask || !canExecute) return;
     const task = buildTask(data);
     setTasks(ts => [task, ...ts]);
     setComposer(false);
     setSelected(task.id); setRoute('detail');
-  }, [canExecute, buildTask]);
+  }, [canCreateTask, canExecute, buildTask]);
 
   // batch create — add many tasks at once, then land on the Tasks list
   const createTasks = useCallbackA((rows) => {
-    if (!canExecute || !rows || !rows.length) return;
+    if (!canCreateTask || !canExecute || !rows || !rows.length) return;
     const built = rows.map(buildTask);
     setTasks(ts => [...built, ...ts]);
     setComposer(false);
     setSelected(null); setRoute('tasks');
-  }, [canExecute, buildTask]);
+  }, [canCreateTask, canExecute, buildTask]);
 
   // permanently remove a task (governance: owner/PM only); land on the Tasks list
   const deleteTask = useCallbackA((id) => {
@@ -542,6 +687,9 @@ function App() {
           act.push({ type: 'edit', userId: currentUser, at: now, detail: EDIT_LABELS[field] });
         }
         next[field] = to;
+        // ownerId is the UI's name for the assignee — keep the real field in
+        // step so the write plan and every scope check see the same person.
+        if (field === 'ownerId') next.assigneeId = to;
       });
       if (!changed) return t;
       return { ...next, edits, activity: act, updatedAt: now };
@@ -821,21 +969,46 @@ function App() {
   };
 
   // ---- counts for nav ----
-  const counts = useMemoA(() => ({
-    tasks: tasks.filter(t => !['Completed','Cancelled'].includes(t.status)).length,
-    blocked: tasks.filter(t => t.status === 'Blocked').length,
-  }), [tasks]);
+  // The sidebar badge counts the work in front of THIS user: their own open
+  // tasks, or the organization's if they hold management scope. A personal
+  // workspace showing an organization-wide number would be a lie.
+  const counts = useMemoA(() => {
+    const scoped = window.taskScope.visible(tasks, scopeCtx);
+    return {
+      tasks: scoped.filter(t => !['Completed', 'Cancelled'].includes(t.status)).length,
+      blocked: scoped.filter(t => t.status === 'Blocked').length,
+    };
+  }, [tasks, scopeCtx]);
+
+  /* What the Tasks screen shows.
+     · personFilter — the management drill-down, one person's work.
+     · taskScope.visible — belt and braces. In normalized mode RLS already
+       returned only what this user may see, so this filter is presentation;
+       in the legacy document fallback it is the ONLY scoping there is, which
+       is precisely why the fallback is not the secure path. */
+  const scopedTasks = useMemoA(() => {
+    const base = window.taskScope.visible(tasks, scopeCtx);
+    if (!personFilter) return base;
+    if (personFilter === '__unassigned') return base.filter(t => !t.assigneeId && !t.ownerId);
+    return base.filter(t => t.assigneeId === personFilter || t.ownerId === personFilter);
+  }, [tasks, scopeCtx, personFilter]);
 
   const selectedTask = useMemoA(() => tasks.find(t => t.id === selected), [tasks, selected]);
   const selectedDeliverable = useMemoA(() => deliverables.find(d => d.id === dlvSelected), [deliverables, dlvSelected]);
 
-  const titleMap = { dashboard: 'Dashboard', week: 'This Week', month: 'This Month', kpi: 'KPI Scorecard', tasks: 'Tasks', deliverables: 'Deliverables', dlvDetail: 'Deliverable', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
+  const titleMap = { dashboard: 'Dashboard', week: 'This Week', month: 'This Month', kpi: 'KPI Scorecard', tasks: canViewAll ? 'Tasks' : 'My Tasks', people: 'People', deliverables: 'Deliverables', dlvDetail: 'Deliverable', summary: 'Weekly Summary', ask: 'Ask AI', settings: 'Settings', detail: 'Task' };
 
-  // ---- auth gate: login is required before anything renders ----
-  if (shared && authUser === undefined) {
+  /* ---- auth gate ----
+     Identity resolves in four stages (session → profile → role → permission
+     matrix) and they do NOT arrive together. Rendering before they all settle
+     is what produced the "Viewer until you refresh" defect: the app painted a
+     full UI using a placeholder role. `ready` is false until every stage has
+     settled, so there is no window in which a wrong role is on screen.
+     (auth-bootstrap.js; regression test: scripts/verify-auth-bootstrap.mjs) */
+  if (shared && !ready) {
     return (
       <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted)', fontSize: 14 }}>
-        Loading…
+        {bootstrapStage || 'Loading…'}
       </div>
     );
   }
@@ -869,16 +1042,16 @@ function App() {
           return (
             <button key={n.key} className={`nav-item ${active ? 'active' : ''}`} onClick={() => { setRoute(n.key); setSelected(null); }}>
               <span className="nav-ico"><Icon size={17} /></span>
-              {n.label}
+              {typeof n.label === 'function' ? n.label(can) : n.label}
               {count != null && <span className={`nav-count ${counts.blocked && n.key === 'tasks' ? 'alert' : ''}`}>{count}</span>}
             </button>
           );
         })}
 
         <div className="sidebar-mobile-actions">
-          {canEdit
+          {canCreateTask
             ? <button className="btn btn-primary btn-sm" onClick={() => { setComposer(true); setMobileNavOpen(false); }}><I.spark size={14} /> New task</button>
-            : <span className="chip" title="Founder has read-only access">Read-only view</span>}
+            : <span className="chip" title="Your role cannot create tasks">Read-only view</span>}
           <button className="icon-btn" onClick={() => setTweak('dark', !tweaks.dark)} title="Toggle theme">
             {tweaks.dark ? <I.sun size={18} /> : <I.moon size={18} />} <span>Theme</span>
           </button>
@@ -916,10 +1089,10 @@ function App() {
           {route === 'detail' && <span className="topbar-crumb">· {selectedTask?.id}</span>}
           <span className="grow" />
           <span className="topbar-actions">
-            {shared && canEdit && <window.SaveIndicator status={saveStatus} />}
-            {canEdit
+            {shared && (canEdit || canExecute) && <window.SaveIndicator status={saveStatus} />}
+            {canCreateTask
               ? <button className="btn btn-primary btn-sm" onClick={() => setComposer(true)}><I.spark size={14} /> New task</button>
-              : <span className="chip" title="Founder has read-only access">Read-only view</span>}
+              : <span className="chip" title="Your role cannot create tasks">Read-only view</span>}
             <button className="icon-btn" onClick={() => setTweak('dark', !tweaks.dark)} title="Toggle theme">
               {tweaks.dark ? <I.sun size={18} /> : <I.moon size={18} />}
             </button>
@@ -936,12 +1109,13 @@ function App() {
 
         {route === 'dashboard' && (
           <div className="scroll-area">
-            <window.Dashboard tasks={tasks} deliverables={deliverables} onOpen={openTask} onOpenDeliverable={openDeliverable} onCompose={() => setComposer(true)} onAsk={goAsk} onNav={setRoute} density={tweaks.density} canEdit={canExecute} currentUser={currentUser} />
+            <window.Dashboard tasks={tasks} deliverables={deliverables} onOpen={openTask} onOpenDeliverable={openDeliverable} onCompose={() => setComposer(true)} onAsk={goAsk} onNav={setRoute} density={tweaks.density} canEdit={canExecute && canCreateTask} currentUser={currentUser} scopeCtx={scopeCtx} onOpenPerson={openPerson} />
           </div>
         )}
         {route === 'tasks' && (
-          <window.TasksScreen tasks={tasks} deliverables={deliverables} view={taskView} setView={setTaskView} onOpen={openTask}
-            onOpenDeliverable={openDeliverable} onCompose={() => setComposer(true)} onMove={moveTask} onToggleDone={toggleDone} canEdit={canExecute} />
+          <window.TasksScreen tasks={scopedTasks} deliverables={deliverables} view={taskView} setView={setTaskView} onOpen={openTask}
+            onOpenDeliverable={openDeliverable} onCompose={() => setComposer(true)} onMove={moveTask} onToggleDone={toggleDone}
+            canEdit={canExecute} showOwnerFilter={canViewAll} personFilter={personFilter} onClearPerson={() => setPersonFilter(null)} />
         )}
         {route === 'deliverables' && (
           <window.DeliverablesScreen deliverables={deliverables} tasks={tasks} canEdit={canEdit}
@@ -958,8 +1132,8 @@ function App() {
             onAddComment={addComment} onToggleDone={toggleDone} onLogProgress={logProgress} onEditProgress={editProgress} onDeleteProgress={deleteProgress} onEditTask={editTask} onRevertEdit={revertEdit}
             onAssignDeliverable={assignDeliverable} onOpenDeliverable={openDeliverable} onOpenTask={openTask} onUpdate={() => {}}
             onDeleteTask={canDeleteTask ? deleteTask : null}
-            canEdit={canExecute}
-            canEditFields={canEdit || (canExecute && isMyTask(selectedTask))}
+            canEdit={window.taskScope.canWrite(selectedTask, scopeCtx)}
+            canEditFields={window.taskScope.fieldAllowed(selectedTask, 'title', scopeCtx)}
             canAssign={canAssign} canPrioritize={canPrioritize} canLinkDeliverable={canEdit} canModerate={canEdit}
             currentUser={currentUser}
             weeks={weeks}
@@ -968,6 +1142,9 @@ function App() {
             onAddChecklistItem={addChecklistItem} onToggleChecklistItem={toggleChecklistItem} onEditChecklistItem={editChecklistItem} onDeleteChecklistItem={deleteChecklistItem}
             onAddChecklistLink={addChecklistLink} onDeleteChecklistLink={deleteChecklistLink} onAddChecklistFile={addChecklistFile} onDeleteChecklistFile={deleteChecklistFile}
             onSetChecklistNote={setChecklistNote} onLinkChecklistToLog={linkChecklistToLog} onUnlinkChecklistFromLog={unlinkChecklistFromLog} />
+        )}
+        {route === 'people' && (
+          <window.PeopleScreen tasks={tasks} onOpenPerson={openPerson} onOpenTask={openTask} currentUser={currentUser} />
         )}
         {route === 'week' && (
           <window.WeeklyWorkspace weeks={weeks} onSaveWeek={saveWeek} onPatchWeek={patchWeek} onDeleteWeek={deleteWeek} tasks={tasks} deliverables={deliverables} canEdit={canEdit} onOpenTask={openTask} />
@@ -981,7 +1158,8 @@ function App() {
           legacyAttachmentCount={legacyAttachmentCount} migrateStatus={migrateStatus} onMigrateAttachments={migrateAttachments} />}
       </div>
 
-      {composer && <window.AIComposer onClose={() => setComposer(false)} onCreate={createTask} onCreateMany={createTasks} linkTo={composer && composer.linkTo} />}
+      {composer && <window.AIComposer onClose={() => setComposer(false)} onCreate={createTask} onCreateMany={createTasks}
+        linkTo={composer && composer.linkTo} canAssign={canAssign} currentUser={currentUser} />}
 
       {/* ---- Tweaks panel ---- */}
       <window.TweaksPanel>
@@ -1170,29 +1348,59 @@ function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, onExport, onImport
   );
 }
 
-/* ---------------- Login landing ----------------
-   Required gate: the whole app is hidden until a user signs in with their
-   Supabase account. The editor account unlocks editing; any other account
-   gets a read-only view. */
+/* ---------------- Sign in / Create account ----------------
+   The whole app is behind this screen. Two modes on one card:
+
+   SIGN IN   — unchanged: Supabase Auth, email + password.
+   SIGN UP   — self-registration on the SAME mechanism. Nothing about the
+               authentication model changes; there is no second factor to
+               preserve here (this application has never used one) and none
+               is invented.
+
+   What a new account GETS is decided entirely server-side by
+   handle_new_user() (supabase/schema.sql §3.7): the least-privilege `member`
+   role and membership of the primary organization. This form sends an email,
+   a password and a display name — it cannot request a role, an organization,
+   a job title or any management flag, and the database would ignore them if
+   it did. That is the whole point: privilege is not a client input.
+   ---------------------------------------------------------- */
 function LoginScreen() {
   const I = window.I;
   const ds = window.dataService;
   const { setAuthUser } = useAuth();
+  const [mode, setMode] = useStateA('signin');   // 'signin' | 'signup'
   const [email, setEmail] = useStateA('');
   const [pw, setPw] = useStateA('');
+  const [name, setName] = useStateA('');
   const [busy, setBusy] = useStateA(false);
   const [err, setErr] = useStateA('');
+  const [notice, setNotice] = useStateA('');
+
+  const switchMode = (m) => { setMode(m); setErr(''); setNotice(''); setPw(''); };
 
   const submit = async () => {
     if (busy) return;
-    setErr('');
+    setErr(''); setNotice('');
     if (!email.trim() || !pw) { setErr('Enter your email and password.'); return; }
+    if (mode === 'signup' && pw.length < 8) { setErr('Choose a password of at least 8 characters.'); return; }
     setBusy(true);
-    const r = await ds.signIn(email.trim(), pw);
+    const r = mode === 'signin'
+      ? await ds.signIn(email.trim(), pw)
+      : await ds.signUp(email.trim(), pw, name.trim());
     setBusy(false);
-    if (r.ok) { setPw(''); setAuthUser(r.user || null); }
-    else setErr(r.error || 'Sign-in failed.');
+    if (!r.ok) { setErr(r.error || (mode === 'signin' ? 'Sign-in failed.' : 'Could not create the account.')); return; }
+    setPw('');
+    // With email confirmation switched on, signUp returns a user but NO
+    // session. Dropping them into the app would be a lie — say what happened.
+    if (mode === 'signup' && r.needsConfirmation) {
+      setNotice('Account created. Check your email to confirm the address, then sign in.');
+      setMode('signin');
+      return;
+    }
+    setAuthUser(r.user || null);
   };
+
+  const signup = mode === 'signup';
 
   return (
     <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24, background: 'var(--bg)' }}>
@@ -1204,20 +1412,45 @@ function LoginScreen() {
             <div className="brand-sub">EXECUTION HUB</div>
           </div>
         </div>
-        <div style={{ fontSize: 19, fontWeight: 800, letterSpacing: '-0.02em', marginBottom: 4 }}>Sign in</div>
-        <div className="muted" style={{ fontSize: 13, marginBottom: 18 }}>Sign in to view and manage the workspace.</div>
+
+        <div className="seg" style={{ marginBottom: 16 }}>
+          <button className={!signup ? 'active' : ''} onClick={() => switchMode('signin')}>Sign in</button>
+          <button className={signup ? 'active' : ''} onClick={() => switchMode('signup')}>Create account</button>
+        </div>
+
+        <div style={{ fontSize: 19, fontWeight: 800, letterSpacing: '-0.02em', marginBottom: 4 }}>
+          {signup ? 'Create your account' : 'Sign in'}
+        </div>
+        <div className="muted" style={{ fontSize: 13, marginBottom: 18 }}>
+          {signup
+            ? 'You get your own personal task workspace.'
+            : 'Sign in to view and manage your work.'}
+        </div>
+
         <div className="col gap10">
-          <input className="input" type="email" placeholder="Email" autoFocus value={email}
+          {signup && (
+            <input className="input" type="text" placeholder="Your name" autoFocus value={name}
+              onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
+          )}
+          <input className="input" type="email" placeholder="Email" autoFocus={!signup} value={email}
             onChange={e => setEmail(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
-          <input className="input" type="password" placeholder="Password" value={pw}
+          <input className="input" type="password" placeholder={signup ? 'Password (8+ characters)' : 'Password'} value={pw}
+            autoComplete={signup ? 'new-password' : 'current-password'}
             onChange={e => setPw(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') submit(); }} />
           <button className="btn btn-primary" style={{ width: '100%', justifyContent: 'center' }} onClick={submit} disabled={busy}>
-            {busy ? 'Signing in…' : <><I.user size={14} /> Sign in</>}
+            {busy
+              ? (signup ? 'Creating account…' : 'Signing in…')
+              : <><I.user size={14} /> {signup ? 'Create account' : 'Sign in'}</>}
           </button>
         </div>
+
         {err && <div style={{ color: 'var(--st-blocked)', fontSize: 12.5, marginTop: 12 }}>{err}</div>}
+        {notice && <div style={{ color: 'var(--st-completed)', fontSize: 12.5, marginTop: 12 }}>{notice}</div>}
+
         <div className="muted" style={{ fontSize: 11.5, marginTop: 16, lineHeight: 1.5 }}>
-          Accounts are managed in Supabase. Ask the workspace owner for access.
+          {signup
+            ? 'New accounts start with access to their own tasks only. Wider access — seeing or assigning other people\u2019s work — is granted by a workspace administrator.'
+            : 'No account yet? Create one — you\u2019ll get your own task workspace.'}
         </div>
       </div>
     </div>

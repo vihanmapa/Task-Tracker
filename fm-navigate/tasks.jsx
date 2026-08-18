@@ -91,7 +91,8 @@ function SummaryBar({ tasks, onPick, activeStatus }) {
   );
 }
 
-function TasksScreen({ tasks, deliverables = [], view, setView, onOpen, onOpenDeliverable, onCompose, onMove, onToggleDone, canEdit = true }) {
+function TasksScreen({ tasks, deliverables = [], view, setView, onOpen, onOpenDeliverable, onCompose, onMove, onToggleDone, canEdit = true,
+                       showOwnerFilter = true, personFilter = null, onClearPerson }) {
   const I = window.I;
   const P0 = loadTPrefs();
   const rememberF = P0.rememberFilters !== false;
@@ -161,6 +162,18 @@ function TasksScreen({ tasks, deliverables = [], view, setView, onOpen, onOpenDe
           <input placeholder="Search tasks…" value={q} onChange={e => setQ(e.target.value)} />
         </div>
         {/* Filters — consolidated into one popover */}
+        {/* Management drill-down banner: it must be obvious that this list is
+            ONE person's work, and one click to get back to everything. */}
+        {personFilter && (
+          <span className="chip" style={{ background: 'var(--accent-soft)', color: 'var(--accent)', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+            {personFilter === '__unassigned'
+              ? 'Unassigned tasks'
+              : `${(window.userOf(personFilter) || {}).name || personFilter}'s tasks`}
+            <button className="icon-btn" style={{ width: 18, height: 18 }} title="Show everyone" onClick={() => onClearPerson && onClearPerson()}>
+              <I.x size={12} />
+            </button>
+          </span>
+        )}
         <div className="pop-anchor">
           <button className={`btn btn-sm ${activeFilters > 0 ? 'btn-primary' : ''}`} onClick={() => setShowFilters(s => !s)} title="Filter tasks">
             <I.filter size={14} /> Filter{activeFilters > 0 && <span className="kcol-count mono" style={{ marginLeft: 4 }}>{activeFilters}</span>}
@@ -170,7 +183,8 @@ function TasksScreen({ tasks, deliverables = [], view, setView, onOpen, onOpenDe
               deliverables={deliverables}
               fStatus={fStatus} setFStatus={setFStatus} fPrio={fPrio} setFPrio={setFPrio}
               fDlv={fDlv} setFDlv={setFDlv} fCat={fCat} setFCat={setFCat} fOwner={fOwner} setFOwner={setFOwner}
-              activeFilters={activeFilters} onClear={clearFilters} onClose={() => setShowFilters(false)} />
+              activeFilters={activeFilters} onClear={clearFilters} onClose={() => setShowFilters(false)}
+              showOwnerFilter={showOwnerFilter} />
           )}
         </div>
         {/* Sort (operational control — stays in toolbar) */}
@@ -228,7 +242,7 @@ function TasksScreen({ tasks, deliverables = [], view, setView, onOpen, onOpenDe
               <div style={{ marginBottom: 18 }}>Start from a blank slate — describe the work and the assistant structures it for you.</div>
               {canEdit
                 ? <button className="btn btn-primary" onClick={onCompose} style={{ display: 'inline-flex' }}><I.spark size={15} /> Create your first task</button>
-                : <div className="muted" style={{ fontSize: 12.5 }}>Sign in as the editor (Vihan) to add tasks. Or load the demo set from Settings → Data.</div>}
+                : <div className="muted" style={{ fontSize: 12.5 }}>Your role cannot create tasks. Ask a workspace administrator if you need to.</div>}
             </div>
           </div>
         )
@@ -242,7 +256,7 @@ function TasksScreen({ tasks, deliverables = [], view, setView, onOpen, onOpenDe
 }
 
 /* ---------------- Filter popover ---------------- */
-function FilterPopover({ deliverables, fStatus, setFStatus, fPrio, setFPrio, fDlv, setFDlv, fCat, setFCat, fOwner, setFOwner, activeFilters, onClear, onClose }) {
+function FilterPopover({ deliverables, fStatus, setFStatus, fPrio, setFPrio, fDlv, setFDlv, fCat, setFCat, fOwner, setFOwner, activeFilters, onClear, onClose, showOwnerFilter = true }) {
   // Close on outside click / Escape.
   useEffectT(() => {
     const onKey = (e) => e.key === 'Escape' && onClose();
@@ -283,14 +297,19 @@ function FilterPopover({ deliverables, fStatus, setFStatus, fPrio, setFPrio, fDl
           <option value="All">All categories</option>{window.CATEGORIES.map(c => <option key={c}>{c}</option>)}
         </select>
       </Field>
-      <Field label="Owner">
-        <select className="select" value={fOwner} onChange={e => setFOwner(e.target.value)}>
-          {/* Unlike the assignment pickers this lists legacy seed ids too:
-              older tasks still carry them as ownerId, and filtering is by
-              exact id — hiding them would make those tasks unfilterable. */}
-          <option value="All">All owners</option>{Object.values(window.USERS).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
-        </select>
-      </Field>
+      {/* An assignee filter is only meaningful for someone who can see more
+          than one person's work; for a personal workspace every task is
+          already theirs, so the control would be furniture. */}
+      {showOwnerFilter && (
+        <Field label="Assignee">
+          <select className="select" value={fOwner} onChange={e => setFOwner(e.target.value)}>
+            {/* Unlike the assignment pickers this lists legacy seed ids too:
+                older tasks still carry them as ownerId, and filtering is by
+                exact id — hiding them would make those tasks unfilterable. */}
+            <option value="All">All assignees</option>{Object.values(window.USERS).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+          </select>
+        </Field>
+      )}
       <div className="row" style={{ justifyContent: 'space-between', marginTop: 4 }}>
         <button className="btn btn-sm" onClick={onClear} disabled={activeFilters === 0}>Clear all</button>
         <button className="btn btn-primary btn-sm" onClick={onClose}>Done</button>
@@ -1427,6 +1446,13 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
   const [copied, setCopied] = useStateT(false);
   if (!task) return null;
   const owner = window.userOf(task.ownerId);
+  // Reporter is a Phase-3 column; legacy tasks recorded their creator only in
+  // the activity feed, so fall back to that rather than showing nothing.
+  const reporterId = task.reporterId
+    || ((task.activity || []).find(a => a.type === 'created') || {}).userId
+    || null;
+  const reporter = reporterId ? window.userOf(reporterId) : null;
+  const reporterIsAssignee = !!reporterId && (reporterId === task.ownerId || reporterId === task.assigneeId);
   const dlv = deliverables.find(d => d.id === task.deliverableId);
 
   const taskTitle = (id) => { const t = allTasks.find(x => x.id === id); return t ? `${t.id} ${t.title}` : id; };
@@ -1770,13 +1796,27 @@ function TaskDetail({ task, deliverables = [], allTasks = [], weeks = [], onClos
                     </select>
                   : <window.PriorityTag priority={task.priority} />}
               </div>
-              <div className="meta-row"><span className="meta-k">Owner</span>
+              {/* ASSIGNEE — who is responsible for finishing it. Editable only
+                  with tasks.assign; the database refuses the change otherwise
+                  (protect_task_governance), so this control's absence and the
+                  policy are two views of one rule. */}
+              <div className="meta-row"><span className="meta-k">Assignee</span>
                 {canEdit && canAssign
-                  ? <select className="select meta-edit" value={task.ownerId} onChange={e => onEditTask && onEditTask(task.id, { ownerId: e.target.value })}>
+                  ? <select className="select meta-edit" value={task.ownerId || ''} onChange={e => onEditTask && onEditTask(task.id, { ownerId: e.target.value })}>
                       {window.peopleOptions(task.ownerId).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
                     </select>
                   : <span className="row gap6 center"><window.Avatar user={owner} size={22} /><span className="meta-v">{owner.name}</span></span>}
               </div>
+              {/* REPORTER — who raised it. Never editable, by anyone: it is a
+                  record of what happened, not a setting. */}
+              {reporter && (
+                <div className="meta-row"><span className="meta-k">Reporter</span>
+                  <span className="row gap6 center">
+                    <window.Avatar user={reporter} size={22} />
+                    <span className="meta-v">{reporter.name}{reporterIsAssignee ? ' (also assignee)' : ''}</span>
+                  </span>
+                </div>
+              )}
               <div className="meta-row"><span className="meta-k">Due date</span>
                 {canEditFields
                   ? <input type="date" className="select meta-edit" value={toDateInput(task.dueDate)}
