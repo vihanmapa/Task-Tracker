@@ -79,6 +79,16 @@ function AuthProvider({ children }) {
   // Cached profile { id, email, name, avatar_url, role, status }. Fetched once
   // when the signed-in user id changes — never on every render/refresh.
   const [profile, setProfile] = useState(null);
+  // BOOTSTRAP STAGES (see auth-bootstrap.js). 'pending' until the fetch has
+  // FINISHED — not until it succeeded: a signed-in user with no profile row is
+  // a resolved state, and rendering must not wait forever on it. While either
+  // is pending the app shows a loading state and no role is derived at all,
+  // which is what removes the "Viewer until you refresh" race.
+  const [profileState, setProfileState] = useState(window.authBootstrap.PENDING);
+  const [rbacState, setRbacState] = useState(window.authBootstrap.PENDING);
+  // The signed-in user's organization — every task carries it, so the client
+  // needs it to create one. null until resolved (or when there is no backend).
+  const [organizationId, setOrganizationId] = useState(null);
   // Bumped when the team directory lands in window.USERS so pickers re-render.
   const [peopleVersion, setPeopleVersion] = useState(0);
 
@@ -97,9 +107,24 @@ function AuthProvider({ children }) {
   // Load the profile (name/avatar + role) once per signed-in identity.
   useEffect(() => {
     if (!shared) return;
-    if (!authUser) { setProfile(null); return; }
+    if (!authUser) {
+      // Signed out: nothing to resolve, and the previous account's profile
+      // must not linger into the next one.
+      setProfile(null); setOrganizationId(null);
+      setProfileState(window.authBootstrap.SETTLED);
+      return;
+    }
     let alive = true;
-    ds.getMyProfile().then(p => { if (alive) setProfile(p); });
+    setProfile(null);
+    setProfileState(window.authBootstrap.PENDING);
+    Promise.all([ds.getMyProfile(), ds.myOrganizationId ? ds.myOrganizationId() : Promise.resolve(null)])
+      .then(([p, org]) => {
+        if (!alive) return;
+        setProfile(p);
+        setOrganizationId(org);
+        setProfileState(window.authBootstrap.SETTLED);
+      })
+      .catch(() => { if (alive) setProfileState(window.authBootstrap.SETTLED); });
     return () => { alive = false; };
   }, [shared, authUser && authUser.id]);
 
@@ -124,13 +149,25 @@ function AuthProvider({ children }) {
     if (!shared) return;
     // Signed out (or between accounts): drop any in-memory matrix so the next
     // account can't inherit it, then stop — can() falls back to DEFAULTS.
-    if (!authUser) { window.RBAC.reset(); setRbacVersion(v => v + 1); return; }
+    if (!authUser) {
+      window.RBAC.reset();
+      setRbacVersion(v => v + 1);
+      setRbacState(window.authBootstrap.SETTLED);
+      return;
+    }
     let alive = true;
+    setRbacState(window.authBootstrap.PENDING);
     // New identity: clear the previous account's matrix before the first fetch
     // so nothing stale is served while this account's grants are in flight.
     window.RBAC.reset();
     const uid = authUser.id;
-    const refresh = () => window.RBAC.load(ds, uid).then(() => { if (alive) setRbacVersion(v => v + 1); });
+    const refresh = () => window.RBAC.load(ds, uid).then(() => {
+      if (!alive) return;
+      setRbacVersion(v => v + 1);
+      // Settled whether we entered matrix mode or fell back to DEFAULTS —
+      // both are resolved answers, and load() never rejects.
+      setRbacState(window.authBootstrap.SETTLED);
+    });
     refresh();
     const off = ds.subscribeRolePermissions ? ds.subscribeRolePermissions(refresh) : null;
     return () => { alive = false; off && off(); };
@@ -151,12 +188,22 @@ function AuthProvider({ children }) {
     return () => { alive = false; };
   }, [shared, authUser && authUser.id]);
 
-  const signOut = useCallback(() => ds.signOut().then(() => { window.RBAC.reset(); setAuthUser(null); setProfile(null); }), []);
+  const signOut = useCallback(() => ds.signOut().then(() => {
+    window.RBAC.reset();
+    setAuthUser(null); setProfile(null); setOrganizationId(null);
+    setProfileState(window.authBootstrap.SETTLED);
+    setRbacState(window.authBootstrap.SETTLED);
+  }), []);
 
   const value = useMemo(() => {
+    const bootstrap = { shared, authUser, profile, profileState, rbacState };
+    // Ready = session AND profile AND permission matrix all resolved. Until
+    // then App renders a loading state; there is NO provisional role, so a
+    // real Owner can never be shown a Viewer UI for a frame (or a second).
+    const ready = window.authBootstrap.computeReady(bootstrap);
     // Local-only mode has no backend/roles → full-access owner. Shared mode:
-    // the profile's role; a signed-in user with no profile yet is a viewer.
-    const role = !shared ? 'owner' : ((profile && profile.role) || (authUser ? 'viewer' : null));
+    // strictly the profile's role, or null while unresolved / signed out.
+    const role = window.authBootstrap.roleOf(bootstrap);
     const can = (resource, action) => window.RBAC.can(role, resource, action);
     // GOVERNANCE gate: full workspace control (deliverables, weeks, KPI,
     // import/clear/migrate, unrestricted task edits). Owner + PM.
@@ -169,6 +216,13 @@ function AuthProvider({ children }) {
     const canAssign = !shared || can('tasks', 'assign');
     const canPrioritize = !shared || can('tasks', 'prioritize');
     const canDeleteTask = !shared || can('tasks', 'delete');
+    // Phase 3 capabilities. canViewAll is MANAGEMENT SCOPE — the single switch
+    // between "my personal workspace" and "the organization's work". It is a
+    // permission, so an owner can grant it to another role from Settings →
+    // Roles & Permissions without a deployment; it is never inferred from a
+    // job title or a role name anywhere in this codebase.
+    const canViewAll = !shared || can('tasks', 'view_all');
+    const canCreateTask = !shared || can('tasks', 'create');
     // Attribution is the REAL signed-in person: a stable profile key registered
     // in window.USERS (see registerIdentity). The role→person map below is kept
     // ONLY as a compatibility fallback — for local-only mode and for the brief
@@ -180,6 +234,20 @@ function AuthProvider({ children }) {
       : role === 'tech_lead' ? 'isuru'
       : canEdit ? 'vihan' : 'richard';
     const currentUser = (shared && profile && identityKey(profile)) || legacyUser;
+    // The context window.taskScope evaluates against — a mirror of the SQL
+    // predicates, built once here so every consumer asks the same question.
+    const scopeCtx = {
+      userId: currentUser,
+      organizationId,
+      canRead: !shared || can('tasks', 'read'),
+      canExecute,
+      canCreate: canCreateTask,
+      canViewAll,
+      canAssign,
+      canPrioritize,
+      canDelete: canDeleteTask,
+      canGovern: canEdit,
+    };
     return {
       shared,
       authUser,
@@ -196,15 +264,20 @@ function AuthProvider({ children }) {
       canAssign,
       canPrioritize,
       canDeleteTask,
+      canViewAll,
+      canCreateTask,
+      organizationId,
+      scopeCtx,
       currentUser,
       signOut,
-      ready: !shared || authUser !== undefined,
+      ready,
+      bootstrapStage: window.authBootstrap.stageLabel(bootstrap),
       // Consumers don't read this directly — it's in the memo deps so the tree
       // re-renders (and pickers re-enumerate window.USERS) once the team loads.
       peopleVersion,
       setAuthUser, // for LoginScreen to push the user immediately on sign-in
     };
-  }, [shared, authUser, profile, signOut, peopleVersion, rbacVersion]);
+  }, [shared, authUser, profile, profileState, rbacState, organizationId, signOut, peopleVersion, rbacVersion]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
