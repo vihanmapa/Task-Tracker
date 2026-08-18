@@ -91,12 +91,21 @@ for (const t of ['execution', 'development', 'testing']) {
 // ⇔ schema.sql §2.2: reads every template gets.
 const COMMON_READS = ['tasks.read', 'deliverables.read', 'weekly.read',
   'kpi.read', 'reports.read', 'comments.read', 'users.read'];
+// …except the templates the cross join excludes. Parsed out of the SQL rather
+// than hardcoded, so adding another exclusion there can't silently desync this
+// mirror (Phase 3 excludes personal_execution — a Member gets a PERSONAL
+// workspace, not the organization-wide governance reads).
+const commonReadsWhere = section(phase2, "cross join (values ('tasks.read')", ';');
+const NO_COMMON_READS = new Set(
+  [...(commonReadsWhere.match(/where t\.slug not in \(([^)]*)\)/) || [, ''])[1]
+    .matchAll(/'([a-z_]+)'/g)].map(m => m[1]));
+if (!NO_COMMON_READS.has('everything')) fail('could not parse the common-reads exclusion list from schema.sql');
 
 function seededGrants(role) {
   const template = ROLE_TEMPLATE[role];
   if (!template) fail(`role '${role}' missing from schema.sql roles seed`);
   if (template === 'everything') return new Set(CATALOG);
-  const s = new Set(COMMON_READS);
+  const s = new Set(NO_COMMON_READS.has(template) ? [] : COMMON_READS);
   if (template !== 'read_only') s.add('comments.write');
   for (const k of tmplGrants[template] || []) s.add(k);
   return s;
@@ -141,19 +150,34 @@ for (const [from, to] of Object.entries(RBAC.ALIASES)) {
 // must stay Planned (locks the decision — re-marking them enforced without
 // wiring a real UI path fails here).
 const DEAD_TABLE_RLS = new Set(['comments.write', 'comments.moderate']);
+// Same standard, different reason: these two gate OPERATOR-ONLY functions
+// (migrate_workspace_tasks / verify_task_migration, Phase 3 §3.9). No client
+// control invokes them — they are run once from the SQL editor during the
+// rollout — so an admin toggling them would observe nothing in the app, and
+// mislabelling them "enforced" would suggest the switch does something it
+// doesn't. Note admin.audit_log in particular: its LABEL promises audit-log
+// visibility, which no screen implements yet.
+const OPERATOR_ONLY_RPC = new Set(['admin.restore', 'admin.audit_log']);
 for (const k of RLS_ENFORCED) {
-  if (DEAD_TABLE_RLS.has(k)) continue;
+  if (DEAD_TABLE_RLS.has(k) || OPERATOR_ONLY_RPC.has(k)) continue;
   if (!ENFORCED.has(k)) failures.push(`RLS gates '${k}' but it is not marked enforced`);
 }
 for (const k of DEAD_TABLE_RLS) {
   if (ENFORCED.has(k)) failures.push(`'${k}' is marked enforced but gates the UNUSED public.comments table — must stay Planned until a UI uses it`);
 }
+for (const k of OPERATOR_ONLY_RPC) {
+  if (ENFORCED.has(k)) failures.push(`'${k}' is marked enforced but only gates an operator-run RPC — must stay Planned until a client control uses it`);
+}
 // The documented Phase-2 wired set, as an independent cross-check that the SQL
 // enforced list didn't drift. Keep in sync with TDD §2.1.
 const EXPECTED_ENFORCED = [
+  // Phase 2
   'tasks.read', 'tasks.execute', 'tasks.assign', 'tasks.prioritize', 'tasks.delete',
   'deliverables.read', 'weekly.read', 'kpi.read', 'reports.read',
   'admin.workspace', 'admin.permissions', 'users.assign_roles',
+  // Phase 3 — wired end to end on the normalized task tables
+  // (TDD-PERSONAL-TASK-WORKSPACES §8.1)
+  'tasks.create', 'tasks.view_all',
 ];
 const expSet = new Set(EXPECTED_ENFORCED);
 for (const k of EXPECTED_ENFORCED) if (!ENFORCED.has(k)) failures.push(`expected enforced key '${k}' missing from schema.sql enforced set`);
@@ -173,6 +197,7 @@ const UI_CHECKS = [
   ['tasks', 'write'],       // canExecute
   ['tasks', 'assign'], ['tasks', 'prioritize'], ['tasks', 'delete'],
   ['users', 'write'],       // Users admin card
+  ['tasks', 'create'],      // New task control + RLS INSERT on public.tasks
   ['tasks', 'read'], ['deliverables', 'read'], ['weekly', 'read'],
   ['kpi', 'read'], ['reports', 'read'], ['workspace', 'read'],
   ['users', 'invite'],
@@ -183,6 +208,13 @@ const UI_CHECKS = [
 // wildcard's action list never contained these). Matrix mode: owner only.
 const PHASE2_ONLY = [['admin', 'permissions'], ['admin', 'settings']];
 const LEGACY_ROLES = Object.keys(RBAC.DEFAULTS);
+
+// Phase-3 MANAGEMENT SCOPE. Seeded to exactly these roles; every other role —
+// including every delivery/lead role — stays personal-scope until an owner
+// grants it at runtime. Also asserted FALSE for everyone in fallback mode, so
+// an unreachable permission table degrades to personal visibility (fail closed)
+// rather than showing one user another's work.
+const MANAGEMENT_ROLES = new Set(['owner', 'executive', 'product_manager']);
 
 // Pass 1: fallback mode (matrix not loaded).
 const defaultsAnswers = {};
@@ -227,6 +259,17 @@ for (const [r, a] of PHASE2_ONLY) {
   if ((RBAC.DEFAULTS.owner['*'] || []).includes(a)) {
     failures.push(`DEFAULTS owner wildcard unexpectedly contains action '${a}' — fallback would show the admin card pre-migration`);
   }
+}
+
+// ---- Phase 3: tasks.view_all is management scope, seeded narrowly ----
+for (const role of Object.keys(ROLE_TEMPLATE)) {
+  const expect = MANAGEMENT_ROLES.has(role);
+  if (seededGrants(role).has('tasks.view_all') !== expect) {
+    failures.push(`tasks.view_all: role '${role}' should ${expect ? '' : 'NOT '}hold management scope in the seed`);
+  }
+}
+if ((RBAC.DEFAULTS.owner['*'] || []).includes('view_all')) {
+  failures.push("DEFAULTS owner wildcard contains 'view_all' — fallback mode must be personal-scope for everyone");
 }
 
 // Owner must hold the entire catalog in matrix mode (Rule 6 precondition).

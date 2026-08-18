@@ -43,6 +43,7 @@
     'tech_lead',
     'developer',
     'qa',
+    'member',
     'viewer',
   ];
 
@@ -54,6 +55,7 @@
     tech_lead: 'Tech Lead',
     developer: 'Software Engineer',
     qa: 'QA Engineer',
+    member: 'Member',
     viewer: 'Viewer',
   };
 
@@ -151,6 +153,17 @@
       weekly: ['read'],
       kpi: ['read'],
       reports: ['read'],
+      comments: ['read', 'write'],
+    },
+    // Phase 3 — the self-signup default. A complete PERSONAL task workspace:
+    // create and work your own tasks, comment on them. No assign/prioritize/
+    // delete, no cross-user visibility (tasks.view_all is matrix-only and false
+    // here, so fallback mode is personal-scope), and deliberately none of the
+    // organization-wide reads (deliverables/weekly/kpi/reports) so those nav
+    // items never appear. Mirrors the personal_execution template exactly.
+    member: {
+      workspace: ['read'],
+      tasks: ['read', 'write', 'create'],
       comments: ['read', 'write'],
     },
     viewer: {
