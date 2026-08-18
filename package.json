@@ -6,12 +6,16 @@
   "scripts": {
     "build": "node build.mjs",
     "serve": "python3 dist/serve.py 4173",
-    "verify": "npm run verify:rbac && npm run verify:auth && npm run verify:rls",
+    "verify": "npm run verify:rbac && npm run verify:auth && npm run verify:rls && npm run build && npm run verify:ui",
     "verify:rbac": "node scripts/verify-rbac-parity.mjs && node scripts/verify-rbac-isolation.mjs",
     "verify:auth": "node scripts/verify-auth-bootstrap.mjs",
-    "verify:rls": "node scripts/verify-rls.mjs"
+    "verify:rls": "node scripts/verify-rls.mjs",
+    "verify:ui": "node scripts/smoke-personal-workspace.mjs"
   },
   "devDependencies": {
-    "esbuild": "^0.23.0"
+    "esbuild": "^0.23.0",
+    "playwright": "^1.62.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   }
 }
