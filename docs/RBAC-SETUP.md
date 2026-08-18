@@ -319,7 +319,28 @@ run function, dry-run by default, and it never modifies the workspace document.
 9. **Deploy the client.** It probes for `public.tasks` and switches to the
    normalized path on its own; no coordinated cutover.
 
-## UAT
+## UAT — sign-off checklist
+
+Run these against the live deployment **after** step 9, in order. Each one is a
+behaviour a real person can observe; none of them is "check the code".
+
+| # | Check | Expected |
+|---|---|---|
+| 1 | Sign in as an existing management user (Owner / PM) | sees **all** Evbex tasks |
+| 2 | Sign in as a normal member | sees **only** tasks assigned to them |
+| 3 | Management reassigns one of that member's tasks to someone else | it disappears from the previous assignee's list |
+| 4 | The previous assignee is still the task's reporter | they **cannot** retrieve it — not on any screen, not by direct URL |
+| 5 | Sign up a fresh public account | personal workspace only; **no** Evbex tasks, people, or governance screens |
+| 6 | Management creates a task and assigns it to another member | task appears on that member's list |
+| 7 | Standard member opens the task form | **no** assignee control at all |
+| 8 | Open an attachment on a task the signed-in user cannot see | refused (try the storage URL directly, not just the UI) |
+| 9 | After the archive step, a non-management role opens Deliverables / This Week | works, and the document carries no task data |
+| 10 | `select action, entity_id from activity_log order by created_at desc limit 10;` | `task_created`, `task_assigned`, `task_reassigned`, `task_status_changed` present |
+
+Checks 4 and 8 are the two most worth doing by hand: they are the ones a UI can
+appear to pass while the API still answers.
+
+### Walkthrough
 
 1. Sign out → **Create account** → sign up. You land in **your own** personal
    workspace: *My Tasks*, no People/Deliverables/KPI/This Week in the nav — and
