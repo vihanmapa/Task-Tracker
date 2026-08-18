@@ -6,7 +6,10 @@
   "scripts": {
     "build": "node build.mjs",
     "serve": "python3 dist/serve.py 4173",
-    "verify:rbac": "node scripts/verify-rbac-parity.mjs && node scripts/verify-rbac-isolation.mjs"
+    "verify": "npm run verify:rbac && npm run verify:auth && npm run verify:rls",
+    "verify:rbac": "node scripts/verify-rbac-parity.mjs && node scripts/verify-rbac-isolation.mjs",
+    "verify:auth": "node scripts/verify-auth-bootstrap.mjs",
+    "verify:rls": "node scripts/verify-rls.mjs"
   },
   "devDependencies": {
     "esbuild": "^0.23.0"
