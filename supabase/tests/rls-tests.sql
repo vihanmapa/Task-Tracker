@@ -581,6 +581,37 @@ select tests.expect_rows('owner: sees every task in their OWN organization',
   $q$select id from public.tasks$q$, 4);
 select tests.expect_rows('owner: does NOT see another organization''s tasks',
   $q$select id from public.tasks where organization_id = '00000000-0000-0000-0000-0000000000aa'$q$, 0);
+
+-- The tenant boundary binds the administrator too. "profiles owner manage" is
+-- a permissive ALL policy, so before it was org-scoped it also answered SELECT
+-- and handed an administrator of one tenant every account on the platform —
+-- and, being ALL, let them re-role and delete those accounts as well. An
+-- administrator administers their OWN organization; reaching outside it is not
+-- administration. (TDD §5.2, §9 "any role incl. owner … deny", §19.)
+select tests.expect_rows('owner: does NOT see another tenant''s profile',
+  $q$select id from public.profiles where id = '55555555-5555-5555-5555-555555555555'$q$, 0);
+select tests.expect_rows('owner: does NOT see a public signup''s profile',
+  $q$select id from public.profiles where id = '66666666-6666-6666-6666-666666666666'$q$, 0);
+select tests.expect_rows('owner: the directory is their own organization only',
+  $q$select id from public.profiles where id <> auth.uid() and not public.shares_org_with(id)$q$, 0);
+select tests.expect_denied('owner: cannot re-role another tenant''s owner', $q$
+  update public.profiles set role = 'viewer' where id = '55555555-5555-5555-5555-555555555555'
+$q$);
+select tests.expect_denied('owner: cannot re-role a public signup', $q$
+  update public.profiles set role = 'viewer' where id = '66666666-6666-6666-6666-666666666666'
+$q$);
+select tests.expect_denied('owner: cannot delete another tenant''s profile', $q$
+  delete from public.profiles where id = '55555555-5555-5555-5555-555555555555'
+$q$);
+select tests.expect_denied('owner: cannot disable a public signup', $q$
+  update public.profiles set status = 'disabled' where id = '66666666-6666-6666-6666-666666666666'
+$q$);
+-- Read back as Xavier himself: after the fix the other tenant's owner is not
+-- even visible to Evbex's owner, so only Xavier can confirm he is intact.
+select public.test_sign_in('55555555-5555-5555-5555-555555555555');
+select tests.check('owner: the other tenant''s account is untouched by the denied writes',
+  (select role || '/' || status from public.profiles where id = auth.uid()) = 'member/active');
+select public.test_sign_in('44444444-4444-4444-4444-444444444444');
 select tests.expect_allowed('owner: may change a role', $q$
   update public.profiles set job_title = 'Delivery Lead' where id = '11111111-1111-1111-1111-111111111111'
 $q$);

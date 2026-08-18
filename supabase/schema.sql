@@ -1130,6 +1130,28 @@ create policy "profiles read (same organization)"
   on public.profiles for select to authenticated
   using (id = auth.uid() or public.shares_org_with(id));
 
+-- Profile ADMINISTRATION is scoped the same way, and for the same reason.
+-- §2.9's policy is `for all using (authorize('users.assign_roles'))` with no
+-- organization predicate — correct when there was one tenant, a hole the
+-- moment Phase 3 gave every public signup an organization of its own.
+-- Postgres ORs permissive policies together, so that unscoped ALL policy
+-- also answered SELECT: an administrator of one tenant could read every
+-- account on the platform, re-role another tenant's owner, and delete their
+-- profile outright. Exactly the ADR 0009 pattern — a rule that was right when
+-- written and became wrong when the data underneath it changed shape.
+--
+-- Same rule as everywhere else: capability AND tenant. Administering your own
+-- organization is unchanged; reaching outside it is not administration.
+-- Self is kept readable/writable so a user mid-signup can still load and
+-- update their own row before the membership lands (as in the read policy).
+drop policy if exists "profiles owner manage" on public.profiles;
+create policy "profiles owner manage"
+  on public.profiles for all to authenticated
+  using (public.authorize('users.assign_roles')
+         and (id = auth.uid() or public.shares_org_with(id)))
+  with check (public.authorize('users.assign_roles')
+              and (id = auth.uid() or public.shares_org_with(id)));
+
 -- ---------- 3.2 Normalized tasks ----------
 -- ids are the EXISTING display ids ('T-142') so every link, weekly-plan
 -- reference, export and audit record stays valid after the migration.
