@@ -229,10 +229,12 @@ function AuthProvider({ children }) {
     // window after sign-in before the profile has loaded. Historical activity
     // records that still carry legacy ids (richard/vihan/isuru) keep resolving
     // because those entries remain in USERS.
-    const legacyUser = (!shared || role === 'product_manager') ? 'vihan'
-      : role === 'owner' ? 'richard'
-      : role === 'tech_lead' ? 'isuru'
-      : canEdit ? 'vihan' : 'richard';
+    // Local-only mode (no backend, no accounts) still needs an attribution key
+    // for avatars and activity. It used to be picked by ROLE NAME, which is a
+    // pattern this codebase no longer wants anywhere near identity or scope —
+    // and in shared mode it is now unreachable, because the app does not
+    // render until a real profile has resolved (auth-bootstrap.js).
+    const legacyUser = 'vihan';
     const currentUser = (shared && profile && identityKey(profile)) || legacyUser;
     // The context window.taskScope evaluates against — a mirror of the SQL
     // predicates, built once here so every consumer asks the same question.

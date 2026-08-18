@@ -2053,6 +2053,60 @@ create policy "task-attachments delete (role)"
   on storage.objects for delete to authenticated
   using (bucket_id = 'task-attachments' and public.attachment_writable(name));
 
+-- (c) The audit log. Its SELECT policy was `using (true)` from Phase 1, when it
+--     only held role changes. Phase 3 started writing task events into it —
+--     task_created carries the title, task_status_changed carries the
+--     transition — so an unscoped audit log became a complete index of
+--     everybody's work, readable by anyone signed in. Same invariant, so the
+--     same rule: a row ABOUT A TASK is visible exactly when the task is.
+--     Everything else is your own actions, or requires the audit capability.
+drop policy if exists "activity read (authenticated)" on public.activity_log;
+drop policy if exists "activity read (scoped)" on public.activity_log;
+create policy "activity read (scoped)"
+  on public.activity_log for select to authenticated
+  using (
+    case
+      when entity_type = 'task' then public.parent_task_readable(entity_id)
+      else user_id = auth.uid() or public.authorize('admin.audit_log')
+    end
+  );
+
+-- (d) public.comments — the generic Phase-1 comment table. It is UNUSED (task
+--     comments live in public.task_comments, §3.2) and therefore empty, but it
+--     is keyed by (entity_type, entity_id) and was readable with `using (true)`.
+--     An empty table is not a security argument: if anything ever writes a
+--     task comment there it must not become the way around the task rules.
+drop policy if exists "comments read (authenticated)" on public.comments;
+drop policy if exists "comments read (scoped)" on public.comments;
+create policy "comments read (scoped)"
+  on public.comments for select to authenticated
+  using (
+    case when entity_type = 'task' then public.parent_task_readable(entity_id)
+         else public.authorize('comments.read') end
+  );
+
+--     Writing needs the same treatment, and the test suite caught that it did
+--     not have it: the insert policy only checked "is this comment yours" and
+--     "may you comment", so a standard user could attach a row to ANOTHER
+--     person's task id. Unreadable to them afterwards, but still a write into
+--     someone else's stream — the same hole from the other side.
+drop policy if exists "comments insert (non-viewer)" on public.comments;
+drop policy if exists "comments insert (scoped)" on public.comments;
+create policy "comments insert (scoped)"
+  on public.comments for insert to authenticated
+  with check (
+    auth.uid() = user_id
+    and public.authorize('comments.write')
+    and (entity_type <> 'task' or public.parent_task_writable(entity_id))
+  );
+
+-- (e) legacy_user_map — the migration's legacy-key → account table. No client
+--     reads it (only migrate_workspace_tasks does, as its owner), and letting
+--     anyone read it would hand a public self-registered account a partial
+--     staff directory. Policy removed entirely: RLS on, no policy, no access.
+drop policy if exists "legacy_user_map read (authenticated)" on public.legacy_user_map;
+revoke all on public.legacy_user_map from anon, authenticated;
+
 -- ---------- 3.11 Retiring the document's task copy (archive, not delete) ----
 -- After migration the document still holds a full copy of every task. That
 -- copy is the rollback source, so it is not deleted — but it must not sit in

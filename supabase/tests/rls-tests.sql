@@ -377,6 +377,26 @@ select tests.expect_denied('standard: cannot grant itself a permission', $q$
   insert into public.role_permissions (role_slug, permission_key) values ('member', 'tasks.view_all')
 $q$);
 
+-- ---- no OTHER table may become a second index of everyone's work ----
+-- The audit log carries task titles and status transitions; public.comments is
+-- keyed by entity id; legacy_user_map maps staff keys to accounts. All three
+-- were readable by any signed-in user before this correction round.
+select tests.expect_rows('standard: cannot read audit rows about another user''s task',
+  $q$select id from public.activity_log where entity_type = 'task' and entity_id = 'T-B1'$q$, 0);
+select tests.check('standard: CAN read audit rows about their own task',
+  (select count(*) from public.activity_log where entity_type = 'task' and entity_id = 'T-A1') > 0);
+select tests.expect_rows('standard: cannot read role-administration audit rows',
+  $q$select id from public.activity_log where entity_type = 'role'$q$, 0);
+-- Revoked outright rather than filtered, so this is a hard privilege error
+-- rather than an empty result — a stronger denial than a policy would give.
+select tests.expect_denied('standard: the legacy user map is unreachable', $q$
+  select legacy_key from public.legacy_user_map
+$q$);
+select tests.expect_denied('standard: cannot plant a comment row about another user''s task', $q$
+  insert into public.comments (entity_type, entity_id, user_id, body)
+  values ('task', 'T-B1', auth.uid(), 'probe')
+$q$);
+
 -- ---- the legacy copies must not leak the same data ----
 select tests.expect_rows('standard: the legacy workspace document is INVISIBLE',
   $q$select id from public.workspace$q$, 0);
@@ -451,6 +471,8 @@ select tests.expect_rows('reporter keeps sight of a task they delegated away',
 
 select tests.expect_rows('management: the workspace document is readable',
   $q$select id from public.workspace$q$, 2);
+select tests.check('management: CAN read audit rows about the tasks it oversees',
+  (select count(*) from public.activity_log where entity_type = 'task' and entity_id = 'T-B1') > 0);
 select tests.check('management: attachments follow task visibility',
   public.attachment_readable('T-B1/pl-b1/0-evidence.png') = true);
 -- An attachment whose task has not been normalized yet follows the document's

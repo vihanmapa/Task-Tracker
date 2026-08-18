@@ -149,14 +149,17 @@ for (const [from, to] of Object.entries(RBAC.ALIASES)) {
 // keys must be enforced EXCEPT this documented dead-table set; and those two
 // must stay Planned (locks the decision — re-marking them enforced without
 // wiring a real UI path fails here).
-const DEAD_TABLE_RLS = new Set(['comments.write', 'comments.moderate']);
-// Same standard, different reason: these two gate OPERATOR-ONLY functions
-// (migrate_workspace_tasks / verify_task_migration, Phase 3 §3.9). No client
-// control invokes them — they are run once from the SQL editor during the
-// rollout — so an admin toggling them would observe nothing in the app, and
-// mislabelling them "enforced" would suggest the switch does something it
-// doesn't. Note admin.audit_log in particular: its LABEL promises audit-log
-// visibility, which no screen implements yet.
+const DEAD_TABLE_RLS = new Set(['comments.read', 'comments.write', 'comments.moderate']);
+// Same standard, different reason: these gate OPERATOR-ONLY surfaces. No
+// client control invokes them, so an admin toggling them would observe
+// nothing in the app, and marking them "enforced" would suggest the switch
+// does something it doesn't.
+//   admin.restore    — migrate/archive/restore, run from the SQL editor.
+//   admin.audit_log  — the same functions, plus (Phase 3) the SELECT policy on
+//                      activity_log. That policy is live and does real work,
+//                      but no SCREEN reads the audit log, so nothing a user
+//                      can hit changes when it is toggled. It becomes enforced
+//                      the day an audit-log screen ships.
 const OPERATOR_ONLY_RPC = new Set(['admin.restore', 'admin.audit_log']);
 for (const k of RLS_ENFORCED) {
   if (DEAD_TABLE_RLS.has(k) || OPERATOR_ONLY_RPC.has(k)) continue;
