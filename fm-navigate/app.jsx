@@ -450,17 +450,11 @@ function App() {
   // status). Descriptive fields are editable only on tasks they own or
   // created; owner/priority/delete stay with governance/lead roles. The UI
   // flags passed to screens only shape rendering — these checks decide.
-  // Legacy tasks recorded their creator only in the activity feed; normalized
-  // tasks carry reporterId. Prefer the column, fall back to the feed, so both
-  // shapes answer "who raised this?" the same way.
-  const taskCreator = (t) => {
-    if (t && t.reporterId) return t.reporterId;
-    const c = ((t && t.activity) || []).find(a => a.type === 'created');
-    return c ? c.userId : null;
-  };
-  const isMyTask = useCallbackA(
-    (t) => !!t && (window.taskScope.isMine(t, scopeCtx) || taskCreator(t) === currentUser),
-    [scopeCtx, currentUser]);
+  // "Mine" is the ASSIGNEE relationship and nothing else — the same answer the
+  // database gives (ADR 0007). Having raised a task used to count here too;
+  // it no longer does, because that let a standard user keep read and execute
+  // rights over work that had been handed to somebody else.
+  const isMyTask = useCallbackA((t) => window.taskScope.isMine(t, scopeCtx), [scopeCtx]);
   // One choke point, mirroring protect_task_governance() in the database. The
   // DB re-decides every one of these; this only shapes what we render.
   const fieldAllowed = useCallbackA(

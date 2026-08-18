@@ -365,16 +365,24 @@
      }
      Mirrors supabase/schema.sql §3.3 exactly. UI shaping only. */
 
+  /* "Is this task mine?" — ASSIGNEE ONLY, mirroring task_read_ok /
+     task_write_ok in the schema (ADR 0007).
+
+     Reporter is deliberately absent. Who raised a task says where it came
+     from, not who it belongs to now; once it is assigned to somebody else it
+     is their work, and continued sight of it is what tasks.view_all is for.
+     `ownerId` is checked alongside assigneeId only because it is the legacy
+     alias OF the assignee, not a third relationship. */
   function relatedToMe(task, ctx) {
     if (!task || !ctx) return false;
     var me = ctx.userId;
-    return !!me && (task.assigneeId === me || task.ownerId === me || task.reporterId === me);
+    return !!me && (task.assigneeId === me || (task.assigneeId == null && task.ownerId === me));
   }
 
   var taskScope = {
-    // "is this task mine?" — assignee OR reporter, the two object relationships
-    // that make a task yours. Management scope is deliberately NOT folded in
-    // here: seeing everything is not the same as owning something.
+    // "is this task mine?" — the assignee, and only the assignee. Management
+    // scope is deliberately NOT folded in here either: seeing everything is
+    // not the same as owning something.
     isMine: relatedToMe,
 
     canRead: function (task, ctx) {
@@ -404,14 +412,16 @@
     // filtered these rows, so this is presentation; in the legacy workspace
     // fallback it is the ONLY scoping there is — which is exactly why the
     // fallback is not the secure path and normalisation exists.
+    // Same rule as the policies: assigned to me, or management scope.
     visible: function (tasks, ctx) {
       if (!ctx) return [];
       if (ctx.canViewAll) return tasks || [];
       return (tasks || []).filter(function (t) { return relatedToMe(t, ctx); });
     },
-    // Assigned to me — the backbone of every personal widget. Reported-by-me
-    // tasks are deliberately NOT included: delegating work should take it off
-    // your own list while keeping it visible to you elsewhere.
+    // Assigned to me — the backbone of every personal widget, and the same
+    // relationship the database uses. Reported-by-me tasks are not included,
+    // here or anywhere: delegating work takes it off your list entirely
+    // unless you also hold management scope.
     mine: function (tasks, ctx) {
       if (!ctx || !ctx.userId) return [];
       return (tasks || []).filter(function (t) {

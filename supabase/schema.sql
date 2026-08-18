@@ -1196,27 +1196,50 @@ create table if not exists public.task_activity (
 -- there is no `true` branch anywhere.
 --
 --   READ  = in my organization AND I may read tasks at all
---           AND (it is assigned to me OR I raised it OR I am management)
+--           AND (it is assigned to me OR I am management)
 --   WRITE = in my organization AND I may work tasks at all
---           AND (it is assigned to me OR I raised it OR I am management)
+--           AND (it is assigned to me OR I am management)
+--
+-- REPORTER IS NOT IN THESE PREDICATES (ADR 0007). Who raised a task is
+-- metadata about its origin, not a standing grant over it. If a manager
+-- creates work and assigns it to somebody else — or if you raise something
+-- that is then reassigned away from you — the task is now that person's, and
+-- continued sight of it is exactly what tasks.view_all is for. Letting
+-- reporter imply access would mean a standard user keeps read AND execute
+-- rights over another person's work indefinitely, which is the behaviour this
+-- whole phase exists to prevent.
+--
+-- A future "tasks I requested" view would be its own explicit capability
+-- (tasks.view_reported) or an object-role/sharing mechanism. Not built now.
 --
 -- Column-level rules (who may change assignee / priority / organization) are
 -- NOT here: a WITH CHECK cannot see OLD, so they live in the BEFORE UPDATE
 -- trigger in §3.5 — the same pattern as protect_profile_privileges.
-create or replace function public.task_read_ok(p_org uuid, p_assignee uuid, p_reporter uuid)
+
+-- Re-run safety: the predicates used to take a third (reporter) argument, and
+-- Postgres records a dependency from every SQL function and policy that calls
+-- them. Drop the old signature — and whatever still references it — before
+-- creating the new one; everything dropped here is recreated below in this
+-- same file, in order.
+drop policy if exists "tasks read (own or management)" on public.tasks;
+drop policy if exists "tasks update (assignee, reporter or management)" on public.tasks;
+drop policy if exists "tasks update (assignee or management)" on public.tasks;
+drop policy if exists "tasks delete (governance)" on public.tasks;
+drop function if exists public.task_read_ok(uuid, uuid, uuid) cascade;
+drop function if exists public.task_write_ok(uuid, uuid, uuid) cascade;
+
+create or replace function public.task_read_ok(p_org uuid, p_assignee uuid)
 returns boolean language sql stable as $$
   select public.is_org_member(p_org)
      and public.authorize('tasks.read')
-     and (p_assignee = auth.uid() or p_reporter = auth.uid()
-          or public.authorize('tasks.view_all'))
+     and (p_assignee = auth.uid() or public.authorize('tasks.view_all'))
 $$;
 
-create or replace function public.task_write_ok(p_org uuid, p_assignee uuid, p_reporter uuid)
+create or replace function public.task_write_ok(p_org uuid, p_assignee uuid)
 returns boolean language sql stable as $$
   select public.is_org_member(p_org)
      and public.authorize('tasks.execute')
-     and (p_assignee = auth.uid() or p_reporter = auth.uid()
-          or public.authorize('tasks.view_all'))
+     and (p_assignee = auth.uid() or public.authorize('tasks.view_all'))
 $$;
 
 -- Child-row helpers: a child row is exactly as visible/writable as its parent
@@ -1226,7 +1249,7 @@ returns boolean language sql stable as $$
   select exists (
     select 1 from public.tasks t
      where t.id = p_task
-       and public.task_read_ok(t.organization_id, t.assignee_id, t.reporter_id)
+       and public.task_read_ok(t.organization_id, t.assignee_id)
   )
 $$;
 
@@ -1235,7 +1258,7 @@ returns boolean language sql stable as $$
   select exists (
     select 1 from public.tasks t
      where t.id = p_task
-       and public.task_write_ok(t.organization_id, t.assignee_id, t.reporter_id)
+       and public.task_write_ok(t.organization_id, t.assignee_id)
   )
 $$;
 
@@ -1255,12 +1278,16 @@ grant select, insert, update, delete on
 drop policy if exists "tasks read (own or management)" on public.tasks;
 create policy "tasks read (own or management)"
   on public.tasks for select to authenticated
-  using (public.task_read_ok(organization_id, assignee_id, reporter_id));
+  using (public.task_read_ok(organization_id, assignee_id));
 
 -- CREATE. A standard user may only ever create a task for THEMSELVES:
 -- reporter and assignee both forced to auth.uid(). Creating for someone else
 -- is the tasks.assign capability. reporter_id/created_by are pinned to the
 -- caller, so a forged payload is REJECTED (not silently corrected).
+--
+-- Being the reporter grants nothing on its own (§3.3): a manager who creates
+-- work for someone else can still see it because they hold tasks.view_all,
+-- not because they raised it.
 drop policy if exists "tasks insert (self or assigner)" on public.tasks;
 create policy "tasks insert (self or assigner)"
   on public.tasks for insert to authenticated
@@ -1275,16 +1302,15 @@ create policy "tasks insert (self or assigner)"
 -- UPDATE. Both USING and WITH CHECK use the write predicate, so a task can
 -- never be edited out of the caller's own scope (e.g. reassigning it away and
 -- keeping the edit) — the post-image must still be writable by the caller.
-drop policy if exists "tasks update (assignee, reporter or management)" on public.tasks;
-create policy "tasks update (assignee, reporter or management)"
+create policy "tasks update (assignee or management)"
   on public.tasks for update to authenticated
-  using (public.task_write_ok(organization_id, assignee_id, reporter_id))
-  with check (public.task_write_ok(organization_id, assignee_id, reporter_id));
+  using (public.task_write_ok(organization_id, assignee_id))
+  with check (public.task_write_ok(organization_id, assignee_id));
 
 drop policy if exists "tasks delete (governance)" on public.tasks;
 create policy "tasks delete (governance)"
   on public.tasks for delete to authenticated
-  using (public.task_read_ok(organization_id, assignee_id, reporter_id)
+  using (public.task_read_ok(organization_id, assignee_id)
          and public.authorize('tasks.delete'));
 
 -- Children: read with the parent, write with the parent.
@@ -1809,7 +1835,10 @@ begin
   if exists (select 1 from public.tasks where id = v_task) then
     return public.parent_task_readable(v_task);
   end if;
-  return public.authorize('deliverables.read');
+  if exists (select 1 from public.tasks) then          -- migration has run
+    return public.authorize('tasks.view_all');
+  end if;
+  return public.authorize('deliverables.read');        -- pre-migration only
 end $$;
 
 create or replace function public.attachment_writable(p_name text)
@@ -1818,6 +1847,9 @@ declare v_task text := public.attachment_task_id(p_name);
 begin
   if exists (select 1 from public.tasks where id = v_task) then
     return public.parent_task_writable(v_task);
+  end if;
+  if exists (select 1 from public.tasks) then
+    return public.authorize('tasks.view_all') and public.authorize('tasks.execute');
   end if;
   return public.authorize('deliverables.read') and public.authorize('tasks.execute');
 end $$;
