@@ -98,7 +98,14 @@ try {
   r = psql(['-c', 'create database fmtest']);
   if (r.status !== 0) { console.error('createdb failed\n', r.stderr); process.exit(1); }
 
-  const files = ['supabase/tests/harness.sql', 'supabase/schema.sql', 'supabase/tests/rls-tests.sql'];
+  // schema.sql is loaded TWICE on purpose. The runbook's first rollout step is
+  // "apply supabase/schema.sql (idempotent)" (TDD §20, ADR 0008), so a second
+  // apply must be a clean no-op. It was not: a policy rename dropped only its
+  // old name, so the re-apply aborted partway and left the whole of §3
+  // unapplied. ON_ERROR_STOP=1 turns any regression of that into a failure
+  // here, and every assertion below then runs against a twice-applied schema.
+  const files = ['supabase/tests/harness.sql', 'supabase/schema.sql',
+                 'supabase/schema.sql', 'supabase/tests/rls-tests.sql'];
   const load = psql(['-d', 'fmtest', '-v', 'ON_ERROR_STOP=1', '-q',
     ...files.flatMap(f => ['-f', join(root, f)])]);
 

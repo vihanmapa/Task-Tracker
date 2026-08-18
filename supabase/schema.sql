@@ -1118,7 +1118,14 @@ grant select on public.organizations, public.organization_members to authenticat
 -- Profile directory is now organization-scoped (was: every signed-in user
 -- could read every profile). Self is always readable so an account mid-signup
 -- can load its own row before the membership row lands.
+-- Both names are dropped: the Phase-1 one because §1 recreates it every time
+-- this file is applied, and the new one because `schema.sql` is re-runnable by
+-- design (TDD §20 step 1, ADR 0008) and `create policy` has no `if not exists`.
+-- Dropping only the old name made the second apply abort here, which left the
+-- whole of §3 below unapplied and — until this statement was reached — §1's
+-- permissive `using (true)` profile read live alongside the scoped one.
 drop policy if exists "profiles read (authenticated)" on public.profiles;
+drop policy if exists "profiles read (same organization)" on public.profiles;
 create policy "profiles read (same organization)"
   on public.profiles for select to authenticated
   using (id = auth.uid() or public.shares_org_with(id));

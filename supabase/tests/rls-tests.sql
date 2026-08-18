@@ -812,6 +812,37 @@ select public.test_sign_in('11111111-1111-1111-1111-111111111111');
 select tests.expect_rows('migration: the assignee sees their migrated task',
   $q$select id from public.tasks where id = 'T-501'$q$, 1);
 
+-- ============================================================
+-- Re-apply safety (ADR 0008 — schema.sql is re-runnable by design)
+-- ------------------------------------------------------------
+-- verify-rls.mjs loads schema.sql twice before this file runs, so reaching
+-- here at all already proves the second apply did not abort. What follows
+-- proves the second apply did not RESURRECT anything either: §1 recreates the
+-- Phase-1 `using (true)` profile read on every apply, and it is the later
+-- §3 statement that must always be the one left standing. Postgres ORs
+-- permissive policies together, so a surviving `using (true)` would silently
+-- reopen the whole directory across tenants.
+select tests.check('re-apply: exactly one client-facing profiles SELECT policy',
+  (select count(*) from pg_policies
+    where schemaname = 'public' and tablename = 'profiles' and cmd = 'SELECT'
+      and roles::text[] @> array['authenticated']) = 1);
+select tests.check('re-apply: no permissive profiles SELECT policy survived',
+  not exists (select 1 from pg_policies
+    where schemaname = 'public' and tablename = 'profiles' and cmd = 'SELECT'
+      and roles::text[] @> array['authenticated'] and qual = 'true'));
+select tests.check('re-apply: the surviving profiles policy is the org-scoped one',
+  exists (select 1 from pg_policies
+    where schemaname = 'public' and tablename = 'profiles' and cmd = 'SELECT'
+      and policyname = 'profiles read (same organization)'));
+-- And the guards that keep a re-apply from changing data: the back-fill
+-- markers mean a second apply never sweeps a public account into Evbex.
+select tests.check('re-apply: both one-shot back-fill markers are recorded',
+  (select count(*) from public.schema_markers
+    where key in ('phase3_backfill_primary_org', 'phase3_personal_workspaces')) = 2);
+select tests.check('re-apply: no account has two personal workspaces',
+  not exists (select owner_user_id from public.organizations
+               where kind = 'personal' group by owner_user_id having count(*) > 1));
+
 reset role;
 select public.test_sign_out();
 
