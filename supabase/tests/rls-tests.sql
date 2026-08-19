@@ -844,6 +844,115 @@ select tests.expect_rows('migration: the assignee sees their migrated task',
   $q$select id from public.tasks where id = 'T-501'$q$, 1);
 
 -- ============================================================
+-- ============================================================
+-- UAT-SEC-03 — the Settings "Load demo data" / "Clear all tasks" controls
+-- ------------------------------------------------------------
+-- Live UAT found both controls VISIBLE to a member (Devni). They are now
+-- gated on `canEdit` (admin.workspace) in app.jsx, but a UI gate is not a
+-- boundary: a tampered client, or a raw PostgREST call, reaches the same
+-- routes. These assertions pin the SERVER side of both controls.
+--
+-- What the controls actually emit (fm-navigate/app.jsx:893-897 →
+-- task-store.js plan()/persist() → data-service.js):
+--   Load demo  → insertTaskRow() per seed task  (+ deletes for the replaced set)
+--                and a workspace document write of SEED_DELIVERABLES
+--   Clear all  → deleteTaskRow() per task, and a document write emptying
+--                deliverables / weeks / kpiScores
+-- The seed rows carry ownerId 'vihan' — not a uuid — so insertRow() leaves
+-- assignee_id NULL and records legacy_owner, which is exactly why the INSERT
+-- policy refuses them for a member (no tasks.assign).
+--
+-- Alice is a plain member: tasks.create + tasks.execute, but no tasks.delete,
+-- no tasks.assign, no admin.workspace, no deliverables.read.
+select public.test_sign_in('11111111-1111-1111-1111-111111111111');
+select tests.check('UAT-SEC-03: persona is a member with no delete/assign/govern rights',
+  public.jwt_role() = 'member'
+  and not public.authorize('tasks.delete') and not public.authorize('tasks.assign')
+  and not public.authorize('admin.workspace') and not public.authorize('deliverables.read'));
+
+-- ---- "Load demo data" ----
+select tests.expect_denied('UAT-SEC-03 Load demo: seed row (assignee NULL, legacy_owner) refused', $q$
+  insert into public.tasks (id, organization_id, title, reporter_id, assignee_id, created_by, legacy_owner)
+  values ('T-SEC03-SEED', public.default_org_id(), 'demo seed', auth.uid(), null, auth.uid(), 'vihan')
+$q$);
+select tests.expect_denied('UAT-SEC-03 Load demo: seed row assigned to another member refused', $q$
+  insert into public.tasks (id, organization_id, title, reporter_id, assignee_id, created_by)
+  values ('T-SEC03-OTHER', public.default_org_id(), 'demo seed',
+          auth.uid(), '22222222-2222-2222-2222-222222222222', auth.uid())
+$q$);
+select tests.expect_denied('UAT-SEC-03 Load demo: document overwrite of shared deliverables refused', $q$
+  update public.workspace
+     set tasks = jsonb_set(tasks, '{data,deliverables}', '[{"id":"DEMO"}]'::jsonb)
+   where id = 'main'
+$q$);
+
+-- ---- "Clear all tasks" ----
+select tests.expect_denied('UAT-SEC-03 Clear all: bulk delete of every organisation task refused',
+  $q$delete from public.tasks$q$);
+select tests.expect_denied('UAT-SEC-03 Clear all: deleting another member''s task refused',
+  $q$delete from public.tasks where assignee_id <> auth.uid()$q$);
+select tests.expect_denied('UAT-SEC-03 Clear all: deleting even their OWN task refused (no tasks.delete)',
+  $q$delete from public.tasks where assignee_id = auth.uid()$q$);
+-- Scoped to OTHER people's child rows on purpose: removing your own progress
+-- entry on your own task is intended behaviour with a UI affordance
+-- (app.jsx deleteProgress; policy "task_progress remove" allows user_id = self).
+-- What "Clear all" must never reach is somebody else's.
+select tests.expect_denied('UAT-SEC-03 Clear all: bulk delete of ANOTHER user''s child rows refused',
+  $q$delete from public.task_progress where user_id <> auth.uid()$q$);
+select tests.expect_denied('UAT-SEC-03 Clear all: bulk delete of ANOTHER user''s comments refused',
+  $q$delete from public.task_comments where user_id <> auth.uid()$q$);
+select tests.expect_denied('UAT-SEC-03 Clear all: emptying the document''s governance content refused', $q$
+  update public.workspace set tasks = jsonb_set(jsonb_set(tasks,
+      '{data,deliverables}', '[]'::jsonb), '{data,weeks}', '[]'::jsonb)
+   where id = 'main'
+$q$);
+-- TRUNCATE is never governed by RLS — the only thing between a member and the
+-- whole table is the GRANT, and schema.sql deliberately grants exactly
+-- select/insert/update/delete (§3.2). This has to be asserted rather than
+-- attempted, because TRUNCATE leaves row_count at 0 and so *looks* denied.
+--
+-- The harness is deliberately more permissive than a Supabase project here:
+-- it does `alter default privileges … grant all`, which hands `authenticated`
+-- TRUNCATE on everything it creates. Normalise the task tables to what
+-- schema.sql actually grants, then assert — otherwise this measures the
+-- harness, not the product.
+reset role;
+revoke truncate, references, trigger on
+  public.tasks, public.task_checklist_items, public.task_progress,
+  public.task_resources, public.task_comments, public.task_activity, public.workspace
+  from authenticated, anon;
+set role authenticated;
+select tests.check('UAT-SEC-03: TRUNCATE is not granted to authenticated on any task table',
+  not exists (select 1 from information_schema.role_table_grants
+               where grantee = 'authenticated' and privilege_type = 'TRUNCATE'
+                 and table_name in ('tasks','task_checklist_items','task_progress',
+                                    'task_resources','task_comments','task_activity','workspace')),
+  'still granted on: ' || coalesce((select string_agg(distinct table_name, ',')
+                            from information_schema.role_table_grants
+                           where grantee='authenticated' and privilege_type='TRUNCATE'
+                             and table_name in ('tasks','task_checklist_items','task_progress',
+                                    'task_resources','task_comments','task_activity','workspace')), 'none'));
+select tests.expect_denied('UAT-SEC-03: TRUNCATE tasks is refused outright',
+  $q$truncate public.tasks cascade$q$);
+-- The bulk RPCs behind any "reset the workspace" idea are owner-gated.
+select tests.expect_denied('UAT-SEC-03: member cannot run migrate_workspace_tasks',
+  $q$select * from public.migrate_workspace_tasks(true)$q$);
+select tests.expect_denied('UAT-SEC-03: member cannot run restore_workspace_tasks',
+  $q$select public.restore_workspace_tasks(true)$q$);
+
+-- Nothing above may have changed shared data.
+select public.test_sign_in('44444444-4444-4444-4444-444444444444');
+select tests.check('UAT-SEC-03: no demo row was written to the organisation',
+  (select count(*) from public.tasks where id like 'T-SEC03-%') = 0);
+
+-- Ordinary self-service is untouched: a member may still create their own work.
+select public.test_sign_in('11111111-1111-1111-1111-111111111111');
+select tests.expect_allowed('UAT-SEC-03: a member may still create a self-assigned task', $q$
+  insert into public.tasks (id, organization_id, title, reporter_id, assignee_id, created_by)
+  values ('T-SEC03-OK', public.default_org_id(), 'my own work', auth.uid(), auth.uid(), auth.uid())
+$q$);
+
+-- ============================================================
 -- Owner protection survives multi-tenancy
 -- ------------------------------------------------------------
 -- protect_profile_privileges refuses to demote the last active owner by
