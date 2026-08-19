@@ -1306,14 +1306,25 @@ function Settings({ tweaks, setTweak, onLoadDemo, onClearAll, onExport, onImport
                 onChange={e => { const f = e.target.files && e.target.files[0]; if (f) onImport(f); e.target.value = ''; }} />
             </div>
           </div>
+          {/* Both of these rewrite the WHOLE workspace, so they are gated on the
+              same capability as Import above — `canEdit` = admin.workspace, a
+              capability, never a role name (UAT-SEC-03). The database refuses a
+              member either way: the seed rows land unassigned so the tasks INSERT
+              policy rejects them, deletes need tasks.delete, and the document
+              write needs deliverables.read — all proven in rls-tests.sql §UAT-SEC-03.
+              This gate removes the misleading control; it is not the boundary. */}
+          {canEdit && (
           <div className="row between center" style={{ padding: '12px 0', borderBottom: '1px solid var(--border)' }}>
             <div><div style={{ fontWeight: 600, fontSize: 13.5 }}>Load demo data</div><div className="muted" style={{ fontSize: 12 }}>Replace current tasks with the sample FM Navigate set.</div></div>
             <button className="btn btn-ghost" onClick={onLoadDemo}><I.refresh size={14} /> Load demo</button>
           </div>
+          )}
+          {canEdit && (
           <div className="row between center" style={{ paddingTop: 12 }}>
             <div><div style={{ fontWeight: 600, fontSize: 13.5 }}>Clear all tasks</div><div className="muted" style={{ fontSize: 12 }}>Wipe everything and start from a blank slate.</div></div>
             <button className="btn btn-ghost" onClick={onClearAll} style={{ color: 'var(--st-blocked)', borderColor: 'var(--st-blocked)' }}><I.x size={14} /> Clear all</button>
           </div>
+          )}
         </div>
 
         {canEdit && legacyAttachmentCount > 0 && (

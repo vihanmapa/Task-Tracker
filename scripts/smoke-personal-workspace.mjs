@@ -279,6 +279,18 @@ console.log('\nmember — personal workspace');
   const modal = await page.textContent('.modal, .card');
   check(!/All assignees/.test(list), 'no assignee filter on the task list');
   check(typeof modal === 'string', 'the composer opens');
+
+  // UAT-SEC-03: Settings must not offer a member the two workspace-wide
+  // destructive controls. The database refuses them either way (proven in
+  // rls-tests.sql §UAT-SEC-03) — this asserts we stop *showing* a control
+  // that could only ever fail, which is what live UAT flagged.
+  await page.keyboard.press('Escape');
+  await page.click('.nav-item:has-text("Settings")');
+  await page.waitForTimeout(300);
+  const settings = await page.textContent('.main');
+  check(!/Load demo data/i.test(settings), 'UAT-SEC-03: no "Load demo data" control for a member');
+  check(!/Clear all tasks/i.test(settings), 'UAT-SEC-03: no "Clear all tasks" control for a member');
+  check(/Backup workspace/i.test(settings), 'Settings still renders — Export remains available');
   await browser.close();
 }
 
@@ -321,6 +333,15 @@ console.log('\nproduct manager — management oversight');
   check(/Mia Member's tasks/.test(drill), 'drilling into a person filters the task list to them');
   check(drill.includes('Write my status report'), "the drill-down shows that person's work");
   check(!drill.includes('Somebody else private task'), 'the drill-down shows only that person');
+
+  // UAT-SEC-03, the other half: the gate is a CAPABILITY, not a blanket
+  // removal. A user holding admin.workspace still gets both controls, so the
+  // member case above is proving authorization rather than a deleted feature.
+  await page.click('.nav-item:has-text("Settings")');
+  await page.waitForTimeout(300);
+  const mgrSettings = await page.textContent('.main');
+  check(/Load demo data/i.test(mgrSettings), 'UAT-SEC-03: admin.workspace holder still sees "Load demo data"');
+  check(/Clear all tasks/i.test(mgrSettings), 'UAT-SEC-03: admin.workspace holder still sees "Clear all tasks"');
 
   await browser.close();
 }
