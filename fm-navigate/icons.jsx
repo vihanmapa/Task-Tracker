@@ -34,6 +34,7 @@ const I = {
   unlock:   (p) => <Ico {...p}><rect x="4.5" y="11" width="15" height="10" rx="2"/><path d="M8 11V7.5a4 4 0 017.6-1.8"/></Ico>,
   target:   (p) => <Ico {...p}><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none"/></Ico>,
   user:     (p) => <Ico {...p}><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-6 8-6s8 2 8 6"/></Ico>,
+  users:    (p) => <Ico {...p}><circle cx="9" cy="8" r="3.4"/><path d="M2.5 20c0-3.6 3-5.4 6.5-5.4s6.5 1.8 6.5 5.4"/><path d="M16.5 5.2a3.4 3.4 0 0 1 0 6.4"/><path d="M18 14.9c2.2.6 3.5 2.2 3.5 5.1"/></Ico>,
   msg:      (p) => <Ico {...p}><path d="M21 12a8 8 0 01-11.5 7.2L4 20l1-4.8A8 8 0 1121 12z"/></Ico>,
   sun:      (p) => <Ico {...p}><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M21.5 12h-2M4.5 12h-2M18.5 5.5l-1.4 1.4M6.9 17.1l-1.4 1.4M18.5 18.5l-1.4-1.4M6.9 6.9L5.5 5.5"/></Ico>,
   moon:     (p) => <Ico {...p}><path d="M20 14.5A8 8 0 119.5 4 6.5 6.5 0 0020 14.5z"/></Ico>,

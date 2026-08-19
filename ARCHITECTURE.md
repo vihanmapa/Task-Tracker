@@ -1,6 +1,8 @@
 # Architecture
 
-FM Navigate Execution Hub — a single-user Product Management workspace.
+FM Navigate Execution Hub — a multi-user work-management system: every person
+has their own task workspace, and management roles can oversee and assign
+across the organization.
 Static HTML + in-browser React (Babel standalone, no build step), with Supabase
 as a shared persistence + realtime backend. This document captures the
 architectural decisions behind persistence so they don't have to be
@@ -8,9 +10,19 @@ rediscovered later.
 
 ---
 
+> **Phase 3 (2026-08) changed one thing about the model below: TASKS are now
+> normalized into real tables** so Postgres can enforce per-user privacy —
+> see [ADR 0006](docs/decisions/0006-normalize-tasks-for-personal-workspaces.md)
+> and `docs/TDD-PERSONAL-TASK-WORKSPACES.md`. Everything else in this document
+> still holds verbatim for deliverables, weekly plans and KPI scores, which
+> remain in the workspace document. Read "one workspace document" below as
+> "one workspace document, plus the task tables".
+
 ## Architecture principles
 
-1. **One workspace document.** All app data is a single versioned JSON document.
+1. **One workspace document.** All app data is a single versioned JSON document
+   — except tasks, which are relational (ADR 0006). A document cannot express
+   "this row belongs to this person", and per-user privacy needs exactly that.
 2. **Tasks are the single source of truth.** Other features reference task ids;
    they never copy task data.
 3. **Persistence is centralized in `data-service.js`.** Feature modules work
@@ -202,17 +214,19 @@ fundamental requirement change (see below):
 
 ## When to revisit this
 
-This is a stable foundation for a single-user hub. Revisit only on a
-**fundamental** change:
+Two of the conditions below **have now fired** — concurrent multi-user editing
+and per-object permissions — and they are what produced ADR 0006. Tasks were
+normalized; nothing else was, because nothing else met the bar.
 
-- Multiple users editing the same workspace concurrently.
+- ~~Multiple users editing the same workspace concurrently.~~ → tasks, 2026-08
 - The document grows too large to load whole.
 - Incremental / partial loading becomes necessary.
-- Per-feature permissions are introduced.
+- ~~Per-feature permissions are introduced.~~ → per-TASK permissions, 2026-08
 
-Any of these would justify entity normalization, indexed/partial loads,
-optimistic updates, or offline sync. Until then, build features on top; don't
-refactor the persistence layer.
+The remaining two are still open questions. For deliverables, weekly plans and
+KPI scores the document model is unchanged and still the right one: build
+features on top; don't refactor the persistence layer without a reason of the
+same weight.
 
 ---
 
@@ -227,3 +241,6 @@ refactor the persistence layer.
 | 2026-06 | Keep Supabase row id `main`           | Renaming needs a new row, but there's no INSERT policy — would reintroduce manual seeding. |
 | 2026-06 | Export / import workspace             | Near-free backup, restore, environment migration, and debugging from one document. |
 | 2026-06 | Weekly workspace references task ids  | Tasks stay the single source of truth; no duplicated task data. |
+| 2026-08 | Normalize TASKS into tables (ADR 0006) | A jsonb document has no rows, so Postgres could not enforce "this task is not yours". Per-user privacy and management scope are now RLS, not client filtering. |
+| 2026-08 | Deliverables/weeks/KPI stay in the document | Organization-wide governance content with no per-user privacy requirement — normalising them would cost a migration and buy nothing. |
+| 2026-08 | Two task backends, chosen at runtime  | Probing for the tables removes the instant where client and schema must match, and it is also the rollback. |

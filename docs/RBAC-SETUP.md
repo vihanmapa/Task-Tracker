@@ -229,3 +229,162 @@ safe. Parity between the two is asserted by `npm run verify:rbac`.
    re-login) and any in-flight save is rejected by RLS. Toggle back.
 4. `activity_log` shows the `permission_revoked` / `permission_granted` pair.
 5. Reset to template on a customised role restores the seeded set.
+
+---
+
+# Phase 3 — Personal task workspaces (rollout runbook)
+
+Design: `docs/TDD-PERSONAL-TASK-WORKSPACES.md`. Decision: ADR 0006.
+Everything below is in the same idempotent `supabase/schema.sql`.
+
+**Nothing here happens automatically.** The migration is an explicit, operator-
+run function, dry-run by default, and it never modifies the workspace document.
+
+## What changes
+
+| | before | after |
+|---|---|---|
+| where tasks live | `workspace('main').tasks` jsonb | `public.tasks` + 5 child tables |
+| who can see a task | anyone signed in | the **assignee**, or `tasks.view_all` (ADR 0007) |
+| who can assign | app-side check only | `tasks.assign`, enforced by trigger |
+| tenant | implicit | `organization_id` on every task, checked on every operation |
+| signup | owner creates the account in Supabase | anyone can self-register → `member` **+ their own personal workspace, and no Evbex membership** (ADR 0008) |
+| joining Evbex | implicit | `add_organization_member()`, administrator-only |
+| the document's task copy | shared, readable | archived to an admin-only table (ADR 0009) |
+
+## Steps
+
+1. **Apply the SQL.** Supabase → SQL Editor → run `supabase/schema.sql`.
+   Re-running is safe. This adds Phase 3 alongside Phases 1–2; nothing is dropped.
+
+2. **Check the seed.** Expect 13 roles, 42 permissions, 14 enforced:
+   ```sql
+   select (select count(*) from roles) roles,
+          (select count(*) from permissions) perms,
+          (select count(*) from permissions where enforced) enforced,
+          (select count(*) from role_permissions) grants;
+   ```
+
+3. **Map the legacy owner keys** to real accounts. The pre-normalisation
+   document identifies people by workspace key (`vihan`, `richard`, `isuru`),
+   not by uuid. Anything you don't map migrates **unassigned** — never to the
+   wrong person — and keeps its original key in `tasks.legacy_owner`.
+   ```sql
+   insert into public.legacy_user_map (legacy_key, user_id)
+   select 'vihan', id from public.profiles where email = 'REPLACE@example.com'
+   on conflict (legacy_key) do update set user_id = excluded.user_id;
+   -- repeat for 'richard', 'isuru', and any 'email:someone@example.com' keys
+   select legacy_key, user_id from public.legacy_user_map;   -- confirm
+   ```
+
+4. **BACK UP THE WORKSPACE.** Settings → Data → Backup workspace → **Export**.
+   Required, not optional. Keep the file until step 8 passes.
+
+5. **Dry run** (signed in as an owner — the function refuses anyone else):
+   ```sql
+   select * from public.migrate_workspace_tasks(false);
+   ```
+   Read `document_tasks` (how many it found) and `unmapped_owners` (how many
+   would land unassigned). If `unmapped_owners` surprises you, go back to step 3.
+
+6. **Commit:**
+   ```sql
+   select * from public.migrate_workspace_tasks(true);
+   ```
+   Idempotent — every insert is keyed on the original task id, so a partial run
+   is safely resumable and a second run writes nothing.
+
+7. **Verify:**
+   ```sql
+   select * from public.verify_task_migration();
+   ```
+   Every row's `matches` must be `true`. `unmapped_owners` is informational —
+   those tasks appear in the management dashboard's **Unassigned** widget.
+
+8. **Archive the document's task copy — do this now, not later.**
+   ```sql
+   select public.archive_workspace_tasks(false);   -- dry run
+   select public.archive_workspace_tasks(true);    -- commit
+   ```
+   This MOVES the legacy task payload into an administrator-only archive table
+   and empties the document's task array. Nothing is deleted;
+   `restore_workspace_tasks(true)` puts it back.
+
+   Why immediately: until this runs, the document still contains everybody's
+   tasks, so its policy makes it **management-only** — which is safe but takes
+   Deliverables / This Week / KPI away from every other role. Archiving both
+   closes the last cross-user read path and gives those screens back.
+   The function refuses to run unless step 7 is green.
+
+9. **Deploy the client.** It probes for `public.tasks` and switches to the
+   normalized path on its own; no coordinated cutover.
+
+## UAT — sign-off checklist
+
+Run these against the live deployment **after** step 9, in order. Each one is a
+behaviour a real person can observe; none of them is "check the code".
+
+| # | Check | Expected |
+|---|---|---|
+| 1 | Sign in as an existing management user (Owner / PM) | sees **all** Evbex tasks |
+| 2 | Sign in as a normal member | sees **only** tasks assigned to them |
+| 3 | Management reassigns one of that member's tasks to someone else | it disappears from the previous assignee's list |
+| 4 | The previous assignee is still the task's reporter | they **cannot** retrieve it — not on any screen, not by direct URL |
+| 5 | Sign up a fresh public account | personal workspace only; **no** Evbex tasks, people, or governance screens |
+| 6 | Management creates a task and assigns it to another member | task appears on that member's list |
+| 7 | Standard member opens the task form | **no** assignee control at all |
+| 8 | Open an attachment on a task the signed-in user cannot see | refused (try the storage URL directly, not just the UI) |
+| 9 | After the archive step, a non-management role opens Deliverables / This Week | works, and the document carries no task data |
+| 10 | `select action, entity_id from activity_log order by created_at desc limit 10;` | `task_created`, `task_assigned`, `task_reassigned`, `task_status_changed` present |
+
+Checks 4 and 8 are the two most worth doing by hand: they are the ones a UI can
+appear to pass while the API still answers.
+
+### Walkthrough
+
+1. Sign out → **Create account** → sign up. You land in **your own** personal
+   workspace: *My Tasks*, no People/Deliverables/KPI/This Week in the nav — and
+   **no Evbex data of any kind**. Create a task; it lives in your workspace.
+   To make that account a colleague, an owner runs:
+   ```sql
+   select public.add_organization_member(public.default_org_id(), '<their uuid>');
+   ```
+2. Create a task. It has no assignee picker; you are both reporter and assignee.
+3. As a Product Manager: the dashboard shows *Work by person*, **People** is in
+   the nav, and the task form has an assignee picker. Create a task for someone
+   else and reassign it.
+4. Sign back in as the member: the delegated task is on their list; the other
+   member's tasks are not, on any screen or URL.
+5. Reassign one of their tasks away from them (as management). It disappears
+   from their list entirely — being its reporter does not keep it (ADR 0007).
+5. `select action, entity_id from activity_log order by created_at desc limit 10;`
+   → `task_created`, `task_assigned`, `task_reassigned`, `task_status_changed`.
+
+## Widening management scope later — no deployment
+
+Settings → Roles & Permissions → the role → grant **View all tasks in the
+organization** (`tasks.view_all`). That user's next request sees the whole
+organization and their dashboard switches to the management composition.
+Revoking narrows it back the same way. This is why management is a permission
+and not a role name or a job title.
+
+## Rollback
+
+- **Before step 8:** redeploy the previous client. The workspace document still
+  holds every task — the migration never touches it — so the legacy path is
+  intact and there is nothing to undo in the database.
+- **After step 8:** run `select public.restore_workspace_tasks(true);` to copy
+  the archived payload back into the document, then redeploy the previous
+  client. The archive is never deleted, so this stays available indefinitely.
+- Phase 1–2 objects are untouched in every case.
+
+## Verify commands
+
+```
+npm run verify          # everything below, in order
+npm run verify:rbac     # Phase-2 parity + account isolation (static)
+npm run verify:auth     # bootstrap race, scope mirror, write planner
+npm run verify:rls      # task authorization against a real Postgres
+npm run build           # the precompiled bundle
+npm run verify:ui       # personal vs management UX in headless Chromium
+```

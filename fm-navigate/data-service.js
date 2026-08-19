@@ -446,6 +446,40 @@
         .catch(function (e) { return { ok: false, error: String(e) }; });
     },
 
+    /* Self-registration. PRESERVES the existing authentication mechanism —
+       Supabase Auth, email + password, the same one signIn() uses; nothing is
+       converted to another factor.
+
+       The ONLY thing sent as user metadata is a display name. Role,
+       organization, status and every other privilege field are decided
+       server-side by handle_new_user() (supabase/schema.sql §3.7), which
+       hardcodes the least-privilege `member` role and the primary
+       organization and ignores metadata entirely for those. So a tampered
+       client posting {role:'owner'} gains nothing.
+
+       Resolves { ok, user, session, needsConfirmation }. When the project has
+       email confirmation switched on, Supabase returns a user but NO session:
+       the caller must then tell the user to confirm, not drop them into the
+       app. */
+    signUp: function (email, pw, name) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'Shared backend not configured.' });
+      return c.auth.signUp({
+        email: email,
+        password: pw,
+        options: { data: { name: name || '' } },
+      }).then(function (r) {
+        if (r.error) return { ok: false, error: r.error.message };
+        var session = r.data && r.data.session;
+        return {
+          ok: true,
+          user: r.data && r.data.user,
+          session: session || null,
+          needsConfirmation: !session,
+        };
+      }).catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
     signOut: function () {
       var c = client();
       if (!c) return Promise.resolve();
@@ -752,6 +786,175 @@
       return c.storage.from('task-attachments').upload(path, file, { upsert: true })
         .then(function (r) { return { ok: !r.error, path: path, error: r.error && r.error.message }; })
         .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    /* ---- Phase 3: normalized tasks (transport only) -------------------
+       These are the DUMB I/O half of the normalized task path: they move rows
+       in and out of Postgres and nothing else. The row<->task-object mapping,
+       the diffing and the write ordering live in task-store.js, which is pure
+       and unit-testable. RLS decides what comes back and what is accepted —
+       these methods never filter or authorize anything themselves.
+       See docs/TDD-PERSONAL-TASK-WORKSPACES.md §16. ------------------- */
+
+    // Child collections, whitelisted: a caller can never name an arbitrary
+    // table through this layer.
+    _childTable: {
+      checklist: 'task_checklist_items',
+      progress:  'task_progress',
+      resources: 'task_resources',
+      comments:  'task_comments',
+      activity:  'task_activity',
+    },
+
+    /* Is the normalized task schema present and readable? Decides which
+       backend the app uses for tasks, so a client build is safe to deploy
+       before, during or after the SQL — exactly like RBAC's matrix/fallback
+       split. An error (table missing, no grant) means "not available", never
+       "empty". */
+    detectTasksTable: function () {
+      var c = client();
+      if (!c) return Promise.resolve(false);
+      return c.from('tasks').select('id').limit(1)
+        .then(function (r) { return !r.error; })
+        .catch(function () { return false; });
+    },
+
+    /* The organization the user WORKS IN — where a new task is created.
+
+       Since signup stopped auto-joining anything (ADR 0008) everyone has at
+       least a personal workspace, and staff have that PLUS their real one. A
+       team organization always wins: an Evbex member creating a task means it
+       in Evbex, not in their private tracker. Someone with only a personal
+       workspace gets that, which is what makes "anyone can have their own task
+       tracker" work without membership anywhere.
+
+       Reads `organizations` rather than the membership rows because RLS
+       already scopes it to this user, and kind lives there. 'team' > 'personal'
+       lexically, so descending puts a real organization first. */
+    myOrganizationId: function () {
+      var c = client();
+      if (!c) return Promise.resolve(null);
+      return c.from('organizations').select('id,kind,created_at')
+        .order('kind', { ascending: false }).order('created_at', { ascending: true })
+        .limit(1).maybeSingle()
+        .then(function (r) { return (r.error || !r.data) ? null : r.data.id; })
+        .catch(function () { return null; });
+    },
+
+    // Members of the caller's organization(s) — RLS already excludes every
+    // other tenant, so this is the only list an assignee picker may show.
+    listOrgMembers: function () {
+      var c = client();
+      if (!c) return Promise.resolve([]);
+      return c.from('organization_members').select('user_id,organization_id')
+        .then(function (r) { return r.error ? [] : (r.data || []); })
+        .catch(function () { return []; });
+    },
+
+    /* Every task row the caller may see, plus its children. Six reads, not
+       N+1: the children are fetched wholesale and RLS scopes them to the same
+       tasks. Rejects nothing — resolves { ok:false } so a transient failure is
+       never mistaken for "this user has no tasks" (the mistake that once
+       wiped the workspace document — see loadWorkspace). */
+    loadTaskRows: function () {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      var kinds = ['checklist', 'progress', 'resources', 'comments', 'activity'];
+      var self = this;
+      var reads = [c.from('tasks').select('*').order('created_at', { ascending: false })]
+        .concat(kinds.map(function (k) { return c.from(self._childTable[k]).select('*'); }));
+      return Promise.all(reads).then(function (res) {
+        for (var i = 0; i < res.length; i++) {
+          if (res[i].error) return { ok: false, error: res[i].error.message };
+        }
+        var out = { ok: true, tasks: res[0].data || [] };
+        kinds.forEach(function (k, i) { out[k] = res[i + 1].data || []; });
+        return out;
+      }).catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    // `.select()` on every write so an RLS-filtered no-op reports as a failure
+    // instead of a false-positive success (same rule as saveWorkspace).
+    insertTaskRow: function (row) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      return c.from('tasks').insert(row).select('id')
+        .then(function (r) {
+          if (r.error) return { ok: false, error: r.error.message };
+          return { ok: !!(r.data && r.data.length), error: (r.data && r.data.length) ? null : 'Not permitted.' };
+        })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    updateTaskRow: function (id, patch) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      return c.from('tasks').update(patch).eq('id', id).select('id')
+        .then(function (r) {
+          if (r.error) return { ok: false, error: r.error.message };
+          return { ok: !!(r.data && r.data.length), error: (r.data && r.data.length) ? null : 'Not permitted.' };
+        })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    deleteTaskRow: function (id) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      return c.from('tasks').delete().eq('id', id).select('id')
+        .then(function (r) {
+          if (r.error) return { ok: false, error: r.error.message };
+          return { ok: !!(r.data && r.data.length), error: (r.data && r.data.length) ? null : 'Not permitted.' };
+        })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    // Child upserts are `upsert` so re-sending an unchanged row is harmless —
+    // that is what makes the client's diff-and-push idempotent under realtime
+    // echoes and retries.
+    upsertChildRows: function (kind, rows) {
+      var c = client();
+      var table = this._childTable[kind];
+      if (!c || !table) return Promise.resolve({ ok: false, error: 'no client' });
+      if (!rows || !rows.length) return Promise.resolve({ ok: true });
+      return c.from(table).upsert(rows).select()
+        .then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    deleteChildRows: function (kind, ids) {
+      var c = client();
+      var table = this._childTable[kind];
+      if (!c || !table) return Promise.resolve({ ok: false, error: 'no client' });
+      if (!ids || !ids.length) return Promise.resolve({ ok: true });
+      return c.from(table).delete().in('id', ids)
+        .then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    // Activity rows are keyed (task_id, seq) rather than a surrogate id, so
+    // re-sending the same entry is a no-op and the feed can only grow.
+    appendActivityRows: function (rows) {
+      var c = client();
+      if (!c) return Promise.resolve({ ok: false, error: 'no client' });
+      if (!rows || !rows.length) return Promise.resolve({ ok: true });
+      return c.from('task_activity').upsert(rows, { onConflict: 'task_id,seq' })
+        .then(function (r) { return { ok: !r.error, error: r.error && r.error.message }; })
+        .catch(function (e) { return { ok: false, error: String(e) }; });
+    },
+
+    /* Live task changes. RLS applies to realtime too, so a standard user's
+       subscription only ever yields rows they may read — nobody is subscribed
+       to an organization-wide stream. cb() fires on any change; the caller
+       refetches (the payload alone can't carry the children). */
+    subscribeTasks: function (cb) {
+      var c = client();
+      if (!c) return function () {};
+      var ch = c.channel('tasks-stream');
+      ['tasks', 'task_checklist_items', 'task_progress', 'task_comments'].forEach(function (t) {
+        ch = ch.on('postgres_changes', { event: '*', schema: 'public', table: t }, function () { cb(); });
+      });
+      ch.subscribe();
+      return function () { try { c.removeChannel(ch); } catch (_) {} };
     },
 
     // Signed URLs expire (1hr) — always resolve fresh at render time, never

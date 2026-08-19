@@ -452,6 +452,13 @@ insert into public.permissions (key, grp, layer, label, sort_order) values
   ('tasks.prioritize',   'Tasks', 'governance',     'Change priority',                         16),
   ('tasks.delete',       'Tasks', 'governance',     'Delete tasks',                            17),
   ('tasks.approve',      'Tasks', 'governance',     'Approve tasks (MD review)',               18),
+  -- Phase 3 (docs/TDD-PERSONAL-TASK-WORKSPACES.md §8.1): MANAGEMENT SCOPE.
+  -- Without it a user sees only tasks they are the assignee or reporter of;
+  -- with it they see every task in their own organization. This is the one
+  -- key that separates "personal workspace" from "management oversight", and
+  -- it is a capability an owner can grant to any role from Settings → Roles &
+  -- Permissions — management is never derived from job_title or a role name.
+  ('tasks.view_all',     'Tasks', 'governance',     'View all tasks in the organization',      19),
   -- Deliverables
   ('deliverables.read',   'Deliverables', 'execution',  'View deliverables',   20),
   ('deliverables.create', 'Deliverables', 'execution',  'Create deliverables', 21),
@@ -515,6 +522,14 @@ on conflict (key) do update
 --     admin.permissions    Roles & Permissions admin card (+ RLS on role_permissions)
 --   Client-gated + DB-enforced, 1:
 --     users.assign_roles   Users admin card + RLS on profiles (role/status writes land)
+--   Phase 3 — client-gated + DB-enforced on the NORMALIZED task tables, 3:
+--     tasks.read           RLS SELECT on public.tasks (+ nav/widgets, as before)
+--     tasks.create         RLS INSERT on public.tasks + the New task control
+--     tasks.view_all       RLS read scope (own vs whole organization) + the
+--                          management dashboard/People screen
+--   tasks.execute / assign / prioritize / delete were already enforced; on the
+--   normalized tables they now gate real per-row operations rather than the
+--   coarse "may write the blob" document policy.
 --
 -- DELIBERATELY PLANNED despite having RLS: comments.write / comments.moderate.
 -- The RLS policies on public.comments are live, but that TABLE IS UNUSED — the
@@ -526,7 +541,8 @@ on conflict (key) do update
 --
 -- Any key NOT listed here is Planned (see TDD §2.1).
 update public.permissions set enforced = key in (
-  'tasks.read', 'tasks.execute', 'tasks.assign', 'tasks.prioritize', 'tasks.delete',
+  'tasks.read', 'tasks.create', 'tasks.execute', 'tasks.assign', 'tasks.prioritize',
+  'tasks.delete', 'tasks.view_all',
   'deliverables.read', 'weekly.read', 'kpi.read', 'reports.read',
   'admin.workspace', 'admin.permissions', 'users.assign_roles'
 );
@@ -543,6 +559,7 @@ insert into public.role_templates (slug, label) values
   ('development',           'Development'),
   ('development_associate', 'Development (associate)'),
   ('testing',               'Testing'),
+  ('personal_execution',    'Personal Workspace'),
   ('read_comment',          'Read + Comment'),
   ('read_only',             'Read Only')
 on conflict (slug) do update set label = excluded.label;
@@ -557,12 +574,18 @@ select 'everything', key from public.permissions;
 
 -- Reads every template gets (reads are open to all signed-in users today;
 -- the seeded matrix mirrors that so table-driven UI == Phase-1 UI).
+--
+-- EXCEPT personal_execution (Phase 3): a self-registered member gets a PERSONAL
+-- workspace, not the organization-wide governance screens. Handing them
+-- deliverables/weekly/kpi/reports reads would put four org-wide items in their
+-- navigation on day one, which the personal-workspace requirement rules out.
+-- Their reads are granted explicitly below instead.
 insert into public.template_permissions (template_slug, permission_key)
 select t.slug, p.key
   from public.role_templates t
   cross join (values ('tasks.read'), ('deliverables.read'), ('weekly.read'),
                      ('kpi.read'), ('reports.read'), ('comments.read'), ('users.read')) as p(key)
- where t.slug <> 'everything';
+ where t.slug not in ('everything', 'personal_execution');
 
 -- comments.write: every template except read_only
 insert into public.template_permissions (template_slug, permission_key)
@@ -622,6 +645,26 @@ insert into public.template_permissions (template_slug, permission_key) values
   ('development_associate', 'tasks.create'), ('development_associate', 'tasks.execute'),
   ('development_associate', 'tasks.link');
 
+-- personal_execution (Member — the self-signup default, Phase 3): a complete
+-- PERSONAL task tracker and nothing else. Reads are the three a personal
+-- workspace genuinely needs (own tasks, comments, the member directory that
+-- backs avatars/attribution); no deliverables/weekly/kpi/reports, no
+-- tasks.view_all, no assign/prioritize/delete, no admin. Scope comes from the
+-- object relationship (assignee/reporter) enforced by RLS in Phase 3, not from
+-- extra permission keys.
+insert into public.template_permissions (template_slug, permission_key) values
+  ('personal_execution', 'tasks.read'), ('personal_execution', 'comments.read'),
+  ('personal_execution', 'users.read'),
+  ('personal_execution', 'tasks.create'), ('personal_execution', 'tasks.execute'),
+  ('personal_execution', 'tasks.edit'), ('personal_execution', 'tasks.link');
+
+-- Management scope (Phase 3): who may see OTHER people's tasks. Seeded to the
+-- two governance templates; owner gets it via 'everything'. Every other role
+-- stays personal-only until an owner grants it in Settings → Roles &
+-- Permissions — no deployment needed, which is the whole point of §8.1.
+insert into public.template_permissions (template_slug, permission_key) values
+  ('executive', 'tasks.view_all'), ('delivery_management', 'tasks.view_all');
+
 -- limited_execution (BA intern): work assigned tasks only
 insert into public.template_permissions (template_slug, permission_key) values
   ('limited_execution', 'tasks.execute');
@@ -643,6 +686,10 @@ insert into public.roles (slug, label, template_slug, is_system, sort_order) val
   ('associate_developer',     'Associate Software Engineer', 'development_associate', true, 90),
   ('qa',                      'QA Engineer',                 'testing',               true, 100),
   ('investor',                'Investor',                    'read_comment',          true, 110),
+  -- Phase 3: the safe default for SELF-REGISTERED accounts. Not 'viewer' — a
+  -- viewer cannot execute tasks, so a self-signed-up viewer would land in a
+  -- personal workspace they cannot use. handle_new_user() hardcodes this slug.
+  ('member',                  'Member',                      'personal_execution',    true, 115),
   ('viewer',                  'Viewer',                      'read_only',             true, 120)
 on conflict (slug) do update
   set label = excluded.label, template_slug = excluded.template_slug,
@@ -928,4 +975,1287 @@ end $$;
 -- ---------- 2.10 Realtime ----------
 do $$ begin
   alter publication supabase_realtime add table public.role_permissions;
+exception when duplicate_object then null; end $$;
+
+-- ============================================================
+-- ============================================================
+--  PHASE 3 — PERSONAL TASK WORKSPACES
+--  (docs/TDD-PERSONAL-TASK-WORKSPACES.md)
+--
+--  Phase 2 answered "may this ROLE do this?". It could not answer "on
+--  WHICH task?", because every task lived inside one shared jsonb
+--  document and a document has no rows to secure. Phase 3 normalises
+--  tasks into real tables so Postgres can answer both:
+--
+--      RBAC             → may this user perform this capability?
+--      object relation  → is this task theirs? (assignee / reporter)
+--      organization     → is this task even in their tenant?
+--      RLS              → enforces all three, server-side
+--
+--  Management is a CAPABILITY (tasks.view_all), never a job title and
+--  never a hardcoded role name — an owner can grant it to any role from
+--  Settings → Roles & Permissions with no deployment.
+--
+--  Idempotent like the rest of this file: tables are `if not exists`,
+--  seeds are `on conflict do nothing`, policies/triggers are dropped and
+--  recreated. The workspace document is NEVER modified here — the task
+--  migration (§3.9) is explicit, operator-run and non-destructive.
+-- ============================================================
+
+-- ---------- 3.1 Organizations (tenant boundary) ----------
+create table if not exists public.organizations (
+  id          uuid primary key default gen_random_uuid(),
+  slug        text unique not null,
+  name        text not null,
+  created_at  timestamptz not null default now()
+);
+
+-- 'team'     — a real shared organization (Evbex / FM Navigate). Membership is
+--              granted deliberately: by invitation or by an administrator.
+-- 'personal' — the private workspace every account gets at signup so that
+--              "anyone can have their own task tracker" is true without anyone
+--              being handed access to somebody else's organization (ADR 0008).
+alter table public.organizations add column if not exists kind text not null default 'team';
+alter table public.organizations add column if not exists owner_user_id uuid references auth.users(id) on delete cascade;
+do $$ begin
+  alter table public.organizations add constraint organizations_kind_check
+    check (kind in ('team', 'personal'));
+exception when duplicate_object then null; end $$;
+-- One personal workspace per account, enforced by the database rather than by
+-- the trigger remembering to check.
+create unique index if not exists organizations_one_personal_per_user
+  on public.organizations (owner_user_id) where kind = 'personal';
+
+-- Membership is the ONE source of truth for "who is in which organization".
+-- Deliberately NOT a column on profiles as well — two stores would drift.
+create table if not exists public.organization_members (
+  organization_id uuid not null references public.organizations(id) on delete cascade,
+  user_id         uuid not null references auth.users(id) on delete cascade,
+  joined_at       timestamptz not null default now(),
+  primary key (organization_id, user_id)
+);
+create index if not exists organization_members_user on public.organization_members (user_id);
+
+-- The FM Navigate deployment is single-tenant today. A FIXED uuid keeps this
+-- seed (and every back-fill that references it) idempotent across re-runs.
+insert into public.organizations (id, slug, name)
+values ('00000000-0000-0000-0000-000000000001', 'fm-navigate', 'FM Navigate')
+on conflict (id) do nothing;
+
+-- The PRIMARY (Evbex / FM Navigate) organization. Referenced by the one-shot
+-- back-fill and by the invite path — NOT by signup. A new account never joins
+-- this organization automatically (ADR 0008).
+create or replace function public.default_org_id()
+returns uuid language sql immutable as $$
+  select '00000000-0000-0000-0000-000000000001'::uuid
+$$;
+
+-- Back-fill: every account that existed BEFORE this phase belongs to the
+-- primary organization. ONE SHOT, guarded by a marker row.
+--
+-- This guard is load-bearing, not tidiness. schema.sql is re-runnable by
+-- design; an unguarded `insert … select from profiles` would sweep every
+-- public self-registered account into Evbex the next time anyone applied the
+-- file. The marker makes "existing users at rollout time" a fixed set.
+create table if not exists public.schema_markers (
+  key        text primary key,
+  applied_at timestamptz not null default now(),
+  note       text
+);
+
+do $$
+begin
+  if not exists (select 1 from public.schema_markers where key = 'phase3_backfill_primary_org') then
+    insert into public.organization_members (organization_id, user_id)
+    select public.default_org_id(), id from public.profiles
+    on conflict do nothing;
+    insert into public.schema_markers (key, note)
+    values ('phase3_backfill_primary_org',
+            'pre-Phase-3 accounts joined to the primary organization; never repeat');
+  end if;
+end $$;
+
+-- Is the caller a member of this organization? SECURITY DEFINER so policies
+-- never recurse into organization_members' own RLS, and so the check is one
+-- index probe. Fail closed: no membership row → false.
+create or replace function public.is_org_member(p_org uuid)
+returns boolean language sql stable security definer set search_path = public, pg_temp as $$
+  select exists (
+    select 1 from public.organization_members m
+     where m.organization_id = p_org and m.user_id = auth.uid()
+  )
+$$;
+
+-- Does the caller share an organization with this user? Backs the profile
+-- directory read (assignee pickers must never surface another tenant).
+create or replace function public.shares_org_with(p_user uuid)
+returns boolean language sql stable security definer set search_path = public, pg_temp as $$
+  select exists (
+    select 1 from public.organization_members a
+      join public.organization_members b on b.organization_id = a.organization_id
+     where a.user_id = auth.uid() and b.user_id = p_user
+  )
+$$;
+
+alter table public.organizations       enable row level security;
+alter table public.organization_members enable row level security;
+
+-- Read your own organizations / co-members. No INSERT/UPDATE/DELETE policy at
+-- all: membership is granted by the signup trigger and the migration (both
+-- SECURITY DEFINER) — a client can never add itself to an organization.
+drop policy if exists "organizations read (members)" on public.organizations;
+create policy "organizations read (members)"
+  on public.organizations for select to authenticated
+  using (public.is_org_member(id));
+
+drop policy if exists "organization_members read (same org)" on public.organization_members;
+create policy "organization_members read (same org)"
+  on public.organization_members for select to authenticated
+  using (public.is_org_member(organization_id));
+
+grant select on public.organizations, public.organization_members to authenticated;
+
+-- Profile directory is now organization-scoped (was: every signed-in user
+-- could read every profile). Self is always readable so an account mid-signup
+-- can load its own row before the membership row lands.
+-- Both names are dropped: the Phase-1 one because §1 recreates it every time
+-- this file is applied, and the new one because `schema.sql` is re-runnable by
+-- design (TDD §20 step 1, ADR 0008) and `create policy` has no `if not exists`.
+-- Dropping only the old name made the second apply abort here, which left the
+-- whole of §3 below unapplied and — until this statement was reached — §1's
+-- permissive `using (true)` profile read live alongside the scoped one.
+drop policy if exists "profiles read (authenticated)" on public.profiles;
+drop policy if exists "profiles read (same organization)" on public.profiles;
+create policy "profiles read (same organization)"
+  on public.profiles for select to authenticated
+  using (id = auth.uid() or public.shares_org_with(id));
+
+-- Profile ADMINISTRATION is scoped the same way, and for the same reason.
+-- §2.9's policy is `for all using (authorize('users.assign_roles'))` with no
+-- organization predicate — correct when there was one tenant, a hole the
+-- moment Phase 3 gave every public signup an organization of its own.
+-- Postgres ORs permissive policies together, so that unscoped ALL policy
+-- also answered SELECT: an administrator of one tenant could read every
+-- account on the platform, re-role another tenant's owner, and delete their
+-- profile outright. Exactly the ADR 0009 pattern — a rule that was right when
+-- written and became wrong when the data underneath it changed shape.
+--
+-- Same rule as everywhere else: capability AND tenant. Administering your own
+-- organization is unchanged; reaching outside it is not administration.
+-- Self is kept readable/writable so a user mid-signup can still load and
+-- update their own row before the membership lands (as in the read policy).
+drop policy if exists "profiles owner manage" on public.profiles;
+create policy "profiles owner manage"
+  on public.profiles for all to authenticated
+  using (public.authorize('users.assign_roles')
+         and (id = auth.uid() or public.shares_org_with(id)))
+  with check (public.authorize('users.assign_roles')
+              and (id = auth.uid() or public.shares_org_with(id)));
+
+-- ---------- 3.2 Normalized tasks ----------
+-- ids are the EXISTING display ids ('T-142') so every link, weekly-plan
+-- reference, export and audit record stays valid after the migration.
+create table if not exists public.tasks (
+  id               text primary key,
+  organization_id  uuid not null references public.organizations(id),
+  title            text not null,
+  description      text,
+  -- REPORTER = who raised it (immutable). ASSIGNEE = who is responsible for
+  -- finishing it (changeable only with tasks.assign). They are frequently the
+  -- same person: a standard user's own task is reported and assigned to them.
+  reporter_id      uuid references public.profiles(id) on delete set null,
+  assignee_id      uuid references public.profiles(id) on delete set null,
+  status           text not null default 'Not Started',
+  priority         text not null default 'Medium',
+  category         text,
+  effort           text,
+  progress         int  not null default 0,
+  due_date         timestamptz,
+  completed_at     timestamptz,
+  deliverable_id   text,
+  success_criteria text,
+  risk             text,
+  -- Value lists, not independently secured entities: always read and written
+  -- with their parent row (TDD §6.2). dependencies = free-text labels.
+  dependencies     jsonb not null default '[]'::jsonb,
+  dep_task_ids     jsonb not null default '[]'::jsonb,
+  edits            jsonb not null default '[]'::jsonb,
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now(),
+  created_by       uuid references public.profiles(id) on delete set null,
+  updated_by       uuid references public.profiles(id) on delete set null,
+  -- Migration-only forensic field: the pre-normalisation owner key when it
+  -- could not be mapped to a real account. Display data; grants nothing.
+  legacy_owner     text
+);
+
+create index if not exists tasks_org        on public.tasks (organization_id);
+create index if not exists tasks_assignee   on public.tasks (organization_id, assignee_id);
+create index if not exists tasks_reporter   on public.tasks (organization_id, reporter_id);
+create index if not exists tasks_status     on public.tasks (organization_id, status);
+create index if not exists tasks_due        on public.tasks (organization_id, due_date);
+
+create table if not exists public.task_checklist_items (
+  id                   text primary key,
+  task_id              text not null references public.tasks(id) on delete cascade,
+  title                text not null,
+  note                 text,
+  done                 boolean not null default false,
+  links                jsonb not null default '[]'::jsonb,
+  files                jsonb not null default '[]'::jsonb,
+  completed_at         timestamptz,
+  completed_by         uuid references public.profiles(id) on delete set null,
+  completed_in_log_id  text,
+  sort_order           int not null default 0
+);
+create index if not exists task_checklist_task on public.task_checklist_items (task_id, sort_order);
+
+create table if not exists public.task_progress (
+  id            text primary key,
+  task_id       text not null references public.tasks(id) on delete cascade,
+  percent       int  not null default 0,
+  status        text,
+  note          text,
+  links         jsonb not null default '[]'::jsonb,
+  files         jsonb not null default '[]'::jsonb,
+  checklist_ids jsonb not null default '[]'::jsonb,
+  user_id       uuid references public.profiles(id) on delete set null,
+  at            timestamptz not null default now(),
+  edited_at     timestamptz
+);
+create index if not exists task_progress_task on public.task_progress (task_id, at);
+
+create table if not exists public.task_resources (
+  id         text primary key,
+  task_id    text not null references public.tasks(id) on delete cascade,
+  kind       text not null default 'link',
+  title      text,
+  url        text,
+  note       text,
+  created_at timestamptz not null default now()
+);
+create index if not exists task_resources_task on public.task_resources (task_id);
+
+create table if not exists public.task_comments (
+  id         text primary key,
+  task_id    text not null references public.tasks(id) on delete cascade,
+  user_id    uuid references public.profiles(id) on delete set null,
+  body       text not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists task_comments_task on public.task_comments (task_id, created_at);
+
+-- Per-task event feed the UI renders. `seq` is the entry's position in the
+-- task's activity list, which makes the client's append-only sync idempotent
+-- (`on conflict do nothing` re-sending the same entry is a no-op).
+create table if not exists public.task_activity (
+  task_id text not null references public.tasks(id) on delete cascade,
+  seq     int  not null,
+  type    text not null,
+  user_id uuid references public.profiles(id) on delete set null,
+  at      timestamptz not null default now(),
+  detail  text,
+  primary key (task_id, seq)
+);
+
+-- ---------- 3.3 The two scope predicates ----------
+-- Every task policy is built from these, so read scope and write scope can
+-- never drift apart across the six tables. Fail closed by construction:
+-- there is no `true` branch anywhere.
+--
+--   READ  = in my organization AND I may read tasks at all
+--           AND (it is assigned to me OR I am management)
+--   WRITE = in my organization AND I may work tasks at all
+--           AND (it is assigned to me OR I am management)
+--
+-- REPORTER IS NOT IN THESE PREDICATES (ADR 0007). Who raised a task is
+-- metadata about its origin, not a standing grant over it. If a manager
+-- creates work and assigns it to somebody else — or if you raise something
+-- that is then reassigned away from you — the task is now that person's, and
+-- continued sight of it is exactly what tasks.view_all is for. Letting
+-- reporter imply access would mean a standard user keeps read AND execute
+-- rights over another person's work indefinitely, which is the behaviour this
+-- whole phase exists to prevent.
+--
+-- A future "tasks I requested" view would be its own explicit capability
+-- (tasks.view_reported) or an object-role/sharing mechanism. Not built now.
+--
+-- Column-level rules (who may change assignee / priority / organization) are
+-- NOT here: a WITH CHECK cannot see OLD, so they live in the BEFORE UPDATE
+-- trigger in §3.5 — the same pattern as protect_profile_privileges.
+
+-- Re-run safety: the predicates used to take a third (reporter) argument, and
+-- Postgres records a dependency from every SQL function and policy that calls
+-- them. Drop the old signature — and whatever still references it — before
+-- creating the new one; everything dropped here is recreated below in this
+-- same file, in order.
+drop policy if exists "tasks read (own or management)" on public.tasks;
+drop policy if exists "tasks update (assignee, reporter or management)" on public.tasks;
+drop policy if exists "tasks update (assignee or management)" on public.tasks;
+drop policy if exists "tasks delete (governance)" on public.tasks;
+drop function if exists public.task_read_ok(uuid, uuid, uuid) cascade;
+drop function if exists public.task_write_ok(uuid, uuid, uuid) cascade;
+
+create or replace function public.task_read_ok(p_org uuid, p_assignee uuid)
+returns boolean language sql stable as $$
+  select public.is_org_member(p_org)
+     and public.authorize('tasks.read')
+     and (p_assignee = auth.uid() or public.authorize('tasks.view_all'))
+$$;
+
+create or replace function public.task_write_ok(p_org uuid, p_assignee uuid)
+returns boolean language sql stable as $$
+  select public.is_org_member(p_org)
+     and public.authorize('tasks.execute')
+     and (p_assignee = auth.uid() or public.authorize('tasks.view_all'))
+$$;
+
+-- Child-row helpers: a child row is exactly as visible/writable as its parent
+-- task. Expressed once, reused by all five child tables.
+create or replace function public.parent_task_readable(p_task text)
+returns boolean language sql stable as $$
+  select exists (
+    select 1 from public.tasks t
+     where t.id = p_task
+       and public.task_read_ok(t.organization_id, t.assignee_id)
+  )
+$$;
+
+create or replace function public.parent_task_writable(p_task text)
+returns boolean language sql stable as $$
+  select exists (
+    select 1 from public.tasks t
+     where t.id = p_task
+       and public.task_write_ok(t.organization_id, t.assignee_id)
+  )
+$$;
+
+-- ---------- 3.4 RLS ----------
+alter table public.tasks                 enable row level security;
+alter table public.task_checklist_items  enable row level security;
+alter table public.task_progress         enable row level security;
+alter table public.task_resources        enable row level security;
+alter table public.task_comments         enable row level security;
+alter table public.task_activity         enable row level security;
+
+grant select, insert, update, delete on
+  public.tasks, public.task_checklist_items, public.task_progress,
+  public.task_resources, public.task_comments, public.task_activity
+  to authenticated;
+
+drop policy if exists "tasks read (own or management)" on public.tasks;
+create policy "tasks read (own or management)"
+  on public.tasks for select to authenticated
+  using (public.task_read_ok(organization_id, assignee_id));
+
+-- CREATE. A standard user may only ever create a task for THEMSELVES:
+-- reporter and assignee both forced to auth.uid(). Creating for someone else
+-- is the tasks.assign capability. reporter_id/created_by are pinned to the
+-- caller, so a forged payload is REJECTED (not silently corrected).
+--
+-- Being the reporter grants nothing on its own (§3.3): a manager who creates
+-- work for someone else can still see it because they hold tasks.view_all,
+-- not because they raised it.
+drop policy if exists "tasks insert (self or assigner)" on public.tasks;
+create policy "tasks insert (self or assigner)"
+  on public.tasks for insert to authenticated
+  with check (
+    public.is_org_member(organization_id)
+    and public.authorize('tasks.create')
+    and reporter_id = auth.uid()
+    and created_by  = auth.uid()
+    and (assignee_id = auth.uid() or public.authorize('tasks.assign'))
+  );
+
+-- UPDATE. Both USING and WITH CHECK use the write predicate, so a task can
+-- never be edited out of the caller's own scope (e.g. reassigning it away and
+-- keeping the edit) — the post-image must still be writable by the caller.
+create policy "tasks update (assignee or management)"
+  on public.tasks for update to authenticated
+  using (public.task_write_ok(organization_id, assignee_id))
+  with check (public.task_write_ok(organization_id, assignee_id));
+
+drop policy if exists "tasks delete (governance)" on public.tasks;
+create policy "tasks delete (governance)"
+  on public.tasks for delete to authenticated
+  using (public.task_read_ok(organization_id, assignee_id)
+         and public.authorize('tasks.delete'));
+
+-- Children: read with the parent, write with the parent.
+drop policy if exists "checklist read"  on public.task_checklist_items;
+drop policy if exists "checklist write" on public.task_checklist_items;
+create policy "checklist read"  on public.task_checklist_items for select to authenticated
+  using (public.parent_task_readable(task_id));
+create policy "checklist write" on public.task_checklist_items for all to authenticated
+  using (public.parent_task_writable(task_id))
+  with check (public.parent_task_writable(task_id));
+
+drop policy if exists "task_progress read"   on public.task_progress;
+drop policy if exists "task_progress insert" on public.task_progress;
+drop policy if exists "task_progress amend"  on public.task_progress;
+drop policy if exists "task_progress remove" on public.task_progress;
+create policy "task_progress read" on public.task_progress for select to authenticated
+  using (public.parent_task_readable(task_id));
+-- You log progress AS YOURSELF; governance may amend/remove anyone's entry,
+-- everyone else only their own (mirrors the app's existing rule, now enforced).
+create policy "task_progress insert" on public.task_progress for insert to authenticated
+  with check (public.parent_task_writable(task_id) and user_id = auth.uid());
+create policy "task_progress amend" on public.task_progress for update to authenticated
+  using (public.parent_task_writable(task_id)
+         and (user_id = auth.uid() or public.authorize('admin.workspace')))
+  with check (public.parent_task_writable(task_id));
+create policy "task_progress remove" on public.task_progress for delete to authenticated
+  using (public.parent_task_writable(task_id)
+         and (user_id = auth.uid() or public.authorize('admin.workspace')));
+
+drop policy if exists "task_resources read"  on public.task_resources;
+drop policy if exists "task_resources write" on public.task_resources;
+create policy "task_resources read"  on public.task_resources for select to authenticated
+  using (public.parent_task_readable(task_id));
+create policy "task_resources write" on public.task_resources for all to authenticated
+  using (public.parent_task_writable(task_id))
+  with check (public.parent_task_writable(task_id));
+
+drop policy if exists "task_comments read"   on public.task_comments;
+drop policy if exists "task_comments insert" on public.task_comments;
+drop policy if exists "task_comments amend"  on public.task_comments;
+drop policy if exists "task_comments remove" on public.task_comments;
+create policy "task_comments read" on public.task_comments for select to authenticated
+  using (public.parent_task_readable(task_id));
+create policy "task_comments insert" on public.task_comments for insert to authenticated
+  with check (public.parent_task_writable(task_id)
+              and user_id = auth.uid()
+              and public.authorize('comments.write'));
+create policy "task_comments amend" on public.task_comments for update to authenticated
+  using (user_id = auth.uid() or public.authorize('comments.moderate'))
+  with check (public.parent_task_readable(task_id));
+create policy "task_comments remove" on public.task_comments for delete to authenticated
+  using (public.parent_task_readable(task_id)
+         and (user_id = auth.uid() or public.authorize('comments.moderate')));
+
+-- Activity feed: append-only per task. No UPDATE/DELETE policy, so the feed
+-- can be added to but never rewritten (same guarantee as activity_log).
+drop policy if exists "task_activity read"   on public.task_activity;
+drop policy if exists "task_activity append" on public.task_activity;
+create policy "task_activity read" on public.task_activity for select to authenticated
+  using (public.parent_task_readable(task_id));
+create policy "task_activity append" on public.task_activity for insert to authenticated
+  with check (public.parent_task_writable(task_id) and user_id = auth.uid());
+
+-- ---------- 3.5 Column-level governance + integrity ----------
+-- What a WITH CHECK cannot express (it never sees OLD): who may change the
+-- assignee, who may change the priority, and which columns are immutable.
+create or replace function public.protect_task_governance()
+returns trigger language plpgsql as $$
+begin
+  if tg_op = 'INSERT' then
+    -- An assignee must belong to the task's organization: assignment can never
+    -- leak a task across the tenant boundary.
+    if new.assignee_id is not null and not exists (
+         select 1 from public.organization_members m
+          where m.organization_id = new.organization_id and m.user_id = new.assignee_id) then
+      raise exception 'assignee is not a member of this organization' using errcode = '42501';
+    end if;
+    return new;
+  end if;
+
+  -- Identity + tenancy are immutable: a task never changes id, organization,
+  -- or who raised it.
+  if new.id is distinct from old.id then
+    raise exception 'a task id cannot be changed' using errcode = '42501';
+  end if;
+  if new.organization_id is distinct from old.organization_id then
+    raise exception 'a task cannot move between organizations' using errcode = '42501';
+  end if;
+  if new.reporter_id is distinct from old.reporter_id then
+    raise exception 'the reporter of a task cannot be changed' using errcode = '42501';
+  end if;
+
+  -- Assign / reassign is a capability, not a side effect of being able to edit.
+  if new.assignee_id is distinct from old.assignee_id then
+    if not public.authorize('tasks.assign') then
+      raise exception 'not permitted to assign or reassign tasks' using errcode = '42501';
+    end if;
+    if new.assignee_id is not null and not exists (
+         select 1 from public.organization_members m
+          where m.organization_id = new.organization_id and m.user_id = new.assignee_id) then
+      raise exception 'assignee is not a member of this organization' using errcode = '42501';
+    end if;
+  end if;
+
+  if new.priority is distinct from old.priority and not public.authorize('tasks.prioritize') then
+    raise exception 'not permitted to change priority' using errcode = '42501';
+  end if;
+
+  new.updated_at := now();
+  new.updated_by := coalesce(auth.uid(), old.updated_by);
+  return new;
+end $$;
+
+drop trigger if exists protect_task_governance on public.tasks;
+create trigger protect_task_governance
+  before insert or update on public.tasks
+  for each row execute function public.protect_task_governance();
+
+-- ---------- 3.6 Task audit (organization audit trail) ----------
+-- The six task events, written in the DATABASE so they cannot be skipped by a
+-- client that forgets to log. These land in the existing append-only
+-- activity_log (security/organization audit); the per-task feed the UI renders
+-- is task_activity, written by the app — the two are different records, not
+-- duplicates of the same one.
+create or replace function public.log_task_event()
+returns trigger security definer set search_path = public, pg_temp language plpgsql as $$
+declare actor uuid := auth.uid();
+begin
+  if tg_op = 'INSERT' then
+    insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+    values (actor, 'task_created', 'task', new.id,
+            jsonb_build_object('title', new.title, 'assignee', new.assignee_id, 'reporter', new.reporter_id));
+    if new.assignee_id is not null and new.assignee_id is distinct from new.reporter_id then
+      insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+      values (actor, 'task_assigned', 'task', new.id, jsonb_build_object('to', new.assignee_id));
+    end if;
+    return null;
+  end if;
+
+  if new.assignee_id is distinct from old.assignee_id then
+    insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+    values (actor, 'task_reassigned', 'task', new.id,
+            jsonb_build_object('was', old.assignee_id, 'now', new.assignee_id));
+  end if;
+  if new.status is distinct from old.status then
+    insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+    values (actor, 'task_status_changed', 'task', new.id,
+            jsonb_build_object('was', old.status, 'now', new.status));
+    if new.status = 'Completed' then
+      insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+      values (actor, 'task_completed', 'task', new.id, jsonb_build_object('assignee', new.assignee_id));
+    end if;
+  end if;
+  if new.priority is distinct from old.priority then
+    insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+    values (actor, 'task_priority_changed', 'task', new.id,
+            jsonb_build_object('was', old.priority, 'now', new.priority));
+  end if;
+  return null;
+end $$;
+
+drop trigger if exists log_task_event on public.tasks;
+create trigger log_task_event
+  after insert or update on public.tasks
+  for each row execute function public.log_task_event();
+
+-- ---------- 3.7 Self-registration ----------
+-- Replaces the Phase-1 version (which defaulted every new account to 'viewer'
+-- and had no organization). Anyone may now create their own account; what they
+-- GET is decided here, server-side:
+--
+--   1. the profile, with role = 'member' — HARDCODED, never read from client
+--      metadata, so a tampered signup payload cannot request Owner/Executive/
+--      Product Manager/administrator/management/any other role;
+--   2. their OWN personal workspace, and membership of that and nothing else;
+--   3. nothing in any existing organization.
+--
+-- CREATING AN ACCOUNT IS NOT JOINING A COMPANY (ADR 0008). The previous
+-- version auto-joined the primary organization, which meant anyone who could
+-- reach the signup form became an Evbex workspace member. Account and
+-- membership are now separate facts: registration grants the first, and only
+-- an invitation or an administrator grants the second (§3.7b).
+--
+-- The personal workspace is what keeps "anyone can have their own task
+-- tracker" true. It is an ordinary organization with kind='personal', so every
+-- task policy, the tenant boundary and the whole client work there unchanged —
+-- no second code path, no special case in RLS.
+--
+-- Only `name` is taken from client metadata — a display string that grants
+-- nothing. Later self-service role changes are already blocked by
+-- protect_profile_privileges (requires users.assign_roles).
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer set search_path = public, pg_temp as $fn$
+declare
+  v_role text := 'member';
+  v_name text := coalesce(nullif(new.raw_user_meta_data->>'name', ''), new.email, 'Member');
+  v_org  uuid;
+begin
+  -- Deploy-order safety: if the Phase-2/3 role seed hasn't run yet, fall back
+  -- to the always-present 'viewer' rather than failing the signup on the FK.
+  if not exists (select 1 from public.roles where slug = v_role) then
+    v_role := 'viewer';
+  end if;
+
+  insert into public.profiles (id, email, name, role)
+  values (new.id, new.email, v_name, v_role)
+  on conflict (id) do nothing;
+
+  -- The account's own workspace. Deterministic slug, so a replayed trigger is
+  -- a no-op rather than a duplicate.
+  insert into public.organizations (slug, name, kind, owner_user_id)
+  values ('personal-' || new.id::text,
+          left(v_name, 40) || '''s Workspace',
+          'personal', new.id)
+  on conflict (slug) do nothing;
+
+  select id into v_org from public.organizations where slug = 'personal-' || new.id::text;
+  if v_org is not null then
+    insert into public.organization_members (organization_id, user_id)
+    values (v_org, new.id)
+    on conflict do nothing;
+  end if;
+
+  return new;
+end $fn$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
+
+-- ---------- 3.7b Joining a real organization ----------
+-- The ONLY way into a team organization. organization_members has no INSERT
+-- policy at all, so this SECURITY DEFINER function is not one path among
+-- several — it is the path, and it authorizes the caller before it writes.
+--
+-- Gated on users.assign_roles: the capability that already means "may decide
+-- what other people can do here". Deliberately NOT a new permission key —
+-- inventing one would add a switch to the admin screen for what is the same
+-- administrative act.
+--
+-- An invitation flow (email → accept) can be layered on later by having the
+-- acceptance step call exactly this function; the authorization boundary would
+-- not move.
+create or replace function public.add_organization_member(p_org uuid, p_user uuid)
+returns void language plpgsql security definer set search_path = public, pg_temp as $fn$
+begin
+  if not public.authorize('users.assign_roles') then
+    raise exception 'not permitted' using errcode = '42501';
+  end if;
+  -- An administrator may only admit people to an organization they are in
+  -- themselves; nobody hands out membership of a tenant they cannot see.
+  if not public.is_org_member(p_org) then
+    raise exception 'not a member of that organization' using errcode = '42501';
+  end if;
+  -- A personal workspace has exactly one member, forever.
+  if exists (select 1 from public.organizations where id = p_org and kind = 'personal') then
+    raise exception 'a personal workspace cannot take additional members' using errcode = '42501';
+  end if;
+  if not exists (select 1 from public.profiles where id = p_user) then
+    raise exception 'unknown user' using errcode = '22023';
+  end if;
+
+  insert into public.organization_members (organization_id, user_id)
+  values (p_org, p_user)
+  on conflict do nothing;
+
+  insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+  values (auth.uid(), 'organization_member_added', 'organization', p_org::text,
+          jsonb_build_object('user', p_user));
+end $fn$;
+
+revoke execute on function public.add_organization_member(uuid, uuid) from public, anon;
+grant  execute on function public.add_organization_member(uuid, uuid) to authenticated;
+
+create or replace function public.remove_organization_member(p_org uuid, p_user uuid)
+returns void language plpgsql security definer set search_path = public, pg_temp as $fn$
+begin
+  if not public.authorize('users.assign_roles') then
+    raise exception 'not permitted' using errcode = '42501';
+  end if;
+  if not public.is_org_member(p_org) then
+    raise exception 'not a member of that organization' using errcode = '42501';
+  end if;
+  if exists (select 1 from public.organizations where id = p_org and kind = 'personal') then
+    raise exception 'a personal workspace cannot be emptied' using errcode = '42501';
+  end if;
+
+  delete from public.organization_members where organization_id = p_org and user_id = p_user;
+
+  insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+  values (auth.uid(), 'organization_member_removed', 'organization', p_org::text,
+          jsonb_build_object('user', p_user));
+end $fn$;
+
+revoke execute on function public.remove_organization_member(uuid, uuid) from public, anon;
+grant  execute on function public.remove_organization_member(uuid, uuid) to authenticated;
+
+-- Back-fill: give every pre-existing account its personal workspace too, so
+-- the model is uniform. One shot, same marker discipline as the org back-fill.
+do $do$
+declare r record; v_org uuid;
+begin
+  if not exists (select 1 from public.schema_markers where key = 'phase3_personal_workspaces') then
+    for r in select id, coalesce(nullif(name, ''), email, 'Member') as nm from public.profiles loop
+      insert into public.organizations (slug, name, kind, owner_user_id)
+      values ('personal-' || r.id::text, left(r.nm, 40) || '''s Workspace', 'personal', r.id)
+      on conflict (slug) do nothing;
+      select id into v_org from public.organizations where slug = 'personal-' || r.id::text;
+      if v_org is not null then
+        insert into public.organization_members (organization_id, user_id)
+        values (v_org, r.id) on conflict do nothing;
+      end if;
+    end loop;
+    insert into public.schema_markers (key, note)
+    values ('phase3_personal_workspaces', 'personal workspace created for pre-Phase-3 accounts');
+  end if;
+end $do$;
+
+-- ---------- 3.8 Legacy owner mapping ----------
+-- The pre-normalisation document identified people by a workspace key
+-- ('vihan', 'richard', 'isuru', or 'email:someone@example.com') rather than an
+-- auth uuid. The operator maps those to real accounts BEFORE running the
+-- migration; anything unmapped migrates as UNASSIGNED (never silently handed
+-- to the wrong person) and keeps its original key in tasks.legacy_owner.
+--   insert into public.legacy_user_map (legacy_key, user_id)
+--   values ('vihan', '<uuid>') on conflict (legacy_key) do update set user_id = excluded.user_id;
+create table if not exists public.legacy_user_map (
+  legacy_key text primary key,
+  user_id    uuid not null references public.profiles(id) on delete cascade
+);
+alter table public.legacy_user_map enable row level security;
+drop policy if exists "legacy_user_map read (authenticated)" on public.legacy_user_map;
+create policy "legacy_user_map read (authenticated)"
+  on public.legacy_user_map for select to authenticated using (true);
+grant select on public.legacy_user_map to authenticated;
+
+-- Migration-internal only. It is SECURITY DEFINER and takes arbitrary text, so
+-- leaving it callable would hand any signed-in user a probe for "is this string
+-- a real account?". migrate_workspace_tasks is itself DEFINER and owned by the
+-- same role, so it can still call this after the grants below.
+create or replace function public.map_legacy_user(p_key text)
+returns uuid language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare v uuid;
+begin
+  if p_key is null or p_key = '' then return null; end if;
+  -- Post-Phase-1 records already carry the real profile uuid as the key.
+  if p_key ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$' then
+    select id into v from public.profiles where id = p_key::uuid;
+    if v is not null then return v; end if;
+  end if;
+  select user_id into v from public.legacy_user_map where legacy_key = p_key;
+  return v;
+end $$;
+
+-- Not callable from a client; the migration calls it as its owner.
+revoke execute on function public.map_legacy_user(text) from public, anon, authenticated;
+
+-- ---------- 3.9 Workspace document → normalized tasks ----------
+-- Deterministic, idempotent, non-destructive, DRY-RUN BY DEFAULT.
+--   select * from public.migrate_workspace_tasks(false);  -- report only
+--   select * from public.migrate_workspace_tasks(true);   -- commit
+-- The workspace document is never written to, so the legacy client keeps
+-- working and rollback is "stop reading the new tables". Every insert is
+-- `on conflict do nothing` keyed on the ORIGINAL id, so a partial run is
+-- safely resumable and a second run is a no-op.
+create or replace function public.migrate_workspace_tasks(p_commit boolean default false)
+returns table (metric text, value bigint)
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  v_raw       jsonb;
+  v_tasks     jsonb;
+  v_task      jsonb;
+  v_org       uuid := public.default_org_id();
+  v_assignee  uuid;
+  v_reporter  uuid;
+  v_owner_key text;
+  v_seq       int;
+  v_item      jsonb;
+  n_tasks     bigint := 0;
+  n_existing  bigint := 0;
+  n_unmapped  bigint := 0;
+  n_check     bigint := 0;
+  n_prog      bigint := 0;
+  n_res       bigint := 0;
+  n_comm      bigint := 0;
+  n_act       bigint := 0;
+begin
+  if not public.authorize('admin.restore') then
+    raise exception 'not permitted' using errcode = '42501';
+  end if;
+
+  select w.tasks into v_raw from public.workspace w where w.id = 'main';
+  -- v2 document { version, metadata, data:{ tasks: [...] } }; a bare array is
+  -- the v1 legacy shape.
+  if v_raw is null then
+    v_tasks := '[]'::jsonb;
+  elsif jsonb_typeof(v_raw) = 'array' then
+    v_tasks := v_raw;
+  else
+    v_tasks := coalesce(v_raw #> '{data,tasks}', '[]'::jsonb);
+  end if;
+  if jsonb_typeof(v_tasks) <> 'array' then v_tasks := '[]'::jsonb; end if;
+
+  for v_task in select * from jsonb_array_elements(v_tasks) loop
+    -- Deliverables live in the same array tagged kind:'deliverable' — they are
+    -- NOT tasks and stay in the document.
+    continue when coalesce(v_task->>'kind', 'task') = 'deliverable';
+    continue when coalesce(v_task->>'id', '') = '';
+
+    n_tasks := n_tasks + 1;
+    if exists (select 1 from public.tasks t where t.id = v_task->>'id') then
+      n_existing := n_existing + 1;
+      continue;
+    end if;
+
+    v_owner_key := v_task->>'ownerId';
+    v_assignee  := public.map_legacy_user(v_owner_key);
+    -- Reporter = whoever the activity feed records as having created it;
+    -- falls back to the assignee (a task nobody else raised is your own).
+    v_reporter := public.map_legacy_user((
+      select a->>'userId' from jsonb_array_elements(coalesce(v_task->'activity', '[]'::jsonb)) a
+       where a->>'type' = 'created' limit 1));
+    if v_reporter is null then v_reporter := v_assignee; end if;
+    if v_assignee is null then n_unmapped := n_unmapped + 1; end if;
+
+    n_check := n_check + jsonb_array_length(coalesce(v_task->'checklist',   '[]'::jsonb));
+    n_prog  := n_prog  + jsonb_array_length(coalesce(v_task->'progressLog', '[]'::jsonb));
+    n_res   := n_res   + jsonb_array_length(coalesce(v_task->'resources',   '[]'::jsonb));
+    n_comm  := n_comm  + jsonb_array_length(coalesce(v_task->'comments',    '[]'::jsonb));
+    n_act   := n_act   + jsonb_array_length(coalesce(v_task->'activity',    '[]'::jsonb));
+
+    continue when not p_commit;
+
+    insert into public.tasks (
+      id, organization_id, title, description, reporter_id, assignee_id,
+      status, priority, category, effort, progress, due_date, completed_at,
+      deliverable_id, success_criteria, risk, dependencies, dep_task_ids, edits,
+      created_at, updated_at, created_by, updated_by, legacy_owner)
+    values (
+      v_task->>'id', v_org,
+      coalesce(nullif(v_task->>'title', ''), '(untitled)'), v_task->>'description',
+      v_reporter, v_assignee,
+      coalesce(nullif(v_task->>'status', ''),   'Not Started'),
+      coalesce(nullif(v_task->>'priority', ''), 'Medium'),
+      v_task->>'category', v_task->>'effort',
+      coalesce((v_task->>'progress')::int, 0),
+      nullif(v_task->>'dueDate', '')::timestamptz,
+      nullif(v_task->>'completedAt', '')::timestamptz,
+      v_task->>'deliverableId', v_task->>'successCriteria', v_task->>'risk',
+      coalesce(v_task->'dependencies', '[]'::jsonb),
+      coalesce(v_task->'depTaskIds',   '[]'::jsonb),
+      coalesce(v_task->'edits',        '[]'::jsonb),
+      coalesce(nullif(v_task->>'createdAt', '')::timestamptz, now()),
+      coalesce(nullif(v_task->>'updatedAt', '')::timestamptz, now()),
+      v_reporter, v_reporter,
+      case when v_assignee is null then v_owner_key else null end);
+
+    insert into public.task_checklist_items (id, task_id, title, note, done, links, files,
+                                             completed_at, completed_by, completed_in_log_id, sort_order)
+    select c->>'id', v_task->>'id', coalesce(c->>'title', ''), c->>'note',
+           coalesce((c->>'done')::boolean, false),
+           coalesce(c->'links', '[]'::jsonb), coalesce(c->'files', '[]'::jsonb),
+           nullif(c->>'completedAt', '')::timestamptz,
+           public.map_legacy_user(c->>'completedBy'), c->>'completedInLogId', ord::int
+      from jsonb_array_elements(coalesce(v_task->'checklist', '[]'::jsonb)) with ordinality as x(c, ord)
+     where coalesce(c->>'id', '') <> ''
+    on conflict (id) do nothing;
+
+    insert into public.task_progress (id, task_id, percent, status, note, links, files,
+                                      checklist_ids, user_id, at, edited_at)
+    select p->>'id', v_task->>'id', coalesce((p->>'percent')::int, 0), p->>'status', p->>'note',
+           coalesce(p->'links', '[]'::jsonb), coalesce(p->'files', '[]'::jsonb),
+           coalesce(p->'checklistIds', '[]'::jsonb),
+           public.map_legacy_user(p->>'userId'),
+           coalesce(nullif(p->>'at', '')::timestamptz, now()),
+           nullif(p->>'editedAt', '')::timestamptz
+      from jsonb_array_elements(coalesce(v_task->'progressLog', '[]'::jsonb)) p
+     where coalesce(p->>'id', '') <> ''
+    on conflict (id) do nothing;
+
+    insert into public.task_resources (id, task_id, kind, title, url, note)
+    select r->>'id', v_task->>'id', coalesce(r->>'kind', 'link'), r->>'title', r->>'url', r->>'note'
+      from jsonb_array_elements(coalesce(v_task->'resources', '[]'::jsonb)) r
+     where coalesce(r->>'id', '') <> ''
+    on conflict (id) do nothing;
+
+    insert into public.task_comments (id, task_id, user_id, body, created_at)
+    select k->>'id', v_task->>'id', public.map_legacy_user(k->>'userId'),
+           coalesce(k->>'comment', k->>'body', ''),
+           coalesce(nullif(k->>'createdAt', '')::timestamptz, now())
+      from jsonb_array_elements(coalesce(v_task->'comments', '[]'::jsonb)) k
+     where coalesce(k->>'id', '') <> ''
+    on conflict (id) do nothing;
+
+    v_seq := 0;
+    for v_item in select * from jsonb_array_elements(coalesce(v_task->'activity', '[]'::jsonb)) loop
+      insert into public.task_activity (task_id, seq, type, user_id, at, detail)
+      values (v_task->>'id', v_seq, coalesce(v_item->>'type', 'edit'),
+              public.map_legacy_user(v_item->>'userId'),
+              coalesce(nullif(v_item->>'at', '')::timestamptz, now()),
+              v_item->>'detail')
+      on conflict do nothing;
+      v_seq := v_seq + 1;
+    end loop;
+  end loop;
+
+  return query
+    select 'committed'::text,          case when p_commit then 1 else 0 end::bigint
+    union all select 'document_tasks',  n_tasks
+    union all select 'already_present', n_existing
+    union all select 'tasks_written',   case when p_commit then n_tasks - n_existing else 0 end
+    union all select 'unmapped_owners', n_unmapped
+    union all select 'checklist_items', n_check
+    union all select 'progress_entries', n_prog
+    union all select 'resources',       n_res
+    union all select 'comments',        n_comm
+    union all select 'activity_entries', n_act;
+end $$;
+
+revoke execute on function public.migrate_workspace_tasks(boolean) from public, anon;
+grant  execute on function public.migrate_workspace_tasks(boolean) to authenticated;
+
+-- Post-migration verification: for every task IN THE DOCUMENT, does the
+-- normalized side hold the same thing? Counts are scoped to the document's own
+-- ids on both sides, so the check stays meaningful forever — tasks created
+-- natively after the migration are new work, not a missing migration.
+--   select * from public.verify_task_migration();
+-- Green = `matches` is true on every row and unmapped_owners is a number the
+-- operator accepts (each one is a task whose legacy owner key had no account).
+create or replace function public.verify_task_migration()
+returns table (metric text, in_document bigint, in_tables bigint, matches boolean)
+language plpgsql security definer set search_path = public, pg_temp as $$
+declare
+  v_raw   jsonb;
+  v_tasks jsonb;
+begin
+  if not public.authorize('admin.audit_log') then
+    raise exception 'not permitted' using errcode = '42501';
+  end if;
+
+  select w.tasks into v_raw from public.workspace w where w.id = 'main';
+  if v_raw is null then v_tasks := '[]'::jsonb;
+  elsif jsonb_typeof(v_raw) = 'array' then v_tasks := v_raw;
+  else v_tasks := coalesce(v_raw #> '{data,tasks}', '[]'::jsonb); end if;
+
+  return query
+  with doc as (
+    select t from jsonb_array_elements(v_tasks) t
+     where coalesce(t->>'kind', 'task') <> 'deliverable' and coalesce(t->>'id', '') <> ''
+  ), ids as (
+    select t->>'id' as id from doc
+  ), d as (
+    select
+      count(*)                                                                     as tasks,
+      coalesce(sum(jsonb_array_length(coalesce(t->'checklist',   '[]'::jsonb))), 0) as checklist,
+      coalesce(sum(jsonb_array_length(coalesce(t->'progressLog', '[]'::jsonb))), 0) as progress,
+      coalesce(sum(jsonb_array_length(coalesce(t->'resources',   '[]'::jsonb))), 0) as resources,
+      coalesce(sum(jsonb_array_length(coalesce(t->'comments',    '[]'::jsonb))), 0) as comments,
+      coalesce(sum(jsonb_array_length(coalesce(t->'activity',    '[]'::jsonb))), 0) as activity
+      from doc
+  ), m as (
+    select
+      (select count(*) from public.tasks                where id      in (select id from ids)) as tasks,
+      (select count(*) from public.task_checklist_items where task_id in (select id from ids)) as checklist,
+      (select count(*) from public.task_progress        where task_id in (select id from ids)) as progress,
+      (select count(*) from public.task_resources       where task_id in (select id from ids)) as resources,
+      (select count(*) from public.task_comments        where task_id in (select id from ids)) as comments,
+      (select count(*) from public.task_activity        where task_id in (select id from ids)) as activity,
+      (select count(*) from public.tasks where id in (select id from ids) and assignee_id is null) as unmapped
+  )
+  select 'tasks',            d.tasks,     m.tasks,     d.tasks     = m.tasks     from d, m
+  union all
+  select 'ids_preserved',    d.tasks,     m.tasks,     d.tasks     = m.tasks     from d, m
+  union all
+  select 'checklist_items',  d.checklist, m.checklist, d.checklist = m.checklist from d, m
+  union all
+  select 'progress_entries', d.progress,  m.progress,  d.progress  = m.progress  from d, m
+  union all
+  select 'resources',        d.resources, m.resources, d.resources = m.resources from d, m
+  union all
+  select 'comments',         d.comments,  m.comments,  d.comments  = m.comments  from d, m
+  union all
+  select 'activity_entries', d.activity,  m.activity,  d.activity  = m.activity  from d, m
+  union all
+  -- Informational, not a failure on its own: tasks whose legacy owner key had
+  -- no mapped account. They migrate UNASSIGNED and surface in the management
+  -- "Unassigned" widget for someone to pick up.
+  select 'unmapped_owners',  0::bigint,   m.unmapped,  true                      from m;
+end $$;
+
+revoke execute on function public.verify_task_migration() from public, anon;
+grant  execute on function public.verify_task_migration() to authenticated;
+
+-- ---------- 3.10 Closing the legacy read paths ----------
+-- Normalising tasks is only half the privacy story: the OLD copies are still
+-- reachable. Two of them, both closed here.
+--
+-- (a) The workspace document. Its SELECT policy was `using (true)` — any
+--     signed-in user could read the whole blob, tasks included. The document's
+--     remaining purpose is organization-wide governance content (deliverables,
+--     weekly plans, KPI scores), so its gate is now the capability that
+--     governs exactly that content. A personal-workspace Member holds none of
+--     it and therefore cannot read the document at all — which is what stops
+--     them reading everybody's tasks out of the legacy copy.
+--     Writing additionally still needs tasks.execute, unchanged for every
+--     delivery role, so the pre-migration client keeps working: you may write
+--     the document only if you can see the document.
+drop policy if exists "workspace read (authenticated)" on public.workspace;
+drop policy if exists "workspace read (document scope)" on public.workspace;
+create policy "workspace read (document scope)"
+  on public.workspace for select to authenticated
+  using (
+    public.authorize('deliverables.read')
+    -- …AND the document must not still be carrying task data. deliverables.read
+    -- is the right gate for the document's REMAINING content (deliverables,
+    -- weekly plans, KPI); it is the wrong gate for tasks, and a Business
+    -- Analyst holding it would otherwise read everybody's tasks straight out
+    -- of the legacy blob while the normalized tables correctly refuse them.
+    --
+    -- So the rule is about what the row CONTAINS, not just who is asking:
+    -- while task payload is present the whole document is management-only.
+    -- Running archive_workspace_tasks() (§3.11) empties it and restores normal
+    -- access for everyone — which is why that step belongs immediately after
+    -- migration verification in the runbook, not "some time later".
+    and (
+      public.authorize('tasks.view_all')
+      or jsonb_array_length(coalesce(tasks #> '{data,tasks}', '[]'::jsonb)) = 0
+    )
+  );
+
+drop policy if exists "workspace write (role)" on public.workspace;
+create policy "workspace write (role)"
+  on public.workspace for update to authenticated
+  using (public.authorize('deliverables.read') and public.authorize('tasks.execute'))
+  with check (public.authorize('deliverables.read') and public.authorize('tasks.execute'));
+
+-- (b) Task attachments in Storage. The bucket was readable by every signed-in
+--     user, so progress-log evidence for someone else's task was one path
+--     guess (or one list call) away. Attachment paths start with the task id
+--     ("T-142/<entry>/<file>"), so access can follow the task itself.
+--
+--     SECURITY DEFINER so the "does this task exist?" probe is not itself
+--     filtered by RLS — otherwise a task the caller may NOT read would look
+--     like a task that does not exist and fall through to the legacy branch.
+--     That legacy branch is what keeps PRE-MIGRATION attachments reachable:
+--     until a task has a row, its files follow the document's own gate.
+create or replace function public.attachment_task_id(p_name text)
+returns text language sql immutable as $$ select split_part(p_name, '/', 1) $$;
+
+-- The legacy branch below applies ONLY before the migration has run. Once any
+-- task row exists, an attachment whose path names no known task is an orphan,
+-- and an orphan must not be a way around the task rules: it needs management
+-- scope. Otherwise a role holding deliverables.read could read attachments by
+-- guessing a path that happens not to resolve — the exact class of hole this
+-- correction round is closing on the workspace document.
+create or replace function public.attachment_readable(p_name text)
+returns boolean language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare v_task text := public.attachment_task_id(p_name);
+begin
+  if exists (select 1 from public.tasks where id = v_task) then
+    return public.parent_task_readable(v_task);
+  end if;
+  if exists (select 1 from public.tasks) then          -- migration has run
+    return public.authorize('tasks.view_all');
+  end if;
+  return public.authorize('deliverables.read');        -- pre-migration only
+end $$;
+
+create or replace function public.attachment_writable(p_name text)
+returns boolean language plpgsql stable security definer set search_path = public, pg_temp as $$
+declare v_task text := public.attachment_task_id(p_name);
+begin
+  if exists (select 1 from public.tasks where id = v_task) then
+    return public.parent_task_writable(v_task);
+  end if;
+  if exists (select 1 from public.tasks) then
+    return public.authorize('tasks.view_all') and public.authorize('tasks.execute');
+  end if;
+  return public.authorize('deliverables.read') and public.authorize('tasks.execute');
+end $$;
+
+drop policy if exists "task-attachments read (authenticated)" on storage.objects;
+drop policy if exists "task-attachments read (task scope)" on storage.objects;
+create policy "task-attachments read (task scope)"
+  on storage.objects for select to authenticated
+  using (bucket_id = 'task-attachments' and public.attachment_readable(name));
+
+drop policy if exists "task-attachments write (role)" on storage.objects;
+create policy "task-attachments write (role)"
+  on storage.objects for insert to authenticated
+  with check (bucket_id = 'task-attachments' and public.attachment_writable(name));
+
+drop policy if exists "task-attachments update (role)" on storage.objects;
+create policy "task-attachments update (role)"
+  on storage.objects for update to authenticated
+  using (bucket_id = 'task-attachments' and public.attachment_writable(name));
+
+drop policy if exists "task-attachments delete (role)" on storage.objects;
+create policy "task-attachments delete (role)"
+  on storage.objects for delete to authenticated
+  using (bucket_id = 'task-attachments' and public.attachment_writable(name));
+
+-- (c) The audit log. Its SELECT policy was `using (true)` from Phase 1, when it
+--     only held role changes. Phase 3 started writing task events into it —
+--     task_created carries the title, task_status_changed carries the
+--     transition — so an unscoped audit log became a complete index of
+--     everybody's work, readable by anyone signed in. Same invariant, so the
+--     same rule: a row ABOUT A TASK is visible exactly when the task is.
+--     Everything else is your own actions, or requires the audit capability.
+drop policy if exists "activity read (authenticated)" on public.activity_log;
+drop policy if exists "activity read (scoped)" on public.activity_log;
+create policy "activity read (scoped)"
+  on public.activity_log for select to authenticated
+  using (
+    case
+      when entity_type = 'task' then public.parent_task_readable(entity_id)
+      else user_id = auth.uid() or public.authorize('admin.audit_log')
+    end
+  );
+
+-- (d) public.comments — the generic Phase-1 comment table. It is UNUSED (task
+--     comments live in public.task_comments, §3.2) and therefore empty, but it
+--     is keyed by (entity_type, entity_id) and was readable with `using (true)`.
+--     An empty table is not a security argument: if anything ever writes a
+--     task comment there it must not become the way around the task rules.
+drop policy if exists "comments read (authenticated)" on public.comments;
+drop policy if exists "comments read (scoped)" on public.comments;
+create policy "comments read (scoped)"
+  on public.comments for select to authenticated
+  using (
+    case when entity_type = 'task' then public.parent_task_readable(entity_id)
+         else public.authorize('comments.read') end
+  );
+
+--     Writing needs the same treatment, and the test suite caught that it did
+--     not have it: the insert policy only checked "is this comment yours" and
+--     "may you comment", so a standard user could attach a row to ANOTHER
+--     person's task id. Unreadable to them afterwards, but still a write into
+--     someone else's stream — the same hole from the other side.
+drop policy if exists "comments insert (non-viewer)" on public.comments;
+drop policy if exists "comments insert (scoped)" on public.comments;
+create policy "comments insert (scoped)"
+  on public.comments for insert to authenticated
+  with check (
+    auth.uid() = user_id
+    and public.authorize('comments.write')
+    and (entity_type <> 'task' or public.parent_task_writable(entity_id))
+  );
+
+-- (e) legacy_user_map — the migration's legacy-key → account table. No client
+--     reads it (only migrate_workspace_tasks does, as its owner), and letting
+--     anyone read it would hand a public self-registered account a partial
+--     staff directory. Policy removed entirely: RLS on, no policy, no access.
+drop policy if exists "legacy_user_map read (authenticated)" on public.legacy_user_map;
+revoke all on public.legacy_user_map from anon, authenticated;
+
+-- ---------- 3.11 Retiring the document's task copy (archive, not delete) ----
+-- After migration the document still holds a full copy of every task. That
+-- copy is the rollback source, so it is not deleted — but it must not sit in
+-- the shared document either, because the document is read by roles that have
+-- no business seeing other people's tasks (§3.10a makes such a document
+-- management-only, which is safe but takes Deliverables/Weekly/KPI away from
+-- everyone else until this runs).
+--
+-- So: MOVE it. The payload goes to an administrator-only archive table and the
+-- shared document's task array is emptied. Rollback stays possible in two
+-- independent ways — the operator's export, and restore_workspace_tasks() —
+-- while ordinary workspace reads stop carrying anybody's tasks.
+--
+-- Explicit, separately invoked, dry-run by default, owner-gated, and it
+-- REFUSES to run unless verify_task_migration() is green. Never automatic and
+-- never called by any client.
+create table if not exists public.workspace_task_archive (
+  id           bigserial primary key,
+  workspace_id text not null,
+  archived_at  timestamptz not null default now(),
+  archived_by  uuid references auth.users(id) on delete set null,
+  task_count   int not null,
+  payload      jsonb not null
+);
+
+alter table public.workspace_task_archive enable row level security;
+-- No policy for `authenticated` AT ALL: the archive is reachable only through
+-- the SECURITY DEFINER functions below, both of which authorize first. A
+-- table with RLS enabled and no policy denies everyone, which is the point.
+revoke all on public.workspace_task_archive from anon, authenticated;
+
+create or replace function public.archive_workspace_tasks(p_commit boolean default false)
+returns text language plpgsql security definer set search_path = public, pg_temp as $fn$
+declare
+  v_bad   int;
+  v_tasks jsonb;
+  v_n     int;
+begin
+  if not public.authorize('admin.restore') then
+    raise exception 'not permitted' using errcode = '42501';
+  end if;
+
+  select count(*) into v_bad from public.verify_task_migration()
+   where not matches and metric <> 'unmapped_owners';
+  if v_bad > 0 then
+    raise exception 'migration verification is not green (% mismatching metric(s)) — refusing to archive', v_bad;
+  end if;
+
+  select coalesce(w.tasks #> '{data,tasks}', '[]'::jsonb) into v_tasks
+    from public.workspace w where w.id = 'main';
+  v_n := jsonb_array_length(coalesce(v_tasks, '[]'::jsonb));
+
+  if not p_commit then
+    return format('dry run: would archive %s task entries out of the workspace document', v_n);
+  end if;
+
+  insert into public.workspace_task_archive (workspace_id, archived_by, task_count, payload)
+  values ('main', auth.uid(), v_n, v_tasks);
+
+  update public.workspace
+     set tasks = jsonb_set(tasks, '{data,tasks}', '[]'::jsonb),
+         updated_at = now()
+   where id = 'main';
+
+  insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+  values (auth.uid(), 'workspace_tasks_archived', 'workspace', 'main',
+          jsonb_build_object('task_count', v_n));
+
+  return format('archived %s task entries; the shared document no longer carries task data', v_n);
+end $fn$;
+
+revoke execute on function public.archive_workspace_tasks(boolean) from public, anon;
+grant  execute on function public.archive_workspace_tasks(boolean) to authenticated;
+
+-- The rollback half. Puts the most recent archived payload back into the
+-- document, so "stop reading the new tables" remains a complete rollback even
+-- after archiving. Owner-gated and dry-run by default, like its counterpart.
+create or replace function public.restore_workspace_tasks(p_commit boolean default false)
+returns text language plpgsql security definer set search_path = public, pg_temp as $fn$
+declare
+  v_row public.workspace_task_archive%rowtype;
+begin
+  if not public.authorize('admin.restore') then
+    raise exception 'not permitted' using errcode = '42501';
+  end if;
+
+  select * into v_row from public.workspace_task_archive
+   where workspace_id = 'main' order by archived_at desc, id desc limit 1;
+  if v_row.id is null then
+    return 'nothing archived for workspace main — nothing to restore';
+  end if;
+
+  if not p_commit then
+    return format('dry run: would restore %s task entries archived at %s',
+                  v_row.task_count, v_row.archived_at);
+  end if;
+
+  update public.workspace
+     set tasks = jsonb_set(tasks, '{data,tasks}', v_row.payload),
+         updated_at = now()
+   where id = 'main';
+
+  insert into public.activity_log (user_id, action, entity_type, entity_id, meta)
+  values (auth.uid(), 'workspace_tasks_restored', 'workspace', 'main',
+          jsonb_build_object('task_count', v_row.task_count, 'archived_at', v_row.archived_at));
+
+  return format('restored %s task entries into the workspace document', v_row.task_count);
+end $fn$;
+
+revoke execute on function public.restore_workspace_tasks(boolean) from public, anon;
+grant  execute on function public.restore_workspace_tasks(boolean) to authenticated;
+
+-- ---------- 3.12 Realtime ----------
+-- RLS applies to realtime, so a standard user's subscription only ever yields
+-- rows they may read — no client is subscribed to an organization-wide stream.
+do $$ begin alter publication supabase_realtime add table public.tasks;
+exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table public.task_checklist_items;
+exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table public.task_progress;
+exception when duplicate_object then null; end $$;
+do $$ begin alter publication supabase_realtime add table public.task_comments;
 exception when duplicate_object then null; end $$;
