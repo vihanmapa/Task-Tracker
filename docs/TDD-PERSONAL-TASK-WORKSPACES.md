@@ -383,7 +383,12 @@ Two guards protect the existing installation:
 - the Evbex back-fill is **one-shot behind a marker row** (`schema_markers`).
   `schema.sql` is re-runnable by design, and an unguarded
   `insert … select from profiles` would have swept every public account into
-  Evbex the next time anyone applied the file;
+  Evbex the next time anyone applied the file. The marker table is therefore a
+  tenancy control, not bookkeeping, and is locked down like one: RLS on, no
+  policy, default grants revoked. It held no application data, so it was the
+  one table in `public` that never got RLS — and a guard anyone can delete over
+  PostgREST is not a guard, because the deletion re-arms the back-fill and the
+  runbook's first rollout step is to apply this file again;
 - every pre-existing account also gets a personal workspace, so the model is
   uniform rather than split between old and new users.
 
