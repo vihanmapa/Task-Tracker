@@ -1022,6 +1022,63 @@ reset role;
 select public.test_sign_out();
 
 -- ============================================================
+-- Advisor parity — function execution + search_path
+-- ------------------------------------------------------------
+-- PostgreSQL grants EXECUTE on new functions to PUBLIC by default. Privileged
+-- helpers may still be required by authenticated RLS/storage policies, while
+-- trigger functions need no client EXECUTE privilege at all.
+-- ============================================================
+select tests.check('advisor: no SECURITY DEFINER function is executable by anon',
+  not exists (
+    select 1
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'
+       and p.prosecdef
+       and has_function_privilege('anon', p.oid, 'execute')
+  ));
+
+select tests.check('advisor: trigger DEFINER functions reject direct authenticated execution',
+  not exists (
+    select 1
+      from pg_proc p
+      join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public'
+       and p.proname in (
+         'handle_new_user', 'log_permission_change',
+         'log_profile_admin_action', 'log_task_event'
+       )
+       and has_function_privilege('authenticated', p.oid, 'execute')
+  ));
+
+select tests.check('advisor: authenticated policy helpers remain executable',
+  (select count(*) = 5 and bool_and(has_function_privilege('authenticated', p.oid, 'execute'))
+     from pg_proc p
+     join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and p.proname in (
+        'attachment_readable', 'attachment_writable', 'authorize',
+        'is_org_member', 'shares_org_with'
+      )));
+
+select tests.check('advisor: every mutable-path target has a pinned search_path',
+  (select count(*) = 13
+     from pg_proc p
+     join pg_namespace n on n.oid = p.pronamespace
+    where n.nspname = 'public'
+      and p.proname in (
+        'jwt_role', 'protect_profile_privileges', 'protect_last_owner_delete',
+        'custom_access_token_hook', 'forbid_owner_revoke', 'protect_system_roles',
+        'default_org_id', 'task_read_ok', 'task_write_ok',
+        'parent_task_readable', 'parent_task_writable',
+        'protect_task_governance', 'attachment_task_id'
+      )
+      and exists (
+        select 1 from unnest(p.proconfig) setting
+         where setting like 'search_path=%'
+      )));
+
+-- ============================================================
 -- Advisor parity — rls_disabled_in_public
 -- ------------------------------------------------------------
 -- Supabase grants ALL on every table created in `public` to `anon` and

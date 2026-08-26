@@ -33,7 +33,7 @@ end $$;
 -- throughout the policies below. (Do NOT use the top-level `role` claim — that's
 -- the Postgres role.) The claim is stamped by custom_access_token_hook (sec. 2).
 create or replace function public.jwt_role()
-returns text language sql stable as $$
+returns text language sql stable set search_path = '' as $$
   select coalesce(
     nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'user_role',
     'viewer'
@@ -78,7 +78,7 @@ create policy "profiles owner manage"
 
 -- Block privilege escalation: only an owner may change role or status.
 create or replace function public.protect_profile_privileges()
-returns trigger language plpgsql as $$
+returns trigger language plpgsql set search_path = '' as $$
 begin
   -- Only an owner may change anyone's role or status.
   if (new.role is distinct from old.role or new.status is distinct from old.status)
@@ -107,7 +107,7 @@ create trigger protect_profile_privileges
 -- Same lockout protection for DELETE: the last active owner's profile can't be
 -- removed (covers both direct deletes and cascade from deleting the auth user).
 create or replace function public.protect_last_owner_delete()
-returns trigger language plpgsql as $$
+returns trigger language plpgsql set search_path = '' as $$
 begin
   if old.role = 'owner' and old.status = 'active'
      and (select count(*) from public.profiles
@@ -133,6 +133,9 @@ begin
   return new;
 end $$;
 
+-- Trigger-only: trigger execution does not require client EXECUTE privilege.
+revoke execute on function public.handle_new_user() from public, anon, authenticated;
+
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
   after insert on auth.users
@@ -145,7 +148,7 @@ create trigger on_auth_user_created
 --    "Custom Access Token" → select public.custom_access_token_hook.
 -- ============================================================
 create or replace function public.custom_access_token_hook(event jsonb)
-returns jsonb language plpgsql stable as $$
+returns jsonb language plpgsql stable set search_path = '' as $$
 declare
   claims   jsonb;
   v_role   text;
@@ -346,6 +349,9 @@ begin
   end if;
   return null;  -- AFTER trigger: return value ignored
 end $$;
+
+-- Trigger-only: prevent direct RPC execution by untrusted client roles.
+revoke execute on function public.log_profile_admin_action() from public, anon, authenticated;
 
 drop trigger if exists log_profile_admin_action on public.profiles;
 create trigger log_profile_admin_action
@@ -746,11 +752,15 @@ language sql stable security definer set search_path = public as $$
   );
 $$;
 
+-- RLS helper: authenticated policies need it, anonymous/direct public calls do not.
+revoke execute on function public.authorize(text) from public, anon;
+grant execute on function public.authorize(text) to authenticated;
+
 -- ---------- 2.7 Guardrails + audit ----------
 -- Owner grants are immutable: nothing can be revoked from 'owner', so an
 -- owner can never lock themselves (and everyone else) out of administration.
 create or replace function public.forbid_owner_revoke()
-returns trigger language plpgsql as $$
+returns trigger language plpgsql set search_path = '' as $$
 begin
   if old.role_slug = 'owner' then
     raise exception 'the owner role''s permissions are immutable';
@@ -766,7 +776,7 @@ create trigger protect_owner_grants
 
 -- System roles cannot be deleted or renamed (their grants stay editable).
 create or replace function public.protect_system_roles()
-returns trigger language plpgsql as $$
+returns trigger language plpgsql set search_path = '' as $$
 begin
   if tg_op = 'DELETE' then
     if old.is_system then raise exception 'system roles cannot be deleted'; end if;
@@ -800,6 +810,9 @@ begin
           jsonb_build_object('permission', old.permission_key));
   return null;
 end $$;
+
+-- Trigger-only: prevent direct RPC execution by untrusted client roles.
+revoke execute on function public.log_permission_change() from public, anon, authenticated;
 
 drop trigger if exists log_permission_change on public.role_permissions;
 create trigger log_permission_change
@@ -955,7 +968,7 @@ create policy "profiles owner manage"
 
 -- Privilege-escalation guard now checks the capability too.
 create or replace function public.protect_profile_privileges()
-returns trigger language plpgsql as $$
+returns trigger language plpgsql set search_path = '' as $$
 begin
   if (new.role is distinct from old.role or new.status is distinct from old.status)
      and not public.authorize('users.assign_roles') then
@@ -1046,7 +1059,7 @@ on conflict (id) do nothing;
 -- back-fill and by the invite path — NOT by signup. A new account never joins
 -- this organization automatically (ADR 0008).
 create or replace function public.default_org_id()
-returns uuid language sql immutable as $$
+returns uuid language sql immutable set search_path = '' as $$
   select '00000000-0000-0000-0000-000000000001'::uuid
 $$;
 
@@ -1104,6 +1117,9 @@ returns boolean language sql stable security definer set search_path = public, p
   )
 $$;
 
+revoke execute on function public.is_org_member(uuid) from public, anon;
+grant execute on function public.is_org_member(uuid) to authenticated;
+
 -- Does the caller share an organization with this user? Backs the profile
 -- directory read (assignee pickers must never surface another tenant).
 create or replace function public.shares_org_with(p_user uuid)
@@ -1114,6 +1130,9 @@ returns boolean language sql stable security definer set search_path = public, p
      where a.user_id = auth.uid() and b.user_id = p_user
   )
 $$;
+
+revoke execute on function public.shares_org_with(uuid) from public, anon;
+grant execute on function public.shares_org_with(uuid) to authenticated;
 
 alter table public.organizations       enable row level security;
 alter table public.organization_members enable row level security;
@@ -1315,14 +1334,14 @@ drop function if exists public.task_read_ok(uuid, uuid, uuid) cascade;
 drop function if exists public.task_write_ok(uuid, uuid, uuid) cascade;
 
 create or replace function public.task_read_ok(p_org uuid, p_assignee uuid)
-returns boolean language sql stable as $$
+returns boolean language sql stable set search_path = '' as $$
   select public.is_org_member(p_org)
      and public.authorize('tasks.read')
      and (p_assignee = auth.uid() or public.authorize('tasks.view_all'))
 $$;
 
 create or replace function public.task_write_ok(p_org uuid, p_assignee uuid)
-returns boolean language sql stable as $$
+returns boolean language sql stable set search_path = '' as $$
   select public.is_org_member(p_org)
      and public.authorize('tasks.execute')
      and (p_assignee = auth.uid() or public.authorize('tasks.view_all'))
@@ -1331,7 +1350,7 @@ $$;
 -- Child-row helpers: a child row is exactly as visible/writable as its parent
 -- task. Expressed once, reused by all five child tables.
 create or replace function public.parent_task_readable(p_task text)
-returns boolean language sql stable as $$
+returns boolean language sql stable set search_path = '' as $$
   select exists (
     select 1 from public.tasks t
      where t.id = p_task
@@ -1340,7 +1359,7 @@ returns boolean language sql stable as $$
 $$;
 
 create or replace function public.parent_task_writable(p_task text)
-returns boolean language sql stable as $$
+returns boolean language sql stable set search_path = '' as $$
   select exists (
     select 1 from public.tasks t
      where t.id = p_task
@@ -1464,7 +1483,7 @@ create policy "task_activity append" on public.task_activity for insert to authe
 -- What a WITH CHECK cannot express (it never sees OLD): who may change the
 -- assignee, who may change the priority, and which columns are immutable.
 create or replace function public.protect_task_governance()
-returns trigger language plpgsql as $$
+returns trigger language plpgsql set search_path = '' as $$
 begin
   if tg_op = 'INSERT' then
     -- An assignee must belong to the task's organization: assignment can never
@@ -1558,6 +1577,9 @@ begin
   return null;
 end $$;
 
+-- Trigger-only: prevent direct RPC execution by untrusted client roles.
+revoke execute on function public.log_task_event() from public, anon, authenticated;
+
 drop trigger if exists log_task_event on public.tasks;
 create trigger log_task_event
   after insert or update on public.tasks
@@ -1622,6 +1644,9 @@ begin
 
   return new;
 end $fn$;
+
+-- Reassert after the Phase-3 replacement of the Phase-1 trigger function.
+revoke execute on function public.handle_new_user() from public, anon, authenticated;
 
 drop trigger if exists on_auth_user_created on auth.users;
 create trigger on_auth_user_created
@@ -2045,7 +2070,7 @@ create policy "workspace write (role)"
 --     That legacy branch is what keeps PRE-MIGRATION attachments reachable:
 --     until a task has a row, its files follow the document's own gate.
 create or replace function public.attachment_task_id(p_name text)
-returns text language sql immutable as $$ select split_part(p_name, '/', 1) $$;
+returns text language sql immutable set search_path = '' as $$ select split_part(p_name, '/', 1) $$;
 
 -- The legacy branch below applies ONLY before the migration has run. Once any
 -- task row exists, an attachment whose path names no known task is an orphan,
@@ -2078,6 +2103,13 @@ begin
   end if;
   return public.authorize('deliverables.read') and public.authorize('tasks.execute');
 end $$;
+
+-- Storage-policy helpers remain callable by signed-in requests, but never by
+-- anonymous callers or through PostgreSQL's implicit PUBLIC function grant.
+revoke execute on function public.attachment_readable(text) from public, anon;
+revoke execute on function public.attachment_writable(text) from public, anon;
+grant execute on function public.attachment_readable(text) to authenticated;
+grant execute on function public.attachment_writable(text) to authenticated;
 
 drop policy if exists "task-attachments read (authenticated)" on storage.objects;
 drop policy if exists "task-attachments read (task scope)" on storage.objects;
