@@ -24,9 +24,11 @@ create table if not exists tests.results (
   note   text
 );
 truncate tests.results restart identity;
-grant usage on schema tests to authenticated;
-grant insert, select on tests.results to authenticated;
-grant usage, select on sequence tests.results_id_seq to authenticated;
+-- `anon` records results too: the advisor-parity block below probes the REST
+-- surface as the UNAUTHENTICATED role, which is the one an attacker holds.
+grant usage on schema tests to authenticated, anon;
+grant insert, select on tests.results to authenticated, anon;
+grant usage, select on sequence tests.results_id_seq to authenticated, anon;
 
 -- Record a boolean assertion. SECURITY INVOKER on purpose: a DEFINER helper
 -- would run the checks as the table owner and silently BYPASS RLS, which
@@ -1012,17 +1014,74 @@ select tests.check('re-apply: the surviving profiles policy is the org-scoped on
   exists (select 1 from pg_policies
     where schemaname = 'public' and tablename = 'profiles' and cmd = 'SELECT'
       and policyname = 'profiles read (same organization)'));
--- And the guards that keep a re-apply from changing data: the back-fill
--- markers mean a second apply never sweeps a public account into Evbex.
-select tests.check('re-apply: both one-shot back-fill markers are recorded',
-  (select count(*) from public.schema_markers
-    where key in ('phase3_backfill_primary_org', 'phase3_personal_workspaces')) = 2);
 select tests.check('re-apply: no account has two personal workspaces',
   not exists (select owner_user_id from public.organizations
                where kind = 'personal' group by owner_user_id having count(*) > 1));
 
 reset role;
 select public.test_sign_out();
+
+-- ============================================================
+-- Advisor parity — rls_disabled_in_public
+-- ------------------------------------------------------------
+-- Supabase grants ALL on every table created in `public` to `anon` and
+-- `authenticated` by default (harness.sql reproduces exactly that), so a table
+-- in this schema is reachable over PostgREST the moment it exists, with the
+-- committed anon key as the only credential. RLS is the ONLY thing between it
+-- and the internet — which is what Supabase's `rls_disabled_in_public` lint is
+-- telling us when it fires.
+--
+-- schema_markers is the table that got missed, because it holds no application
+-- data — only the one-shot migration guards. That made it look harmless and it
+-- is the opposite: deleting 'phase3_backfill_primary_org' re-arms
+--     insert into organization_members select default_org_id(), id from profiles
+-- so the operator's next (by-design re-runnable) apply of schema.sql sweeps
+-- EVERY self-registered account into the primary tenant, where is_org_member()
+-- and shares_org_with() then hand each of them the whole of it. The
+-- mirror-image write is as bad: planting a marker key BEFORE a rollout
+-- silently suppresses the migration that key guards.
+--
+-- Nothing outside the SQL editor ever reads this table, so the fix is the
+-- workspace_task_archive shape — RLS on, no policy, grants revoked — and these
+-- assertions are what keep it that way.
+-- ============================================================
+select tests.check('advisor: every table in public has RLS enabled',
+  not exists (select 1 from pg_tables where schemaname = 'public' and not rowsecurity),
+  'unprotected: ' || coalesce((select string_agg(tablename, ', ' order by tablename)
+                                 from pg_tables
+                                where schemaname = 'public' and not rowsecurity), 'none'));
+
+set role anon;
+select tests.expect_denied('schema_markers: anon cannot read the migration guards', $q$
+  select key from public.schema_markers
+$q$);
+select tests.expect_denied('schema_markers: anon cannot delete the Evbex back-fill guard', $q$
+  delete from public.schema_markers where key = 'phase3_backfill_primary_org'
+$q$);
+select tests.expect_denied('schema_markers: anon cannot plant a guard to suppress a migration', $q$
+  insert into public.schema_markers (key, note) values ('phase9_unrun', 'planted')
+$q$);
+reset role;
+
+set role authenticated;
+select public.test_sign_in('55555555-5555-5555-5555-555555555555');
+select tests.expect_denied('schema_markers: a signed-in member cannot read the guards', $q$
+  select key from public.schema_markers
+$q$);
+select tests.expect_denied('schema_markers: a signed-in member cannot delete a guard', $q$
+  delete from public.schema_markers where key = 'phase3_personal_workspaces'
+$q$);
+reset role;
+select public.test_sign_out();
+
+-- And, as the operator: the guards that keep a re-apply from changing data are
+-- both still there and still readable by the role that actually applies the
+-- file. Locking a table down is only correct if it stays usable from inside.
+select tests.check('re-apply: both one-shot back-fill markers are recorded',
+  (select count(*) from public.schema_markers
+    where key in ('phase3_backfill_primary_org', 'phase3_personal_workspaces')) = 2);
+select tests.check('re-apply: no marker was planted by a client',
+  (select count(*) from public.schema_markers) = 2);
 
 -- ============================================================
 -- Report

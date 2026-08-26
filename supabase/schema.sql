@@ -1063,6 +1063,24 @@ create table if not exists public.schema_markers (
   note       text
 );
 
+-- This table holds no application data, which is exactly why it was easy to
+-- miss — and why leaving it open was the worst of the three. Supabase grants
+-- ALL on every table in `public` to `anon` and `authenticated` by default, so
+-- without RLS this guard was editable over PostgREST by anyone holding the
+-- (deliberately public) anon key. Deleting the row below re-arms the one-shot
+-- back-fill, and the runbook's first rollout step is to re-apply this file:
+-- the next apply would then sweep EVERY self-registered account into the
+-- primary organization, where is_org_member() and shares_org_with() hand each
+-- of them the whole tenant. Planting a key does the reverse — it silently
+-- suppresses a migration that has not run yet.
+--
+-- Same shape as workspace_task_archive below: RLS on with NO policy, and the
+-- default grants revoked, which denies every client outright. Nothing outside
+-- the SQL editor reads this table — the guarded `do` blocks run as the owner
+-- during an apply, and owners bypass RLS.
+alter table public.schema_markers enable row level security;
+revoke all on public.schema_markers from anon, authenticated;
+
 do $$
 begin
   if not exists (select 1 from public.schema_markers where key = 'phase3_backfill_primary_org') then
