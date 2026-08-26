@@ -96,4 +96,8 @@ end $$;
 create or replace function public.test_sign_out()
 returns void language sql security definer as $$ select set_config('request.jwt.claims', '', false) $$;
 
+-- Test-only SECURITY DEFINER helpers follow the same ACL discipline as the
+-- production functions so the advisor-parity assertion is not polluted by
+-- harness-only anonymous grants.
+revoke execute on function public.test_sign_in(uuid), public.test_sign_out() from public, anon;
 grant execute on function public.test_sign_in(uuid), public.test_sign_out() to authenticated;
