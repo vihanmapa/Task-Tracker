@@ -29,9 +29,8 @@ live (21 tables, 47 RLS policies, 30 functions, 9 triggers, 54 constraints,
 
 `supabase/schema.sql` remains the hand-maintained, idempotent script that
 production is updated with and that CI tests. For a **new** project use the
-migrations instead: they are a single verified snapshot and also carry what
-`schema.sql` does not (`private_resources`, the task-scoped storage policies'
-live state, the `main` workspace row).
+migrations instead: they are a single verified snapshot and also carry the
+`private_resources` table, which `schema.sql` does not.
 
 ## What the migrations do NOT give you
 
