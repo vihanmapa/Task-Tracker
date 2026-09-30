@@ -27,8 +27,11 @@ live (21 tables, 47 RLS policies, 30 functions, 9 triggers, 54 constraints,
 | `…000100_baseline_platform.sql` | `auth.users` sign-up trigger, `task-attachments` bucket + its 4 policies, realtime publication, grant hardening |
 | `…000200_baseline_reference_data.sql` | RBAC catalogue (42 permissions, 13 roles, 202 grants), primary organization, empty `main` workspace row |
 
-`supabase/schema.sql` is the older hand-maintained script and is **behind** the
-live database. Use the migrations, not `schema.sql`, for a new project.
+`supabase/schema.sql` remains the hand-maintained, idempotent script that
+production is updated with and that CI tests. For a **new** project use the
+migrations instead: they are a single verified snapshot and also carry what
+`schema.sql` does not (`private_resources`, the task-scoped storage policies'
+live state, the `main` workspace row).
 
 ## What the migrations do NOT give you
 
@@ -95,11 +98,14 @@ Without it no JWT carries a `user_role` claim, every user is treated as
 
 ### 4. Create the first user
 
-The app signs in with email + password and has no sign-up screen.
+The app signs in with email + password.
 
 Dashboard → **Authentication → Users** → **Add user** → email + password, tick
-**Auto Confirm User**. A `profiles` row and a personal workspace are created
-automatically.
+**Auto Confirm User**. (The app's own **Create account** screen also works, but
+is subject to your project's email-confirmation setting.) Either way a
+`profiles` row with role `member` and a personal workspace are created
+automatically — and nothing else: a new account sees no shared data until it is
+joined to the primary organization.
 
 ### 5. Promote that user to owner and join the primary organization
 
@@ -129,9 +135,19 @@ holds `users.assign_roles`, and the SQL Editor carries no role claim. A bare
 `update profiles set role = 'owner'` fails with *only an administrator may
 change role or status*.
 
-After this, add further users in the dashboard (step 4) and assign their roles
-from the app: **Settings → Users**. Users added later must also be joined to the
-primary organization to see shared work.
+After this, add further users the same way (step 4) and assign their roles from
+the app: **Settings → Users**. Each must also be joined to the primary
+organization to see shared work — in the SQL Editor:
+
+```sql
+insert into public.organization_members (organization_id, user_id)
+select public.default_org_id(), id from public.profiles where email = 'colleague@example.com'
+on conflict do nothing;
+```
+
+(`public.add_organization_member()` does the same with permission checks, but
+only for a signed-in administrator; it refuses calls from the SQL Editor.)
+See [RBAC-SETUP.md](RBAC-SETUP.md) for the role and workspace model.
 
 ### 6. Point your local app at your project
 
