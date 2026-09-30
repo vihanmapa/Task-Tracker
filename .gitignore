@@ -20,3 +20,6 @@ package-lock.json
 dist/
 supabase/backups/
 supabase/.temp/
+
+# Per-developer backend override (see fm-navigate/config.local.example.js)
+fm-navigate/config.local.js
